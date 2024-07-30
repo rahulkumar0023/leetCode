@@ -4,9 +4,8 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="08a15b4e-e32b-466c-af5a-bbc4226858a4" name="Changes" comment="First commit july 28 solutions">
-      <change afterPath="$PROJECT_DIR$/src/main/java/Jul/Jul30/MaxProfit.java" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+    <list default="true" id="08a15b4e-e32b-466c-af5a-bbc4226858a4" name="Changes" comment="July 30 solutions">
+      <change afterPath="$PROJECT_DIR$/src/main/java/Jul/Jul30/SingleNumber.java" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -124,7 +123,7 @@
       <workItem from="1701113418238" duration="115000" />
       <workItem from="1701113538913" duration="1000" />
       <workItem from="1701113562453" duration="5844000" />
-      <workItem from="1722183396347" duration="3313000" />
+      <workItem from="1722183396347" duration="3619000" />
     </task>
     <task id="LOCAL-00001" summary="First commit july 28 solutions">
       <option name="closed" value="true" />
@@ -134,7 +133,15 @@
       <option name="project" value="LOCAL" />
       <updated>1722185763770</updated>
     </task>
-    <option name="localTasksCounter" value="2" />
+    <task id="LOCAL-00002" summary="July 30 solutions">
+      <option name="closed" value="true" />
+      <created>1722342798959</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1722342798959</updated>
+    </task>
+    <option name="localTasksCounter" value="3" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -153,7 +160,8 @@
   </component>
   <component name="VcsManagerConfiguration">
     <MESSAGE value="First commit july 28 solutions" />
-    <option name="LAST_COMMIT_MESSAGE" value="First commit july 28 solutions" />
+    <MESSAGE value="July 30 solutions" />
+    <option name="LAST_COMMIT_MESSAGE" value="July 30 solutions" />
   </component>
   <component name="XDebuggerManager">
     <breakpoint-manager>
