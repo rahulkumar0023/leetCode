@@ -5,7 +5,8 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="08a15b4e-e32b-466c-af5a-bbc4226858a4" name="Changes" comment="July 30 solutions">
-      <change afterPath="$PROJECT_DIR$/src/main/java/Jul/Jul30/SingleNumber.java" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/main/java/Jul/Jul30/MajorityElement.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -35,6 +36,7 @@
   <component name="PropertiesComponent"><![CDATA[{
   "keyToString": {
     "Application.App.executor": "Debug",
+    "Application.MajorityElement.executor": "Debug",
     "Application.MaxProfit.executor": "Debug",
     "Application.PascalsTriangle.executor": "Run",
     "RunOnceActivity.OpenProjectViewOnStart": "true",
@@ -52,7 +54,7 @@
     "project.structure.last.edited": "Artifacts",
     "project.structure.proportion": "0.15",
     "project.structure.side.proportion": "0.2",
-    "settings.editor.selected.configurable": "project.propCompiler",
+    "settings.editor.selected.configurable": "preferences.keymap",
     "vue.rearranger.settings.migration": "true"
   }
 }]]></component>
@@ -61,7 +63,20 @@
       <recent name="" />
     </key>
   </component>
-  <component name="RunManager" selected="Application.MaxProfit">
+  <component name="RunManager" selected="Application.MajorityElement">
+    <configuration name="MajorityElement" type="Application" factoryName="Application" temporary="true" nameIsGenerated="true">
+      <option name="MAIN_CLASS_NAME" value="Jul.Jul30.MajorityElement" />
+      <module name="LeetCode" />
+      <extension name="coverage">
+        <pattern>
+          <option name="PATTERN" value="Jul.Jul30.*" />
+          <option name="ENABLED" value="true" />
+        </pattern>
+      </extension>
+      <method v="2">
+        <option name="Make" enabled="true" />
+      </method>
+    </configuration>
     <configuration name="MaxProfit" type="Application" factoryName="Application" temporary="true" nameIsGenerated="true">
       <option name="MAIN_CLASS_NAME" value="Jul.Jul30.MaxProfit" />
       <module name="LeetCode" />
@@ -97,6 +112,7 @@
     </configuration>
     <recent_temporary>
       <list>
+        <item itemvalue="Application.MajorityElement" />
         <item itemvalue="Application.MaxProfit" />
         <item itemvalue="Application.PascalsTriangle" />
         <item itemvalue="Application.MergeSortedArray" />
@@ -123,7 +139,7 @@
       <workItem from="1701113418238" duration="115000" />
       <workItem from="1701113538913" duration="1000" />
       <workItem from="1701113562453" duration="5844000" />
-      <workItem from="1722183396347" duration="3619000" />
+      <workItem from="1722183396347" duration="4469000" />
     </task>
     <task id="LOCAL-00001" summary="First commit july 28 solutions">
       <option name="closed" value="true" />
@@ -141,7 +157,15 @@
       <option name="project" value="LOCAL" />
       <updated>1722342798959</updated>
     </task>
-    <option name="localTasksCounter" value="3" />
+    <task id="LOCAL-00003" summary="July 30 solutions">
+      <option name="closed" value="true" />
+      <created>1722343128297</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1722343128297</updated>
+    </task>
+    <option name="localTasksCounter" value="4" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -276,7 +300,31 @@
           <line>23</line>
           <option name="timeStamp" value="24" />
         </line-breakpoint>
+        <line-breakpoint enabled="true" type="java-line">
+          <url>file://$PROJECT_DIR$/src/main/java/Jul/Jul30/MajorityElement.java</url>
+          <line>19</line>
+          <option name="timeStamp" value="27" />
+        </line-breakpoint>
+        <line-breakpoint enabled="true" type="java-line">
+          <url>file://$PROJECT_DIR$/src/main/java/Jul/Jul30/MajorityElement.java</url>
+          <line>22</line>
+          <option name="timeStamp" value="28" />
+        </line-breakpoint>
+        <line-breakpoint enabled="true" type="java-line">
+          <url>file://$PROJECT_DIR$/src/main/java/Jul/Jul30/MajorityElement.java</url>
+          <line>15</line>
+          <option name="timeStamp" value="30" />
+        </line-breakpoint>
+        <line-breakpoint enabled="true" type="java-line">
+          <url>file://$PROJECT_DIR$/src/main/java/Jul/Jul30/MajorityElement.java</url>
+          <line>17</line>
+          <option name="timeStamp" value="31" />
+        </line-breakpoint>
       </breakpoints>
     </breakpoint-manager>
+  </component>
+  <component name="XSLT-Support.FileAssociations.UIState">
+    <expand />
+    <select />
   </component>
 </project>
