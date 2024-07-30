@@ -5,7 +5,9 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="08a15b4e-e32b-466c-af5a-bbc4226858a4" name="Changes" comment="July 30 solutions">
-      <change afterPath="$PROJECT_DIR$/src/main/java/Jul/Jul30/MissingNumber.java" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/main/java/Jul/Jul30/IntersectionOfArrays.java" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/main/java/Jul/Jul30/MoveZeroes.java" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/main/java/Jul/Jul30/RangeSumQueryImmutable.java" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -39,6 +41,7 @@
     "Application.ContainsDuplicate.executor": "Debug",
     "Application.MajorityElement.executor": "Debug",
     "Application.MaxProfit.executor": "Debug",
+    "Application.MoveZeroes.executor": "Debug",
     "Application.PascalsTriangle.executor": "Run",
     "RunOnceActivity.OpenProjectViewOnStart": "true",
     "RunOnceActivity.ShowReadmeOnStart": "true",
@@ -67,7 +70,7 @@
       <recent name="Jul.Jul30" />
     </key>
   </component>
-  <component name="RunManager" selected="Application.ContainsDuplicate">
+  <component name="RunManager" selected="Application.MoveZeroes">
     <configuration name="ContainsDuplicate" type="Application" factoryName="Application" temporary="true" nameIsGenerated="true">
       <option name="MAIN_CLASS_NAME" value="Jul.Jul30.ContainsDuplicate" />
       <module name="LeetCode" />
@@ -107,9 +110,15 @@
         <option name="Make" enabled="true" />
       </method>
     </configuration>
-    <configuration name="MergeSortedArray" type="Application" factoryName="Application" temporary="true" nameIsGenerated="true">
-      <option name="MAIN_CLASS_NAME" value="Jul.Jul28.MergeSortedArray" />
+    <configuration name="MoveZeroes" type="Application" factoryName="Application" temporary="true" nameIsGenerated="true">
+      <option name="MAIN_CLASS_NAME" value="Jul.Jul30.MoveZeroes" />
       <module name="LeetCode" />
+      <extension name="coverage">
+        <pattern>
+          <option name="PATTERN" value="Jul.Jul30.*" />
+          <option name="ENABLED" value="true" />
+        </pattern>
+      </extension>
       <method v="2">
         <option name="Make" enabled="true" />
       </method>
@@ -129,11 +138,11 @@
     </configuration>
     <recent_temporary>
       <list>
+        <item itemvalue="Application.MoveZeroes" />
         <item itemvalue="Application.ContainsDuplicate" />
         <item itemvalue="Application.MajorityElement" />
         <item itemvalue="Application.MaxProfit" />
         <item itemvalue="Application.PascalsTriangle" />
-        <item itemvalue="Application.MergeSortedArray" />
       </list>
     </recent_temporary>
   </component>
@@ -157,7 +166,7 @@
       <workItem from="1701113418238" duration="115000" />
       <workItem from="1701113538913" duration="1000" />
       <workItem from="1701113562453" duration="5844000" />
-      <workItem from="1722183396347" duration="9435000" />
+      <workItem from="1722183396347" duration="10403000" />
     </task>
     <task id="LOCAL-00001" summary="First commit july 28 solutions">
       <option name="closed" value="true" />
@@ -215,7 +224,15 @@
       <option name="project" value="LOCAL" />
       <updated>1722348073836</updated>
     </task>
-    <option name="localTasksCounter" value="8" />
+    <task id="LOCAL-00008" summary="July 30 solutions">
+      <option name="closed" value="true" />
+      <created>1722371234610</created>
+      <option name="number" value="00008" />
+      <option name="presentableId" value="LOCAL-00008" />
+      <option name="project" value="LOCAL" />
+      <updated>1722371234611</updated>
+    </task>
+    <option name="localTasksCounter" value="9" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -394,6 +411,36 @@
           <url>file://$PROJECT_DIR$/src/main/java/Jul/Jul30/ContainsDuplicate.java</url>
           <line>13</line>
           <option name="timeStamp" value="36" />
+        </line-breakpoint>
+        <line-breakpoint enabled="true" type="java-line">
+          <url>file://$PROJECT_DIR$/src/main/java/Jul/Jul30/MoveZeroes.java</url>
+          <line>11</line>
+          <option name="timeStamp" value="37" />
+        </line-breakpoint>
+        <line-breakpoint enabled="true" type="java-line">
+          <url>file://$PROJECT_DIR$/src/main/java/Jul/Jul30/MoveZeroes.java</url>
+          <line>12</line>
+          <option name="timeStamp" value="38" />
+        </line-breakpoint>
+        <line-breakpoint enabled="true" type="java-line">
+          <url>file://$PROJECT_DIR$/src/main/java/Jul/Jul30/MoveZeroes.java</url>
+          <line>10</line>
+          <option name="timeStamp" value="39" />
+        </line-breakpoint>
+        <line-breakpoint enabled="true" type="java-line">
+          <url>file://$PROJECT_DIR$/src/main/java/Jul/Jul30/MoveZeroes.java</url>
+          <line>17</line>
+          <option name="timeStamp" value="40" />
+        </line-breakpoint>
+        <line-breakpoint enabled="true" type="java-line">
+          <url>file://$PROJECT_DIR$/src/main/java/Jul/Jul30/MoveZeroes.java</url>
+          <line>18</line>
+          <option name="timeStamp" value="41" />
+        </line-breakpoint>
+        <line-breakpoint enabled="true" type="java-line">
+          <url>file://$PROJECT_DIR$/src/main/java/Jul/Jul30/MoveZeroes.java</url>
+          <line>7</line>
+          <option name="timeStamp" value="42" />
         </line-breakpoint>
       </breakpoints>
     </breakpoint-manager>
