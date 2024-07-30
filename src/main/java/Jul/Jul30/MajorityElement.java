@@ -8,6 +8,9 @@ package Jul.Jul30;
 //
 
 
+
+
+
 public class MajorityElement {
     public int majorityElement(int[] nums) {
         int count = 0;
@@ -26,9 +29,9 @@ public class MajorityElement {
     public static void main(String[] args) {
         MajorityElement solution = new MajorityElement();
 
-//        // Example 1
-//        int[] nums1 = {3, 2, 3};
-//        System.out.println("Example 1: " + solution.majorityElement(nums1)); // Output: 3
+        // Example 1
+        int[] nums1 = {3, 2, 3};
+        System.out.println("Example 1: " + solution.majorityElement(nums1)); // Output: 3
 
         // Example 2
         int[] nums2 = {5, 5, 3, 3, 3, 5, 5};
