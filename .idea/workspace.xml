@@ -5,7 +5,7 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="08a15b4e-e32b-466c-af5a-bbc4226858a4" name="Changes" comment="July 30 solutions">
-      <change afterPath="$PROJECT_DIR$/src/main/java/Jul/Jul31/ArrayIntersectionII.java" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/main/java/Aug/Aug7/RomanToInteger.java" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -23,10 +23,10 @@
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
-  <component name="ProjectColorInfo"><![CDATA[{
-  "customColor": "",
-  "associatedIndex": 7
-}]]></component>
+  <component name="ProjectColorInfo">{
+  &quot;customColor&quot;: &quot;&quot;,
+  &quot;associatedIndex&quot;: 7
+}</component>
   <component name="ProjectId" id="2YXzvQ5fwS4TIkNN0fzkM1Nk0Wn" />
   <component name="ProjectLevelVcsManager" settingsEditedManually="true" />
   <component name="ProjectViewState">
@@ -41,6 +41,7 @@
     "Application.MaxProfit.executor": "Debug",
     "Application.MoveZeroes.executor": "Debug",
     "Application.PascalsTriangle.executor": "Run",
+    "Application.RomanToInteger.executor": "Debug",
     "RunOnceActivity.OpenProjectViewOnStart": "true",
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "SHARE_PROJECT_CONFIGURATION_FILES": "true",
@@ -68,7 +69,7 @@
       <recent name="Jul.Jul30" />
     </key>
   </component>
-  <component name="RunManager" selected="Application.MoveZeroes">
+  <component name="RunManager" selected="Application.RomanToInteger">
     <configuration name="ContainsDuplicate" type="Application" factoryName="Application" temporary="true" nameIsGenerated="true">
       <option name="MAIN_CLASS_NAME" value="Jul.Jul30.ContainsDuplicate" />
       <module name="LeetCode" />
@@ -121,12 +122,12 @@
         <option name="Make" enabled="true" />
       </method>
     </configuration>
-    <configuration name="PascalsTriangle" type="Application" factoryName="Application" temporary="true" nameIsGenerated="true">
-      <option name="MAIN_CLASS_NAME" value="Jul.Jul28.PascalsTriangle" />
+    <configuration name="RomanToInteger" type="Application" factoryName="Application" temporary="true" nameIsGenerated="true">
+      <option name="MAIN_CLASS_NAME" value="Aug.Aug7.RomanToInteger" />
       <module name="LeetCode" />
       <extension name="coverage">
         <pattern>
-          <option name="PATTERN" value="Jul.Jul28.*" />
+          <option name="PATTERN" value="Aug.Aug7.*" />
           <option name="ENABLED" value="true" />
         </pattern>
       </extension>
@@ -136,19 +137,19 @@
     </configuration>
     <recent_temporary>
       <list>
+        <item itemvalue="Application.RomanToInteger" />
         <item itemvalue="Application.MoveZeroes" />
         <item itemvalue="Application.ContainsDuplicate" />
         <item itemvalue="Application.MajorityElement" />
         <item itemvalue="Application.MaxProfit" />
-        <item itemvalue="Application.PascalsTriangle" />
       </list>
     </recent_temporary>
   </component>
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-jdk-9f38398b9061-39b83d9b5494-intellij.indexing.shared.core-IU-241.15989.150" />
-        <option value="bundled-js-predefined-1d06a55b98c1-91d5c284f522-JavaScript-IU-241.15989.150" />
+        <option value="bundled-jdk-9823dce3aa75-b114ca120d71-intellij.indexing.shared.core-IU-242.20224.300" />
+        <option value="bundled-js-predefined-d6986cc7102b-410509235cf1-JavaScript-IU-242.20224.300" />
       </set>
     </attachedChunks>
   </component>
@@ -165,6 +166,7 @@
       <workItem from="1701113538913" duration="1000" />
       <workItem from="1701113562453" duration="5844000" />
       <workItem from="1722183396347" duration="11159000" />
+      <workItem from="1723042420673" duration="332000" />
     </task>
     <task id="LOCAL-00001" summary="First commit july 28 solutions">
       <option name="closed" value="true" />
@@ -447,6 +449,21 @@
           <url>file://$PROJECT_DIR$/src/main/java/Jul/Jul30/MoveZeroes.java</url>
           <line>7</line>
           <option name="timeStamp" value="42" />
+        </line-breakpoint>
+        <line-breakpoint enabled="true" type="java-line">
+          <url>file://$PROJECT_DIR$/src/main/java/Aug/Aug7/RomanToInteger.java</url>
+          <line>21</line>
+          <option name="timeStamp" value="43" />
+        </line-breakpoint>
+        <line-breakpoint enabled="true" type="java-line">
+          <url>file://$PROJECT_DIR$/src/main/java/Aug/Aug7/RomanToInteger.java</url>
+          <line>25</line>
+          <option name="timeStamp" value="44" />
+        </line-breakpoint>
+        <line-breakpoint enabled="true" type="java-line">
+          <url>file://$PROJECT_DIR$/src/main/java/Aug/Aug7/RomanToInteger.java</url>
+          <line>27</line>
+          <option name="timeStamp" value="45" />
         </line-breakpoint>
       </breakpoints>
     </breakpoint-manager>
