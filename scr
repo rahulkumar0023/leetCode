@@ -7,12 +7,18 @@ echo "servername,port,status" > "$output"
 
 # Read the input CSV and check connection status
 while IFS=, read -r server ports; do
+    # Trim whitespace around server and ports
+    server=$(echo "$server" | xargs)
+    ports=$(echo "$ports" | xargs)
+    
     echo "Testing server: $server with ports: $ports"
     
     # Split the ports by commas and loop through each one
     IFS=',' read -r -a port_array <<< "$ports"
     
     for port in "${port_array[@]}"; do
+        port=$(echo "$port" | xargs)  # Trim port whitespace
+        
         echo "Testing $server on port $port"
         nc -zv "$server" "$port" &>/dev/null
         if [[ $? -eq 0 ]]; then
@@ -21,7 +27,7 @@ while IFS=, read -r server ports; do
             status="closed"
         fi
         
-        # Append the server, port, and status to the output CSV
+        # Append the server, port, and status to the output CSV in a single line
         echo "$server,$port,$status" >> "$output"
     done
 done < "$input"
