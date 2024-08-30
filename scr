@@ -1,11 +1,20 @@
 #!/bin/bash
 input="servers.csv"
 
-while IFS=, read -r server port; do
-    nc -zv "$server" "$port" &>/dev/null
-    if [ $? -eq 0 ]; then
-        echo "Connection to $server on port $port is open."
-    else
-        echo "Connection to $server on port $port is closed or filtered."
-    fi
+while IFS=, read -r server ports; do
+    echo "Testing server: $server with ports: $ports"
+    
+    # Split the ports by commas and loop through each one
+    IFS=' ' read -r -a port_array <<< "$ports"
+    
+    for port in "${port_array[@]}"; do
+        echo "Testing $server on port $port"
+        nc -zv "$server" "$port" &>/dev/null
+        if [[ $? -eq 0 ]]; then
+            echo "Connection to $server on port $port is open."
+        else
+            echo "Connection to $server on port $port is closed or filtered."
+        fi
+    done
+
 done < "$input"
