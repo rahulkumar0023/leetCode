@@ -1,41 +1,44 @@
 #!/bin/bash
 input="servers.csv"
 output="connection_results.csv"
+timeout_duration=2  # Timeout duration in seconds
 
 # Write the header to the output file
 echo "servername,port,status" > "$output"
 
 # Read the input CSV and check connection status
 while IFS=, read -r server ports; do
-    # Remove potential carriage returns and trim whitespace
+    # Remove potential carriage returns (CR) and trim whitespace
     server=$(echo "$server" | tr -d '\r' | xargs)
     ports=$(echo "$ports" | tr -d '\r' | xargs)
     
     echo "Testing server: $server with ports: $ports"
-    
+
     # Check if ports contain multiple comma-separated values
     if [[ "$ports" == *","* ]]; then
-        # If multiple ports, split them and loop through each one
+        # If multiple ports, split them into an array
         IFS=',' read -r -a port_array <<< "$ports"
     else
-        # If single port, put it into an array
+        # If only one port, make it an array
         port_array=("$ports")
     fi
-    
+
     for port in "${port_array[@]}"; do
         # Trim any leading/trailing whitespace from each port
         port=$(echo "$port" | xargs)
 
-        if [ -n "$port" ]; then
+        # Proceed only if port is non-empty
+        if [[ -n "$port" ]]; then
             echo "Testing $server on port $port"
-            nc -zv "$server" "$port" &>/dev/null
-            if [[ $? -eq 0 ]]; then
+
+            # Use gtimeout to limit the connection check duration
+            if gtimeout "$timeout_duration" nc -zv "$server" "$port" &>/dev/null; then
                 status="open"
             else
                 status="closed"
             fi
 
-            # Append the server, port, and status to the output CSV
+            # Append the result to the CSV output
             echo "$server,$port,$status" >> "$output"
         fi
     done
