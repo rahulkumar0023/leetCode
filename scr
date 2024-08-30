@@ -35,7 +35,12 @@ while IFS=, read -r server ports; do
             if gtimeout "$timeout_duration" nc -zv "$server" "$port" &>/dev/null; then
                 status="open"
             else
-                status="closed"
+                # Check if the timeout command was the issue
+                if [[ $? -eq 124 ]]; then
+                    status="timeout"
+                else
+                    status="closed"
+                fi
             fi
 
             # Append the result to the CSV output
