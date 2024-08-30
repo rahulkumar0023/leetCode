@@ -1,0 +1,11 @@
+#!/bin/bash
+input="servers.csv"
+
+while IFS=, read -r server port; do
+    nc -zv "$server" "$port" &>/dev/null
+    if [ $? -eq 0 ]; then
+        echo "Connection to $server on port $port is open."
+    else
+        echo "Connection to $server on port $port is closed or filtered."
+    fi
+done < "$input"
