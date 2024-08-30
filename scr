@@ -7,9 +7,9 @@ echo "servername,port,status" > "$output"
 
 # Read the input CSV and check connection status
 while IFS=, read -r server ports; do
-    # Trim whitespace around server and ports
-    server=$(echo "$server" | xargs)
-    ports=$(echo "$ports" | xargs)
+    # Remove any potential carriage returns or extra whitespace
+    server=$(echo "$server" | tr -d '\r' | xargs)
+    ports=$(echo "$ports" | tr -d '\r' | xargs)
     
     echo "Testing server: $server with ports: $ports"
     
