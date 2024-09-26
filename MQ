@@ -1,4 +1,3 @@
-import com.ibm.mq.MQEnvironment;
 import com.ibm.mq.MQException;
 import com.ibm.mq.MQQueue;
 import com.ibm.mq.MQQueueManager;
@@ -6,6 +5,8 @@ import com.ibm.mq.constants.CMQC;
 import com.ibm.mq.MQMessage;
 import com.ibm.mq.MQPutMessageOptions;
 import com.ibm.mq.MQGetMessageOptions;
+
+import java.util.Hashtable;
 
 public class MQStandaloneExample {
 
@@ -17,21 +18,25 @@ public class MQStandaloneExample {
         String channel = "your-channel";
         String queueManagerName = "your-queue-manager";
         String queueName = "your-queue";
-        String user = "your-username"; // If required
-        String password = "your-password"; // If required
+        String clientId = "your-client-id"; // Use the client ID you have
 
         MQQueueManager queueManager = null;
 
         try {
-            // Set the MQ connection properties
-            MQEnvironment.hostname = hostname;
-            MQEnvironment.port = port;
-            MQEnvironment.channel = channel;
-            MQEnvironment.userID = user; // Optional if authentication is needed
-            MQEnvironment.password = password; // Optional if authentication is needed
+            // Set up the MQ connection properties
+            Hashtable<String, Object> mqProperties = new Hashtable<>();
+
+            // Connection details
+            mqProperties.put(CMQC.HOST_NAME_PROPERTY, hostname);
+            mqProperties.put(CMQC.PORT_PROPERTY, port);
+            mqProperties.put(CMQC.CHANNEL_PROPERTY, channel);
+            mqProperties.put(CMQC.CLIENT_ID_PROPERTY, clientId);
+
+            // Specify the transport type to use client mode
+            mqProperties.put(CMQC.TRANSPORT_PROPERTY, CMQC.TRANSPORT_MQSERIES_CLIENT);
 
             // Create a connection to the Queue Manager
-            queueManager = new MQQueueManager(queueManagerName);
+            queueManager = new MQQueueManager(queueManagerName, mqProperties);
 
             // Open the Queue for both Put and Get operations
             int openOptions = CMQC.MQOO_INPUT_AS_Q_DEF | CMQC.MQOO_OUTPUT;
@@ -62,7 +67,7 @@ public class MQStandaloneExample {
             // Close the queue and disconnect from the queue manager
             queue.close();
             queueManager.disconnect();
-            
+
         } catch (MQException mqe) {
             System.err.println("An MQException occurred: Completion code " + mqe.completionCode +
                     " Reason code " + mqe.reasonCode);
