@@ -1,0 +1,84 @@
+import com.ibm.mq.MQEnvironment;
+import com.ibm.mq.MQException;
+import com.ibm.mq.MQQueue;
+import com.ibm.mq.MQQueueManager;
+import com.ibm.mq.constants.CMQC;
+import com.ibm.mq.MQMessage;
+import com.ibm.mq.MQPutMessageOptions;
+import com.ibm.mq.MQGetMessageOptions;
+
+public class MQStandaloneExample {
+
+    public static void main(String[] args) {
+
+        // Connection details
+        String hostname = "your-hostname";
+        int port = 1414; // Replace with your MQ port
+        String channel = "your-channel";
+        String queueManagerName = "your-queue-manager";
+        String queueName = "your-queue";
+        String user = "your-username"; // If required
+        String password = "your-password"; // If required
+
+        MQQueueManager queueManager = null;
+
+        try {
+            // Set the MQ connection properties
+            MQEnvironment.hostname = hostname;
+            MQEnvironment.port = port;
+            MQEnvironment.channel = channel;
+            MQEnvironment.userID = user; // Optional if authentication is needed
+            MQEnvironment.password = password; // Optional if authentication is needed
+
+            // Create a connection to the Queue Manager
+            queueManager = new MQQueueManager(queueManagerName);
+
+            // Open the Queue for both Put and Get operations
+            int openOptions = CMQC.MQOO_INPUT_AS_Q_DEF | CMQC.MQOO_OUTPUT;
+            MQQueue queue = queueManager.accessQueue(queueName, openOptions);
+
+            // Create a message to send to the queue
+            MQMessage message = new MQMessage();
+            message.writeUTF("Hello, MQ World!");
+
+            // Set message options for putting the message
+            MQPutMessageOptions pmo = new MQPutMessageOptions();
+
+            // Put the message on the queue
+            queue.put(message, pmo);
+            System.out.println("Message successfully sent to the queue.");
+
+            // Get the message back from the queue
+            MQMessage receivedMessage = new MQMessage();
+            MQGetMessageOptions gmo = new MQGetMessageOptions();
+
+            // Blocking wait to retrieve a message
+            queue.get(receivedMessage, gmo);
+
+            // Read the message content
+            String receivedText = receivedMessage.readUTF();
+            System.out.println("Received message: " + receivedText);
+
+            // Close the queue and disconnect from the queue manager
+            queue.close();
+            queueManager.disconnect();
+            
+        } catch (MQException mqe) {
+            System.err.println("An MQException occurred: Completion code " + mqe.completionCode +
+                    " Reason code " + mqe.reasonCode);
+            mqe.printStackTrace();
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            try {
+                // Clean up resources
+                if (queueManager != null) {
+                    queueManager.close();
+                    queueManager.disconnect();
+                }
+            } catch (MQException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+}
