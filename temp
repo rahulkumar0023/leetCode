@@ -1,46 +1,22 @@
-import org.springframework.context.annotation.Bean;
-import org.springframework.oxm.jaxb.Jaxb2Marshaller;
+<dependencies>
+    <!-- Spring Web Services Core for Jaxb2Marshaller and WebServiceTemplate -->
+    <dependency>
+        <groupId>org.springframework.ws</groupId>
+        <artifactId>spring-ws-core</artifactId>
+        <version>3.1.1</version> <!-- Check for the latest version -->
+    </dependency>
 
-@Configuration
-public class SoapConfig {
+    <!-- JAXB API (needed for marshalling/unmarshalling) -->
+    <dependency>
+        <groupId>jakarta.xml.bind</groupId>
+        <artifactId>jakarta.xml.bind-api</artifactId>
+        <version>3.0.1</version> <!-- Adjust to latest version -->
+    </dependency>
 
-    @Bean
-    public Jaxb2Marshaller marshaller() {
-        Jaxb2Marshaller marshaller = new Jaxb2Marshaller();
-        marshaller.setPackagesToScan("com.example.generated");  // Package with your generated JAXB classes
-        return marshaller;
-    }
-
-    @Bean
-    public WebServiceTemplate webServiceTemplate(Jaxb2Marshaller marshaller) {
-        WebServiceTemplate template = new WebServiceTemplate();
-        template.setMarshaller(marshaller);
-        template.setUnmarshaller(marshaller);
-        return template;
-    }
-}
-
-
-
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.ws.client.core.WebServiceTemplate;
-import org.springframework.xml.transform.StringSource;
-
-import javax.xml.transform.Source;
-
-public class SoapMessageProcessor {
-
-    @Autowired
-    private WebServiceTemplate webServiceTemplate;
-
-    public YourRequestClass processSoapMessage(String soapMessage) throws Exception {
-        // Create a Source from the SOAP message string
-        Source source = new StringSource(soapMessage);
-
-        // Unmarshal the SOAP message into YourRequestClass
-        YourRequestClass request = (YourRequestClass) webServiceTemplate.unmarshal(source);
-
-        // Now you have the unmarshalled object and can work with it
-        return request;
-    }
-}
+    <!-- JAXB Runtime (the actual implementation for JAXB functionality) -->
+    <dependency>
+        <groupId>org.glassfish.jaxb</groupId>
+        <artifactId>jaxb-runtime</artifactId>
+        <version>3.0.1</version>
+    </dependency>
+</dependencies>
