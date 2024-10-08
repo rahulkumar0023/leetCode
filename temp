@@ -1,47 +1,42 @@
 import javax.xml.soap.*;
 import javax.xml.bind.*;
 import java.io.ByteArrayInputStream;
+import java.io.StringReader;
 
 public class SoapMessageHandler {
 
     public static Object unmarshalSoapMessage(String soapMessage, Class<?> targetClass) throws Exception {
-        // Step 1: Parse the SOAP message using SAAJ
-        MessageFactory messageFactory = MessageFactory.newInstance();
-        SOAPMessage message = messageFactory.createMessage(null, new ByteArrayInputStream(soapMessage.getBytes()));
+        // Step 1: Parse the SOAP message using SAAJ to extract the body
+        MessageFactory messageFactory = MessageFactory.newInstance(SOAPConstants.SOAP_1_1_PROTOCOL);
+        SOAPMessage soapMsg = messageFactory.createMessage(null, new ByteArrayInputStream(soapMessage.getBytes()));
 
         // Step 2: Extract the SOAP body
-        SOAPBody soapBody = message.getSOAPBody();
-        if (soapBody == null) {
-            throw new Exception("SOAP body is null");
-        }
+        SOAPBody soapBody = soapMsg.getSOAPBody();
+        String bodyContent = soapBody.getTextContent();  // Get the text content inside the body
 
-        // Step 3: Extract the payload from the body (this is the actual business message)
-        // You can use soapBody.getFirstChild() or navigate the XML structure as needed
-        // Let's assume we directly want to unmarshal the body content
+        // Step 3: Use JAXB to unmarshal the extracted body content into your generated class
         JAXBContext jaxbContext = JAXBContext.newInstance(targetClass);
         Unmarshaller unmarshaller = jaxbContext.createUnmarshaller();
 
-        // Unmarshal the content of the SOAP body into your generated class
-        Object result = unmarshaller.unmarshal(soapBody.extractContentAsDocument());
-
-        return result;
+        // Unmarshal the content of the SOAP body
+        return unmarshaller.unmarshal(new StringReader(bodyContent));
     }
 
     public static void main(String[] args) {
         try {
-            // Example SOAP message including Envelope and Body
+            // Example SOAP message (XML string)
             String soapMessage = """
-            <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns="http://example.com/schemas">
-               <soapenv:Header/>
-               <soapenv:Body>
-                  <ns:YourRequest>
-                     <!-- Your actual payload goes here -->
-                  </ns:YourRequest>
-               </soapenv:Body>
+            <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+                <soapenv:Header/>
+                <soapenv:Body>
+                    <YourRequest xmlns="http://example.com/schemas">
+                        <!-- Your payload here -->
+                    </YourRequest>
+                </soapenv:Body>
             </soapenv:Envelope>
             """;
 
-            // Unmarshal the body content into your generated class
+            // Unmarshal the body content into your generated class (YourRequestClass)
             YourRequestClass result = (YourRequestClass) unmarshalSoapMessage(soapMessage, YourRequestClass.class);
             System.out.println(result);
 
