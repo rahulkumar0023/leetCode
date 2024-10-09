@@ -8,7 +8,7 @@ import java.io.StringReader;
 
 public class SoapMessageProcessor {
 
-    public ParentRequest processSoapMessage(String soapMessage) {
+    public Object processSoapMessage(String soapMessage) {
         try {
             // Step 1: Create an XMLInputFactory (for StAX parsing)
             XMLInputFactory factory = XMLInputFactory.newInstance();
@@ -26,19 +26,28 @@ public class SoapMessageProcessor {
                 }
             }
 
-            // Step 4: Move to the <parentRequest> element inside the SOAP Body
-            QName parentRequestQName = new QName("", "parentRequest");
+            // Step 4: Check if it's a byNumberRequest or byNameRequest
+            QName byNumberRequestQName = new QName("http://example.com/individual", "byNumberRequest");
+            QName byNameRequestQName = new QName("http://example.com/individual", "byNameRequest");
+
+            Object result = null;
+
             while (eventReader.hasNext()) {
                 XMLEvent event = eventReader.nextEvent();
-                if (event.isStartElement() && event.asStartElement().getName().equals(parentRequestQName)) {
-                    break;  // Found <parentRequest>
+                if (event.isStartElement() && event.asStartElement().getName().equals(byNumberRequestQName)) {
+                    System.out.println("Processing byNumberRequest...");
+                    JAXBContext jaxbContext = JAXBContext.newInstance(ByNumberRequest.class);
+                    Unmarshaller unmarshaller = jaxbContext.createUnmarshaller();
+                    result = unmarshaller.unmarshal(eventReader);
+                    break;
+                } else if (event.isStartElement() && event.asStartElement().getName().equals(byNameRequestQName)) {
+                    System.out.println("Processing byNameRequest...");
+                    JAXBContext jaxbContext = JAXBContext.newInstance(ByNameRequest.class);
+                    Unmarshaller unmarshaller = jaxbContext.createUnmarshaller();
+                    result = unmarshaller.unmarshal(eventReader);
+                    break;
                 }
             }
-
-            // Step 5: Unmarshal the ParentRequest element (it could be ByNameRequest or ByNumberRequest)
-            JAXBContext jaxbContext = JAXBContext.newInstance(ParentRequest.class);
-            Unmarshaller unmarshaller = jaxbContext.createUnmarshaller();
-            ParentRequest result = (ParentRequest) unmarshaller.unmarshal(eventReader);
 
             return result;
 
@@ -51,20 +60,4 @@ public class SoapMessageProcessor {
     public static void main(String[] args) {
         SoapMessageProcessor processor = new SoapMessageProcessor();
 
-        // Example SOAP message with ByNameRequest
-        String soapMessage = """
-            <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
-                <soap:Header/>
-                <soap:Body>
-                    <parentRequest xsi:type="ByNameRequest" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-                        <requestId>12345</requestId>
-                        <name>John Doe</name>
-                    </parentRequest>
-                </soap:Body>
-            </soap:Envelope>
-            """;
-
-        ParentRequest result = processor.processSoapMessage(soapMessage);
-        System.out.println(result);
-    }
-}
+        // Example
