@@ -1,22 +1,66 @@
-<dependencies>
-    <!-- Spring Web Services Core for Jaxb2Marshaller and WebServiceTemplate -->
-    <dependency>
-        <groupId>org.springframework.ws</groupId>
-        <artifactId>spring-ws-core</artifactId>
-        <version>3.1.1</version> <!-- Check for the latest version -->
-    </dependency>
+import org.springframework.oxm.jaxb.Jaxb2Marshaller;
+import javax.xml.soap.*;
+import javax.xml.transform.stream.StreamSource;
+import java.io.ByteArrayInputStream;
+import java.io.StringReader;
 
-    <!-- JAXB API (needed for marshalling/unmarshalling) -->
-    <dependency>
-        <groupId>jakarta.xml.bind</groupId>
-        <artifactId>jakarta.xml.bind-api</artifactId>
-        <version>3.0.1</version> <!-- Adjust to latest version -->
-    </dependency>
+public class SoapMessageProcessor {
 
-    <!-- JAXB Runtime (the actual implementation for JAXB functionality) -->
-    <dependency>
-        <groupId>org.glassfish.jaxb</groupId>
-        <artifactId>jaxb-runtime</artifactId>
-        <version>3.0.1</version>
-    </dependency>
-</dependencies>
+    public YourRequestClass processSoapMessage(String soapMessage) {
+        try {
+            // Step 1: Create a SOAP Message Factory to parse the SOAP message
+            MessageFactory messageFactory = MessageFactory.newInstance();
+            SOAPMessage soapMsg = messageFactory.createMessage(null, new ByteArrayInputStream(soapMessage.getBytes()));
+
+            // Step 2: Extract the SOAP Body content
+            SOAPBody body = soapMsg.getSOAPBody();
+            SOAPElement yourRequestElement = (SOAPElement) body.getChildElements().next(); // Extract the ind:YourRequest element
+
+            // Convert the SOAPElement to String for unmarshalling
+            String bodyContent = yourRequestElement.toString();
+
+            // Step 3: Set up Jaxb2Marshaller for unmarshalling
+            Jaxb2Marshaller marshaller = new Jaxb2Marshaller();
+            marshaller.setPackagesToScan("com.example.generated");  // Replace with your actual JAXB package
+
+            // Step 4: Unmarshal the body content into the JAXB-generated class (YourRequestClass)
+            YourRequestClass requestObject = (YourRequestClass) marshaller.unmarshal(new StreamSource(new StringReader(bodyContent)));
+
+            // Return the unmarshalled object
+            return requestObject;
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            throw new RuntimeException("Failed to process SOAP message", e);
+        }
+    }
+
+    public static void main(String[] args) {
+        SoapMessageProcessor processor = new SoapMessageProcessor();
+
+        // Example SOAP message
+        String soapMessage = """
+        <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+                          xmlns:ind="http://example.com/individual"
+                          xmlns:com="http://example.com/company">
+            <soapenv:Header/>
+            <soapenv:Body>
+                <ind:YourRequest>
+                    <com:field1>Value1</com:field1>
+                    <com:field2>Value2</com:field2>
+                    <ind:field3>
+                        <com:field4>Value1</com:field4>
+                        <com:field5>Value2</com:field5>
+                    </ind:field3>
+                </ind:YourRequest>
+            </soapenv:Body>
+        </soapenv:Envelope>
+        """;
+
+        // Process the SOAP message and unmarshal it into YourRequestClass
+        YourRequestClass result = processor.processSoapMessage(soapMessage);
+
+        // Print the unmarshalled result (example)
+        System.out.println(result);
+    }
+}
