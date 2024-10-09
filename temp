@@ -1,33 +1,57 @@
-import org.springframework.oxm.jaxb.Jaxb2Marshaller;
-import javax.xml.soap.*;
-import javax.xml.transform.stream.StreamSource;
-import java.io.ByteArrayInputStream;
+import javax.xml.bind.JAXBContext;
+import javax.xml.bind.Unmarshaller;
+import javax.xml.namespace.QName;
+import javax.xml.stream.*;
+import javax.xml.stream.events.XMLEvent;
 import java.io.StringReader;
 
 public class SoapMessageProcessor {
 
     public YourRequestClass processSoapMessage(String soapMessage) {
         try {
-            // Step 1: Create a SOAP Message Factory to parse the SOAP message
-            MessageFactory messageFactory = MessageFactory.newInstance();
-            SOAPMessage soapMsg = messageFactory.createMessage(null, new ByteArrayInputStream(soapMessage.getBytes()));
+            // Step 1: Create an XMLInputFactory
+            XMLInputFactory factory = XMLInputFactory.newInstance();
+            factory.setProperty(XMLInputFactory.IS_NAMESPACE_AWARE, true);
 
-            // Step 2: Extract the SOAP Body content
-            SOAPBody body = soapMsg.getSOAPBody();
-            SOAPElement yourRequestElement = (SOAPElement) body.getChildElements().next(); // Extract the ind:YourRequest element
+            // Step 2: Create an XMLEventReader
+            XMLEventReader eventReader = factory.createXMLEventReader(new StringReader(soapMessage));
 
-            // Convert the SOAPElement to String for unmarshalling
-            String bodyContent = yourRequestElement.toString();
+            // Step 3: Navigate to the SOAP Body
+            QName bodyQName = new QName("http://schemas.xmlsoap.org/soap/envelope/", "Body");
+            XMLEvent event = null;
+            while (eventReader.hasNext()) {
+                event = eventReader.nextEvent();
+                if (event.isStartElement() && event.asStartElement().getName().equals(bodyQName)) {
+                    break;
+                }
+            }
 
-            // Step 3: Set up Jaxb2Marshaller for unmarshalling
-            Jaxb2Marshaller marshaller = new Jaxb2Marshaller();
-            marshaller.setPackagesToScan("com.example.generated");  // Replace with your actual JAXB package
+            // Step 4: Move to the first element inside the SOAP Body
+            event = eventReader.nextTag(); // Move to YourRequest element
 
-            // Step 4: Unmarshal the body content into the JAXB-generated class (YourRequestClass)
-            YourRequestClass requestObject = (YourRequestClass) marshaller.unmarshal(new StreamSource(new StringReader(bodyContent)));
+            // Step 5: Create a filtered reader for the YourRequest element
+            XMLEventReader filteredReader = factory.createFilteredReader(eventReader, new EventFilter() {
+                private int depth = 0;
+                private boolean started = false;
 
-            // Return the unmarshalled object
-            return requestObject;
+                @Override
+                public boolean accept(XMLEvent event) {
+                    if (event.isStartElement()) {
+                        depth++;
+                        started = true;
+                    } else if (event.isEndElement()) {
+                        depth--;
+                    }
+                    return started && depth >= 0;
+                }
+            });
+
+            // Step 6: Unmarshal the YourRequest element
+            JAXBContext jaxbContext = JAXBContext.newInstance(YourRequestClass.class);
+            Unmarshaller unmarshaller = jaxbContext.createUnmarshaller();
+            YourRequestClass result = (YourRequestClass) unmarshaller.unmarshal(filteredReader);
+
+            return result;
 
         } catch (Exception e) {
             e.printStackTrace();
@@ -35,32 +59,30 @@ public class SoapMessageProcessor {
         }
     }
 
+    // main method for testing
     public static void main(String[] args) {
         SoapMessageProcessor processor = new SoapMessageProcessor();
 
         // Example SOAP message
         String soapMessage = """
-        <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
-                          xmlns:ind="http://example.com/individual"
-                          xmlns:com="http://example.com/company">
-            <soapenv:Header/>
-            <soapenv:Body>
-                <ind:YourRequest>
-                    <com:field1>Value1</com:field1>
-                    <com:field2>Value2</com:field2>
-                    <ind:field3>
-                        <com:field4>Value1</com:field4>
-                        <com:field5>Value2</com:field5>
-                    </ind:field3>
-                </ind:YourRequest>
-            </soapenv:Body>
-        </soapenv:Envelope>
-        """;
+                <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+                               xmlns:ind="http://example.com/individual"
+                               xmlns:com="http://example.com/common">
+                    <soap:Header/>
+                    <soap:Body>
+                        <ind:YourRequest>
+                            <com:field1>Value1</com:field1>
+                            <com:field2>Value2</com:field2>
+                            <ind:field3>
+                                <com:field4>Value1</com:field4>
+                                <com:field5>Value2</com:field5>
+                            </ind:field3>
+                        </ind:YourRequest>
+                    </soap:Body>
+                </soap:Envelope>
+                """;
 
-        // Process the SOAP message and unmarshal it into YourRequestClass
         YourRequestClass result = processor.processSoapMessage(soapMessage);
-
-        // Print the unmarshalled result (example)
         System.out.println(result);
     }
 }
