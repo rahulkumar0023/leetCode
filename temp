@@ -13,23 +13,31 @@ public class SoapMessageProcessor {
             XMLInputFactory factory = XMLInputFactory.newInstance();
             factory.setProperty(XMLInputFactory.IS_NAMESPACE_AWARE, true);
 
-            // Step 2: Create an XMLEventReader
+            // Step 2: Create an XMLEventReader for the SOAP message
             XMLEventReader eventReader = factory.createXMLEventReader(new StringReader(soapMessage));
 
-            // Step 3: Navigate to the SOAP Body
+            // Step 3: Navigate to the SOAP Body element
             QName bodyQName = new QName("http://schemas.xmlsoap.org/soap/envelope/", "Body");
-            XMLEvent event = null;
             while (eventReader.hasNext()) {
-                event = eventReader.nextEvent();
+                XMLEvent event = eventReader.nextEvent();
+                // Look for the <soap:Body> element
                 if (event.isStartElement() && event.asStartElement().getName().equals(bodyQName)) {
-                    break;
+                    System.out.println("Found SOAP Body");
+                    break;  // We've found the <soap:Body> element
                 }
             }
 
-            // Step 4: Move to the first element inside the SOAP Body
-            event = eventReader.nextTag(); // Move to YourRequest element
+            // Step 4: Move to the first element inside the SOAP Body (YourRequest)
+            QName yourRequestQName = new QName("http://example.com/individual", "YourRequest");
+            while (eventReader.hasNext()) {
+                XMLEvent event = eventReader.nextEvent();
+                if (event.isStartElement() && event.asStartElement().getName().equals(yourRequestQName)) {
+                    System.out.println("Found YourRequest element");
+                    break;  // We've found the <ind:YourRequest> element
+                }
+            }
 
-            // Step 5: Create a filtered reader for the YourRequest element
+            // Step 5: Create a filtered reader for the YourRequest element and its children
             XMLEventReader filteredReader = factory.createFilteredReader(eventReader, new EventFilter() {
                 private int depth = 0;
                 private boolean started = false;
