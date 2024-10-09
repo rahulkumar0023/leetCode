@@ -1,63 +1,46 @@
-import javax.xml.bind.JAXBContext;
-import javax.xml.bind.Unmarshaller;
-import javax.xml.namespace.QName;
-import javax.xml.stream.XMLEventReader;
-import javax.xml.stream.XMLInputFactory;
-import javax.xml.stream.events.XMLEvent;
+import javax.xml.soap.*;
 import java.io.StringReader;
+import javax.xml.transform.stream.StreamSource;
+import org.springframework.oxm.jaxb.Jaxb2Marshaller;
 
 public class SoapMessageProcessor {
 
-    public Object processSoapMessage(String soapMessage) {
+    private final Jaxb2Marshaller marshaller;
+
+    public SoapMessageProcessor(Jaxb2Marshaller marshaller) {
+        this.marshaller = marshaller;
+    }
+
+    public void processSoapMessage(String soapMessage) {
         try {
-            // Step 1: Create an XMLInputFactory (for StAX parsing)
-            XMLInputFactory factory = XMLInputFactory.newInstance();
-            factory.setProperty(XMLInputFactory.IS_NAMESPACE_AWARE, true);
+            // Parse the SOAP message
+            MessageFactory messageFactory = MessageFactory.newInstance();
+            SOAPMessage message = messageFactory.createMessage(null, new StringReader(soapMessage));
 
-            // Step 2: Create an XMLEventReader for the SOAP message
-            XMLEventReader eventReader = factory.createXMLEventReader(new StringReader(soapMessage));
+            // Extract the SOAP body
+            SOAPBody body = message.getSOAPBody();
 
-            // Step 3: Navigate to the SOAP Body element
-            QName bodyQName = new QName("http://schemas.xmlsoap.org/soap/envelope/", "Body");
-            while (eventReader.hasNext()) {
-                XMLEvent event = eventReader.nextEvent();
-                if (event.isStartElement() && event.asStartElement().getName().equals(bodyQName)) {
-                    break;  // Found <soap:Body>
-                }
+            // Extract the content of the body (assuming one child element)
+            SOAPElement element = (SOAPElement) body.getChildElements().next();
+
+            // Convert SOAP element to string to unmarshal it
+            String elementString = element.toString();  // Modify to convert the element correctly
+
+            // Unmarshal the content
+            StringReader reader = new StringReader(elementString);
+            StreamSource source = new StreamSource(reader);
+            Object request = marshaller.unmarshal(source);
+
+            if (request instanceof ByNumberRequest) {
+                ByNumberRequest byNumberRequest = (ByNumberRequest) request;
+                System.out.println("Processing ByNumberRequest: " + byNumberRequest);
+            } else if (request instanceof ByNameRequest) {
+                ByNameRequest byNameRequest = (ByNameRequest) request;
+                System.out.println("Processing ByNameRequest: " + byNameRequest);
             }
-
-            // Step 4: Check if it's a byNumberRequest or byNameRequest
-            QName byNumberRequestQName = new QName("http://example.com/individual", "byNumberRequest");
-            QName byNameRequestQName = new QName("http://example.com/individual", "byNameRequest");
-
-            Object result = null;
-
-            while (eventReader.hasNext()) {
-                XMLEvent event = eventReader.nextEvent();
-                if (event.isStartElement() && event.asStartElement().getName().equals(byNumberRequestQName)) {
-                    System.out.println("Processing byNumberRequest...");
-                    JAXBContext jaxbContext = JAXBContext.newInstance(ByNumberRequest.class);
-                    Unmarshaller unmarshaller = jaxbContext.createUnmarshaller();
-                    result = unmarshaller.unmarshal(eventReader);
-                    break;
-                } else if (event.isStartElement() && event.asStartElement().getName().equals(byNameRequestQName)) {
-                    System.out.println("Processing byNameRequest...");
-                    JAXBContext jaxbContext = JAXBContext.newInstance(ByNameRequest.class);
-                    Unmarshaller unmarshaller = jaxbContext.createUnmarshaller();
-                    result = unmarshaller.unmarshal(eventReader);
-                    break;
-                }
-            }
-
-            return result;
-
         } catch (Exception e) {
             e.printStackTrace();
             throw new RuntimeException("Failed to process SOAP message", e);
         }
     }
-
-    public static void main(String[] args) {
-        SoapMessageProcessor processor = new SoapMessageProcessor();
-
-        // Example
+}
