@@ -1,15 +1,16 @@
 import javax.xml.bind.JAXBContext;
 import javax.xml.bind.Unmarshaller;
 import javax.xml.namespace.QName;
-import javax.xml.stream.*;
+import javax.xml.stream.XMLEventReader;
+import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.events.XMLEvent;
 import java.io.StringReader;
 
 public class SoapMessageProcessor {
 
-    public YourRequestClass processSoapMessage(String soapMessage) {
+    public ParentRequest processSoapMessage(String soapMessage) {
         try {
-            // Step 1: Create an XMLInputFactory
+            // Step 1: Create an XMLInputFactory (for StAX parsing)
             XMLInputFactory factory = XMLInputFactory.newInstance();
             factory.setProperty(XMLInputFactory.IS_NAMESPACE_AWARE, true);
 
@@ -20,44 +21,24 @@ public class SoapMessageProcessor {
             QName bodyQName = new QName("http://schemas.xmlsoap.org/soap/envelope/", "Body");
             while (eventReader.hasNext()) {
                 XMLEvent event = eventReader.nextEvent();
-                // Look for the <soap:Body> element
                 if (event.isStartElement() && event.asStartElement().getName().equals(bodyQName)) {
-                    System.out.println("Found SOAP Body");
-                    break;  // We've found the <soap:Body> element
+                    break;  // Found <soap:Body>
                 }
             }
 
-            // Step 4: Move to the first element inside the SOAP Body (YourRequest)
-            QName yourRequestQName = new QName("http://example.com/individual", "YourRequest");
+            // Step 4: Move to the <parentRequest> element inside the SOAP Body
+            QName parentRequestQName = new QName("", "parentRequest");
             while (eventReader.hasNext()) {
                 XMLEvent event = eventReader.nextEvent();
-                if (event.isStartElement() && event.asStartElement().getName().equals(yourRequestQName)) {
-                    System.out.println("Found YourRequest element");
-                    break;  // We've found the <ind:YourRequest> element
+                if (event.isStartElement() && event.asStartElement().getName().equals(parentRequestQName)) {
+                    break;  // Found <parentRequest>
                 }
             }
 
-            // Step 5: Create a filtered reader for the YourRequest element and its children
-            XMLEventReader filteredReader = factory.createFilteredReader(eventReader, new EventFilter() {
-                private int depth = 0;
-                private boolean started = false;
-
-                @Override
-                public boolean accept(XMLEvent event) {
-                    if (event.isStartElement()) {
-                        depth++;
-                        started = true;
-                    } else if (event.isEndElement()) {
-                        depth--;
-                    }
-                    return started && depth >= 0;
-                }
-            });
-
-            // Step 6: Unmarshal the YourRequest element
-            JAXBContext jaxbContext = JAXBContext.newInstance(YourRequestClass.class);
+            // Step 5: Unmarshal the ParentRequest element (it could be ByNameRequest or ByNumberRequest)
+            JAXBContext jaxbContext = JAXBContext.newInstance(ParentRequest.class);
             Unmarshaller unmarshaller = jaxbContext.createUnmarshaller();
-            YourRequestClass result = (YourRequestClass) unmarshaller.unmarshal(filteredReader);
+            ParentRequest result = (ParentRequest) unmarshaller.unmarshal(eventReader);
 
             return result;
 
@@ -67,30 +48,23 @@ public class SoapMessageProcessor {
         }
     }
 
-    // main method for testing
     public static void main(String[] args) {
         SoapMessageProcessor processor = new SoapMessageProcessor();
 
-        // Example SOAP message
+        // Example SOAP message with ByNameRequest
         String soapMessage = """
-                <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
-                               xmlns:ind="http://example.com/individual"
-                               xmlns:com="http://example.com/common">
-                    <soap:Header/>
-                    <soap:Body>
-                        <ind:YourRequest>
-                            <com:field1>Value1</com:field1>
-                            <com:field2>Value2</com:field2>
-                            <ind:field3>
-                                <com:field4>Value1</com:field4>
-                                <com:field5>Value2</com:field5>
-                            </ind:field3>
-                        </ind:YourRequest>
-                    </soap:Body>
-                </soap:Envelope>
-                """;
+            <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+                <soap:Header/>
+                <soap:Body>
+                    <parentRequest xsi:type="ByNameRequest" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+                        <requestId>12345</requestId>
+                        <name>John Doe</name>
+                    </parentRequest>
+                </soap:Body>
+            </soap:Envelope>
+            """;
 
-        YourRequestClass result = processor.processSoapMessage(soapMessage);
+        ParentRequest result = processor.processSoapMessage(soapMessage);
         System.out.println(result);
     }
 }
