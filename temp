@@ -1,46 +1,39 @@
-import javax.xml.soap.*;
-import java.io.StringReader;
-import javax.xml.transform.stream.StreamSource;
-import org.springframework.oxm.jaxb.Jaxb2Marshaller;
+import javax.xml.soap.MessageFactory;
+import javax.xml.soap.SOAPBody;
+import javax.xml.soap.SOAPEnvelope;
+import javax.xml.soap.SOAPMessage;
+import javax.xml.soap.SOAPPart;
+import javax.xml.bind.JAXBContext;
+import javax.xml.bind.Marshaller;
+import javax.xml.transform.dom.DOMResult;
+import javax.xml.namespace.QName;
 
-public class SoapMessageProcessor {
+public SOAPMessage createSOAPResponse(Object jaxbObject) throws Exception {
+    // Initialize SOAP message
+    MessageFactory messageFactory = MessageFactory.newInstance();
+    SOAPMessage soapMessage = messageFactory.createMessage();
+    SOAPPart soapPart = soapMessage.getSOAPPart();
+    
+    // Create SOAP envelope and body
+    SOAPEnvelope envelope = soapPart.getEnvelope();
+    SOAPBody soapBody = envelope.getBody();
 
-    private final Jaxb2Marshaller marshaller;
+    // Optionally set the default namespace on the envelope (if needed)
+    envelope.addNamespaceDeclaration("ns2", "http://example.com/ns2");
 
-    public SoapMessageProcessor(Jaxb2Marshaller marshaller) {
-        this.marshaller = marshaller;
-    }
+    // JAXB context and marshaller for your JAXB class
+    JAXBContext jaxbContext = JAXBContext.newInstance(jaxbObject.getClass());
+    Marshaller marshaller = jaxbContext.createMarshaller();
+    marshaller.setProperty(Marshaller.JAXB_FORMATTED_OUTPUT, Boolean.TRUE);
 
-    public void processSoapMessage(String soapMessage) {
-        try {
-            // Parse the SOAP message
-            MessageFactory messageFactory = MessageFactory.newInstance();
-            SOAPMessage message = messageFactory.createMessage(null, new StringReader(soapMessage));
+    // Marshal JAXB object to a DOMResult to embed it in SOAP body
+    DOMResult domResult = new DOMResult();
+    marshaller.marshal(jaxbObject, domResult);
 
-            // Extract the SOAP body
-            SOAPBody body = message.getSOAPBody();
+    // Append the JAXB content as the SOAP body content
+    soapBody.addDocument((org.w3c.dom.Document) domResult.getNode());
 
-            // Extract the content of the body (assuming one child element)
-            SOAPElement element = (SOAPElement) body.getChildElements().next();
-
-            // Convert SOAP element to string to unmarshal it
-            String elementString = element.toString();  // Modify to convert the element correctly
-
-            // Unmarshal the content
-            StringReader reader = new StringReader(elementString);
-            StreamSource source = new StreamSource(reader);
-            Object request = marshaller.unmarshal(source);
-
-            if (request instanceof ByNumberRequest) {
-                ByNumberRequest byNumberRequest = (ByNumberRequest) request;
-                System.out.println("Processing ByNumberRequest: " + byNumberRequest);
-            } else if (request instanceof ByNameRequest) {
-                ByNameRequest byNameRequest = (ByNameRequest) request;
-                System.out.println("Processing ByNameRequest: " + byNameRequest);
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-            throw new RuntimeException("Failed to process SOAP message", e);
-        }
-    }
+    // Save changes and return the SOAP message
+    soapMessage.saveChanges();
+    return soapMessage;
 }
