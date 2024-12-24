@@ -1,39 +1,22 @@
-import javax.xml.soap.MessageFactory;
-import javax.xml.soap.SOAPBody;
-import javax.xml.soap.SOAPEnvelope;
-import javax.xml.soap.SOAPMessage;
-import javax.xml.soap.SOAPPart;
-import javax.xml.bind.JAXBContext;
-import javax.xml.bind.Marshaller;
-import javax.xml.transform.dom.DOMResult;
-import javax.xml.namespace.QName;
+#!/bin/bash
 
-public SOAPMessage createSOAPResponse(Object jaxbObject) throws Exception {
-    // Initialize SOAP message
-    MessageFactory messageFactory = MessageFactory.newInstance();
-    SOAPMessage soapMessage = messageFactory.createMessage();
-    SOAPPart soapPart = soapMessage.getSOAPPart();
+# List of repositories
+REPOS=("repo1" "repo2" "repo3")
+
+for REPO in "${REPOS[@]}"; do
+    echo "Checking repository: $REPO"
+    cd $REPO || continue
+    git fetch --all
     
-    // Create SOAP envelope and body
-    SOAPEnvelope envelope = soapPart.getEnvelope();
-    SOAPBody soapBody = envelope.getBody();
-
-    // Optionally set the default namespace on the envelope (if needed)
-    envelope.addNamespaceDeclaration("ns2", "http://example.com/ns2");
-
-    // JAXB context and marshaller for your JAXB class
-    JAXBContext jaxbContext = JAXBContext.newInstance(jaxbObject.getClass());
-    Marshaller marshaller = jaxbContext.createMarshaller();
-    marshaller.setProperty(Marshaller.JAXB_FORMATTED_OUTPUT, Boolean.TRUE);
-
-    // Marshal JAXB object to a DOMResult to embed it in SOAP body
-    DOMResult domResult = new DOMResult();
-    marshaller.marshal(jaxbObject, domResult);
-
-    // Append the JAXB content as the SOAP body content
-    soapBody.addDocument((org.w3c.dom.Document) domResult.getNode());
-
-    // Save changes and return the SOAP message
-    soapMessage.saveChanges();
-    return soapMessage;
-}
+    # Loop through all branches
+    for BRANCH in $(git branch -r | grep -v '\->'); do
+        echo "Checking branch: $BRANCH"
+        git checkout $BRANCH --quiet
+        
+        # Search for Struts references
+        if git grep -qE "org\.apache\.struts|struts2" -- '**/pom.xml' '**/build.gradle'; then
+            echo "Struts detected in $REPO on branch $BRANCH"
+        fi
+    done
+    cd ..
+done
