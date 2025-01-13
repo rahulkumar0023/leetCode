@@ -1,22 +1,71 @@
-#!/bin/bash
+import org.bouncycastle.openpgp.*;
+import org.bouncycastle.openpgp.operator.jcajce.JcePGPDataEncryptorBuilder;
+import org.bouncycastle.openpgp.operator.jcajce.JcePublicKeyKeyEncryptionMethodGenerator;
 
-# List of repositories
-REPOS=("repo1" "repo2" "repo3")
+import java.io.*;
 
-for REPO in "${REPOS[@]}"; do
-    echo "Checking repository: $REPO"
-    cd $REPO || continue
-    git fetch --all
-    
-    # Loop through all branches
-    for BRANCH in $(git branch -r | grep -v '\->'); do
-        echo "Checking branch: $BRANCH"
-        git checkout $BRANCH --quiet
-        
-        # Search for Struts references
-        if git grep -qE "org\.apache\.struts|struts2" -- '**/pom.xml' '**/build.gradle'; then
-            echo "Struts detected in $REPO on branch $BRANCH"
-        fi
-    done
-    cd ..
-done
+public class SimplePGPEncryptUtility {
+
+    // Method to encrypt dynamic data and return as InputStream
+    public InputStream encryptToInputStream(InputStream rawDataStream, InputStream publicKeyStream) throws Exception {
+        // Create a PipedInputStream and PipedOutputStream
+        PipedOutputStream pipedOutputStream = new PipedOutputStream();
+        PipedInputStream pipedInputStream = new PipedInputStream(pipedOutputStream);
+
+        // Start a thread to handle encryption
+        new Thread(() -> {
+            try {
+                encryptData(rawDataStream, pipedOutputStream, publicKeyStream);
+                pipedOutputStream.close(); // Signal end of data
+            } catch (Exception e) {
+                e.printStackTrace();
+                try {
+                    pipedOutputStream.close();
+                } catch (IOException ioException) {
+                    ioException.printStackTrace();
+                }
+            }
+        }).start();
+
+        return pipedInputStream;
+    }
+
+    // Helper method to encrypt data and write to OutputStream
+    private void encryptData(InputStream rawDataStream, OutputStream encryptedOutputStream, InputStream publicKeyStream) throws Exception {
+        PGPPublicKey publicKey = readPublicKey(publicKeyStream);
+
+        // Set up PGP encryption
+        PGPEncryptedDataGenerator generator = new PGPEncryptedDataGenerator(
+                new JcePGPDataEncryptorBuilder(PGPEncryptedData.CAST5)
+                        .setWithIntegrityPacket(true)
+                        .setSecureRandom(new java.security.SecureRandom())
+                        .setProvider("BC"));
+
+        // Add public key for encryption
+        generator.addMethod(new JcePublicKeyKeyEncryptionMethodGenerator(publicKey).setProvider("BC"));
+
+        try (OutputStream encryptedOut = generator.open(encryptedOutputStream, new byte[1 << 16])) {
+            byte[] buffer = new byte[1024];
+            int length;
+            while ((length = rawDataStream.read(buffer)) > 0) {
+                encryptedOut.write(buffer, 0, length);
+            }
+        }
+    }
+
+    // Helper method to load a public key
+    private PGPPublicKey readPublicKey(InputStream publicKeyStream) throws IOException, PGPException {
+        PGPPublicKeyRingCollection keyRingCollection = new PGPPublicKeyRingCollection(
+                PGPUtil.getDecoderStream(publicKeyStream), null);
+
+        for (PGPPublicKeyRing keyRing : keyRingCollection) {
+            for (PGPPublicKey key : keyRing) {
+                if (key.isEncryptionKey()) {
+                    return key;
+                }
+            }
+        }
+
+        throw new IllegalArgumentException("No encryption key found in the provided public key.");
+    }
+}
