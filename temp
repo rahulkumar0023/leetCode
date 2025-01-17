@@ -120,3 +120,18 @@ public SynchronizedItemStreamReader<MyData> synchronizedItemStreamReader(Decrypt
     synchronizedReader.setDelegate(multiResourceItemReader);
     return synchronizedReader;
 }
+
+import org.springframework.context.annotation.Bean;
+
+@Bean
+public DecryptingMultiResourceItemReader<MyData> decryptingMultiResourceItemReader(CosService cosService, Decryptor decryptor) {
+    // Step 1: Fetch the list of encrypted files from COS
+    List<InputStreamResource> encryptedFiles = cosService.fetchFiles("my-bucket", "encrypted-files/");
+
+    // Step 2: Pass the encrypted files to the reader
+    DecryptingMultiResourceItemReader<MyData> multiResourceItemReader = new DecryptingMultiResourceItemReader<>(decryptor);
+    multiResourceItemReader.setEncryptedResources(encryptedFiles);
+
+    return multiResourceItemReader;
+}
+
