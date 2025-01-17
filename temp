@@ -1,71 +1,122 @@
-import org.bouncycastle.openpgp.*;
-import org.bouncycastle.openpgp.operator.jcajce.JcePGPDataEncryptorBuilder;
-import org.bouncycastle.openpgp.operator.jcajce.JcePublicKeyKeyEncryptionMethodGenerator;
+import com.amazonaws.services.s3.AmazonS3;
+import com.amazonaws.services.s3.AmazonS3ClientBuilder;
+import com.amazonaws.services.s3.model.S3Object;
+import com.amazonaws.services.s3.model.ObjectListing;
+import com.amazonaws.services.s3.model.S3ObjectSummary;
+import org.springframework.core.io.InputStreamResource;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class CosService {
+
+    private final AmazonS3 s3Client = AmazonS3ClientBuilder.defaultClient();
+
+    public List<InputStreamResource> fetchFiles(String bucketName, String prefix) {
+        List<InputStreamResource> resources = new ArrayList<>();
+        ObjectListing objectListing = s3Client.listObjects(bucketName, prefix);
+
+        for (S3ObjectSummary summary : objectListing.getObjectSummaries()) {
+            S3Object s3Object = s3Client.getObject(bucketName, summary.getKey());
+            resources.add(new InputStreamResource(s3Object.getObjectContent()));
+        }
+
+        return resources;
+    }
+}
+
+
+import org.bouncycastle.openpgp.PGPPrivateKey;
+import org.bouncycastle.openpgp.PGPObjectFactory;
+import org.bouncycastle.openpgp.PGPPublicKeyEncryptedData;
+import org.bouncycastle.openpgp.PGPUtil;
 
 import java.io.*;
+import java.util.zip.ZipInputStream;
 
-public class SimplePGPEncryptUtility {
+public class PgpDecryptionUtils {
 
-    // Method to encrypt dynamic data and return as InputStream
-    public InputStream encryptToInputStream(InputStream rawDataStream, InputStream publicKeyStream) throws Exception {
-        // Create a PipedInputStream and PipedOutputStream
-        PipedOutputStream pipedOutputStream = new PipedOutputStream();
-        PipedInputStream pipedInputStream = new PipedInputStream(pipedOutputStream);
+    public InputStream decryptAndDecompress(InputStream encryptedInputStream, PGPPrivateKey privateKey, char[] passphrase) throws Exception {
+        // Step 1: Decrypt the PGP file
+        InputStream decryptedStream = decrypt(encryptedInputStream, privateKey, passphrase);
 
-        // Start a thread to handle encryption
-        new Thread(() -> {
-            try {
-                encryptData(rawDataStream, pipedOutputStream, publicKeyStream);
-                pipedOutputStream.close(); // Signal end of data
-            } catch (Exception e) {
-                e.printStackTrace();
-                try {
-                    pipedOutputStream.close();
-                } catch (IOException ioException) {
-                    ioException.printStackTrace();
-                }
-            }
-        }).start();
-
-        return pipedInputStream;
+        // Step 2: Decompress the ZIP file
+        return decompressZip(decryptedStream);
     }
 
-    // Helper method to encrypt data and write to OutputStream
-    private void encryptData(InputStream rawDataStream, OutputStream encryptedOutputStream, InputStream publicKeyStream) throws Exception {
-        PGPPublicKey publicKey = readPublicKey(publicKeyStream);
+    private InputStream decrypt(InputStream encryptedInputStream, PGPPrivateKey privateKey, char[] passphrase) throws Exception {
+        InputStream pgpInputStream = PGPUtil.getDecoderStream(encryptedInputStream);
+        PGPObjectFactory pgpObjectFactory = new PGPObjectFactory(pgpInputStream, null);
 
-        // Set up PGP encryption
-        PGPEncryptedDataGenerator generator = new PGPEncryptedDataGenerator(
-                new JcePGPDataEncryptorBuilder(PGPEncryptedData.CAST5)
-                        .setWithIntegrityPacket(true)
-                        .setSecureRandom(new java.security.SecureRandom())
-                        .setProvider("BC"));
-
-        // Add public key for encryption
-        generator.addMethod(new JcePublicKeyKeyEncryptionMethodGenerator(publicKey).setProvider("BC"));
-
-        try (OutputStream encryptedOut = generator.open(encryptedOutputStream, new byte[1 << 16])) {
-            byte[] buffer = new byte[1024];
-            int length;
-            while ((length = rawDataStream.read(buffer)) > 0) {
-                encryptedOut.write(buffer, 0, length);
-            }
-        }
+        PGPPublicKeyEncryptedData encryptedData = (PGPPublicKeyEncryptedData) pgpObjectFactory.nextObject();
+        return new BufferedInputStream(encryptedData.getDataStream(privateKey, "BC"));
     }
 
-    // Helper method to load a public key
-    private PGPPublicKey readPublicKey(InputStream publicKeyStream) throws IOException, PGPException {
-        PGPPublicKeyRingCollection keyRingCollection = new PGPPublicKeyRingCollection(
-                PGPUtil.getDecoderStream(publicKeyStream), null);
-
-        for (PGPPublicKeyRing keyRing : keyRingCollection) {
-            for (PGPPublicKey key : keyRing) {
-                if (key.isEncryptionKey()) {
-                    return key;
-                }
-            }
-        }
-
-        throw new IllegalArgumentException("No encryption key found in the provided public key.");
+    private InputStream decompressZip(InputStream decryptedStream) throws IOException {
+        ZipInputStream zipInputStream = new ZipInputStream(decryptedStream);
+        zipInputStream.getNextEntry(); // Access the first entry in the ZIP file
+        return new BufferedInputStream(zipInputStream);
     }
+}
+
+
+import org.springframework.batch.item.file.MultiResourceItemReader;
+import org.springframework.core.io.InputStreamResource;
+
+import java.util.List;
+
+public class DecryptingMultiResourceItemReader<T> extends MultiResourceItemReader<T> {
+
+    private final PgpDecryptionUtils pgpDecryptionUtils;
+    private final PGPPrivateKey privateKey;
+    private final char[] passphrase;
+
+    public DecryptingMultiResourceItemReader(PgpDecryptionUtils pgpDecryptionUtils, PGPPrivateKey privateKey, char[] passphrase) {
+        this.pgpDecryptionUtils = pgpDecryptionUtils;
+        this.privateKey = privateKey;
+        this.passphrase = passphrase;
+    }
+
+    public void setEncryptedResources(List<InputStreamResource> encryptedResources) {
+        setResources(encryptedResources.stream()
+                .map(resource -> {
+                    try {
+                        return new InputStreamResource(pgpDecryptionUtils.decryptAndDecompress(resource.getInputStream(), privateKey, passphrase));
+                    } catch (Exception e) {
+                        throw new RuntimeException("Error decrypting and decompressing resource", e);
+                    }
+                }).toArray(InputStreamResource[]::new));
+    }
+}
+import org.springframework.batch.item.file.FlatFileItemReader;
+import org.springframework.batch.item.file.mapping.DefaultLineMapper;
+import org.springframework.batch.item.file.transform.DelimitedLineTokenizer;
+
+@Bean
+public FlatFileItemReader<MyData> flatFileItemReader() {
+    FlatFileItemReader<MyData> reader = new FlatFileItemReader<>();
+    reader.setLinesToSkip(1); // Skip header line
+
+    DefaultLineMapper<MyData> lineMapper = new DefaultLineMapper<>();
+    DelimitedLineTokenizer tokenizer = new DelimitedLineTokenizer();
+    tokenizer.setNames("column1", "column2", "column3");
+    lineMapper.setLineTokenizer(tokenizer);
+    lineMapper.setFieldSetMapper(fieldSet -> new MyData(
+            fieldSet.readString("column1"),
+            fieldSet.readInt("column2"),
+            fieldSet.readString("column3")
+    ));
+    reader.setLineMapper(lineMapper);
+
+    return reader;
+}
+
+
+import org.springframework.batch.item.support.SynchronizedItemStreamReader;
+
+@Bean
+public SynchronizedItemStreamReader<MyData> synchronizedItemStreamReader(DecryptingMultiResourceItemReader<MyData> multiResourceItemReader) {
+    SynchronizedItemStreamReader<MyData> synchronizedReader = new SynchronizedItemStreamReader<>();
+    synchronizedReader.setDelegate(multiResourceItemReader);
+    return synchronizedReader;
 }
