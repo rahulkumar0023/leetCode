@@ -285,3 +285,129 @@ public class BatchProcessingApplication {
 5. **Spring Batch Job** runs the step.
 
 Let me know if you need further help with testing or debugging! 🚀
+
+
+
+
+
+
+
+
+=================================================================================
+
+The **`fetchEncryptedFiles`** method is called during the **bean creation of `DecryptingMultiResourceItemReader`**, which happens before the Spring Batch step starts processing. This ensures that all encrypted files are fetched from the COS bucket and prepared for processing.
+
+---
+
+### **Where `fetchEncryptedFiles` is Called**
+
+The `fetchEncryptedFiles` method is invoked in the `@Bean` definition of the `DecryptingMultiResourceItemReader`. This bean setup happens **during the Spring context initialization**, before the job execution begins.
+
+---
+
+### **How it Works**
+
+#### **1. Integration in `DecryptingMultiResourceItemReader` Bean**
+
+```java
+@Bean
+public DecryptingMultiResourceItemReader<MyData> decryptingMultiResourceItemReader(
+        CosService cosService, // Fetch files
+        DecryptionUtil decryptionUtil, // Decrypt files
+        UnzipUtil unzipUtil, // Unzip files
+        FlatFileItemReader<MyData> flatFileItemReader // Process CSV
+) {
+    // Step 1: Fetch encrypted files from the COS bucket
+    Resource[] encryptedFiles = cosService.fetchEncryptedFiles("my-bucket", "encrypted-files/");
+
+    // Step 2: Create the DecryptingMultiResourceItemReader
+    DecryptingMultiResourceItemReader<MyData> multiResourceItemReader =
+            new DecryptingMultiResourceItemReader<>(decryptionUtil, unzipUtil);
+
+    // Step 3: Set the fetched files as resources
+    multiResourceItemReader.setEncryptedResources(encryptedFiles);
+
+    // Step 4: Set the FlatFileItemReader as the delegate
+    multiResourceItemReader.setDelegate(flatFileItemReader);
+
+    return multiResourceItemReader;
+}
+```
+
+---
+
+#### **2. Full Workflow**
+
+1. **`fetchEncryptedFiles`** is invoked when the `DecryptingMultiResourceItemReader` bean is initialized.
+2. It retrieves all `.zip.pgp` files from the specified COS bucket and stores them as Spring `Resource` objects.
+3. These resources are passed to the `DecryptingMultiResourceItemReader` via the `setEncryptedResources` method.
+4. During job execution, `DecryptingMultiResourceItemReader`:
+   - Decrypts each file.
+   - Extracts the `.csv` file.
+   - Delegates the processing of the CSV rows to the `FlatFileItemReader`.
+
+---
+
+### **Sequence of Execution**
+
+1. **Spring Context Initialization**:
+   - The `fetchEncryptedFiles` method is invoked when the `DecryptingMultiResourceItemReader` bean is created.
+   - This happens before the Spring Batch job starts.
+
+2. **Job Execution**:
+   - The Spring Batch job uses the `DecryptingMultiResourceItemReader` to process the fetched files.
+
+---
+
+### **Code Recap**
+
+#### **1. Fetching Files in Bean Creation**
+
+The `fetchEncryptedFiles` call happens here:
+
+```java
+Resource[] encryptedFiles = cosService.fetchEncryptedFiles("my-bucket", "encrypted-files/");
+```
+
+This is part of the `DecryptingMultiResourceItemReader` bean definition.
+
+#### **2. Reader Configuration**
+
+```java
+@Bean
+public DecryptingMultiResourceItemReader<MyData> decryptingMultiResourceItemReader(
+        CosService cosService,
+        DecryptionUtil decryptionUtil,
+        UnzipUtil unzipUtil,
+        FlatFileItemReader<MyData> flatFileItemReader) {
+
+    Resource[] encryptedFiles = cosService.fetchEncryptedFiles("my-bucket", "encrypted-files/");
+
+    DecryptingMultiResourceItemReader<MyData> multiResourceItemReader =
+            new DecryptingMultiResourceItemReader<>(decryptionUtil, unzipUtil);
+    multiResourceItemReader.setEncryptedResources(encryptedFiles);
+    multiResourceItemReader.setDelegate(flatFileItemReader);
+
+    return multiResourceItemReader;
+}
+```
+
+---
+
+### **Execution Flow Summary**
+
+1. **Step 1**: **Fetch Files**
+   - `fetchEncryptedFiles` fetches `.zip.pgp` files from the bucket.
+
+2. **Step 2**: **Decrypt and Unzip**
+   - The `DecryptingMultiResourceItemReader` decrypts the `.pgp` files and unzips the `.zip` files.
+
+3. **Step 3**: **Process CSV**
+   - The `FlatFileItemReader` processes the CSV rows.
+
+4. **Spring Batch Step**:
+   - The `SynchronizedItemStreamReader` ensures thread safety if multi-threading is used.
+
+---
+
+Let me know if you need further clarification! 🚀
