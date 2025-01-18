@@ -238,3 +238,134 @@ public class UnzipFiles {
     }
 }
 
+
+=========================================
+import org.springframework.batch.item.file.MultiResourceItemReader;
+import org.springframework.core.io.InputStreamResource;
+import org.springframework.core.io.Resource;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+
+public class DecryptingMultiResourceItemReader<T> extends MultiResourceItemReader<T> {
+
+    private final Decryptor decryptor; // Your decryption utility
+
+    public DecryptingMultiResourceItemReader(Decryptor decryptor) {
+        this.decryptor = decryptor;
+    }
+
+    public void setEncryptedResources(Resource[] encryptedResources) {
+        // Wrap each resource with the decryption logic
+        Resource[] decryptedResources = new Resource[encryptedResources.length];
+        for (int i = 0; i < encryptedResources.length; i++) {
+            try {
+                decryptedResources[i] = decryptResource(encryptedResources[i]);
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to decrypt resource: " + encryptedResources[i].getFilename(), e);
+            }
+        }
+        super.setResources(decryptedResources);
+    }
+
+    private Resource decryptResource(Resource encryptedResource) throws Exception {
+        InputStream encryptedStream = encryptedResource.getInputStream();
+
+        // Use ByteArrayOutputStream to capture the decrypted output
+        ByteArrayOutputStream decryptedOutputStream = new ByteArrayOutputStream();
+        decryptor.decrypt(encryptedStream, decryptedOutputStream);
+
+        // Convert the decrypted output to an InputStream and return it as a Resource
+        InputStream decryptedInputStream = new ByteArrayInputStream(decryptedOutputStream.toByteArray());
+        return new InputStreamResource(decryptedInputStream);
+    }
+}
+=========================================
+import java.io.InputStream;
+import java.io.OutputStream;
+
+public class Decryptor {
+
+    public void decrypt(InputStream encryptedStream, OutputStream decryptedStream) throws Exception {
+        // Your decryption logic here
+        // Example: Using a PGP library to decrypt the stream
+        System.out.println("Decrypting file...");
+        // Write the decrypted data to the decryptedStream
+    }
+}
+
+================================================================
+
+import org.springframework.core.io.InputStreamResource;
+import org.springframework.core.io.Resource;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class CosService {
+
+    public Resource[] fetchEncryptedFiles() {
+        // Simulate fetching files from a COS bucket
+        List<Resource> resources = new ArrayList<>();
+        resources.add(new InputStreamResource(getClass().getResourceAsStream("/path/to/encrypted-file1.pgp")));
+        resources.add(new InputStreamResource(getClass().getResourceAsStream("/path/to/encrypted-file2.pgp")));
+        return resources.toArray(new Resource[0]);
+    }
+}
+
+=============================================================
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class BatchConfiguration {
+
+    @Bean
+    public DecryptingMultiResourceItemReader<MyData> decryptingMultiResourceItemReader(CosService cosService, Decryptor decryptor) {
+        Resource[] encryptedFiles = cosService.fetchEncryptedFiles();
+
+        DecryptingMultiResourceItemReader<MyData> multiResourceItemReader = new DecryptingMultiResourceItemReader<>(decryptor);
+        multiResourceItemReader.setEncryptedResources(encryptedFiles);
+
+        return multiResourceItemReader;
+    }
+}
+
+===========================================================
+import org.springframework.batch.core.Step;
+import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
+import org.springframework.batch.item.ItemWriter;
+import org.springframework.context.annotation.Bean;
+
+@Configuration
+public class StepConfiguration {
+
+    @Bean
+    public Step processStep(StepBuilderFactory stepBuilderFactory,
+                            DecryptingMultiResourceItemReader<MyData> decryptingReader,
+                            ItemWriter<MyData> itemWriter) {
+        return stepBuilderFactory.get("processStep")
+                .<MyData, MyData>chunk(10)
+                .reader(decryptingReader)
+                .writer(itemWriter)
+                .build();
+    }
+}
+
+=======================================================
+import org.springframework.batch.item.ItemWriter;
+
+import java.util.List;
+
+public class MyDataWriter implements ItemWriter<MyData> {
+
+    @Override
+    public void write(List<? extends MyData> items) throws Exception {
+        for (MyData item : items) {
+            System.out.println("Processed Item: " + item);
+        }
+    }
+}
+
