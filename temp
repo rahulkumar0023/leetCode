@@ -411,3 +411,10 @@ public DecryptingMultiResourceItemReader<MyData> decryptingMultiResourceItemRead
 ---
 
 Let me know if you need further clarification! 🚀
+
+
+public void moveFile(String bucketName, String sourceKey, String destinationKey) {
+        // Step 1: Copy the file
+        CopyObjectRequest copyRequest = new CopyObjectRequest(bucketName, sourceKey, bucketName, destinationKey);
+        s3Client.copyObject(copyRequest);
+    }
