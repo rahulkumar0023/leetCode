@@ -65,33 +65,25 @@ public class CosService {
 
 Use your existing `decrypt` method to handle the decryption logic and wrap it in a utility class.
 
-##### **Decryption Utility**
-```java
-import org.springframework.core.io.InputStreamResource;
-import org.springframework.core.io.Resource;
+@Bean
+public DecryptingMultiResourceItemReader<MyData> decryptingMultiResourceItemReader(
+        CosService cosService,
+        DecryptionUtil decryptionUtil,
+        UnzipUtil unzipUtil,
+        FlatFileItemReader<MyData> flatFileItemReader) {
+    
+    // Fetch encrypted resources from COS
+    Resource[] encryptedFiles = cosService.fetchEncryptedFiles("my-bucket", "encrypted-files/");
+    
+    // Create the custom reader and set resources
+    DecryptingMultiResourceItemReader<MyData> multiResourceItemReader =
+            new DecryptingMultiResourceItemReader<>(decryptionUtil, unzipUtil);
+    multiResourceItemReader.setEncryptedResources(encryptedFiles);
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
+    // Set the FlatFileItemReader as the delegate reader
+    multiResourceItemReader.setDelegate(flatFileItemReader);
 
-public class DecryptionUtil {
-
-    private final Decryptor decryptor;
-
-    public DecryptionUtil(Decryptor decryptor) {
-        this.decryptor = decryptor;
-    }
-
-    public Resource decryptResource(Resource encryptedResource) throws Exception {
-        InputStream encryptedStream = encryptedResource.getInputStream();
-
-        // Decrypt to a ByteArrayOutputStream
-        ByteArrayOutputStream decryptedOutputStream = new ByteArrayOutputStream();
-        decryptor.decrypt(encryptedStream, decryptedOutputStream);
-
-        // Convert the decrypted output to an InputStream and wrap as a Resource
-        return new InputStreamResource(new ByteArrayInputStream(decryptedOutputStream.toByteArray()));
-    }
+    return multiResourceItemReader;
 }
 ```
 
