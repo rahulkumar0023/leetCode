@@ -261,3 +261,13 @@ public class BatchProcessingApplication {
 ---
 
 Let me know if you need further clarifications or specific adjustments! 🚀
+
+
+
+ibm.mq.queueManager=QM1
+ibm.mq.topic=MY.TOPIC
+ibm.mq.subscriptionName=MY.DURABLE.SUB
+ibm.mq.channel=DEV.APP.SVRCONN
+ibm.mq.connName=localhost(1414)
+ibm.mq.user=mquser
+ibm.mq.password=passw0rd
