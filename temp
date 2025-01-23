@@ -264,10 +264,55 @@ Let me know if you need further clarifications or specific adjustments! 🚀
 
 
 
-ibm.mq.queueManager=QM1
-ibm.mq.topic=MY.TOPIC
-ibm.mq.subscriptionName=MY.DURABLE.SUB
-ibm.mq.channel=DEV.APP.SVRCONN
-ibm.mq.connName=localhost(1414)
-ibm.mq.user=mquser
-ibm.mq.password=passw0rd
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+import org.springframework.core.io.ByteArrayResource;
+import org.springframework.core.io.Resource;
+
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.mockito.Mockito.*;
+
+public class DecryptionUtilTest {
+
+    @Test
+    void testDecryptResource() throws Exception {
+        // Mock the Decryptor
+        Decryptor mockDecryptor = Mockito.mock(Decryptor.class);
+
+        // Create an instance of DecryptionUtil with the mocked Decryptor
+        DecryptionUtil decryptionUtil = new DecryptionUtil(mockDecryptor);
+
+        // Mock encrypted input and the expected decrypted content
+        String encryptedContent = "EncryptedContent";
+        String decryptedContent = "DecryptedContent";
+
+        // Mock the behavior of the decryptor
+        doAnswer(invocation -> {
+            InputStream encryptedStream = invocation.getArgument(0);
+            ByteArrayOutputStream decryptedOutputStream = invocation.getArgument(1);
+
+            // Simulate decryption: write the expected decrypted content
+            decryptedOutputStream.write(decryptedContent.getBytes(StandardCharsets.UTF_8));
+            return null;
+        }).when(mockDecryptor).decrypt(any(InputStream.class), any(ByteArrayOutputStream.class));
+
+        // Create a mock encrypted resource
+        Resource encryptedResource = new ByteArrayResource(encryptedContent.getBytes(StandardCharsets.UTF_8));
+
+        // Call the decryptResource method
+        Resource decryptedResource = decryptionUtil.decryptResource(encryptedResource);
+
+        // Verify the results
+        assertNotNull(decryptedResource, "Decrypted resource should not be null!");
+        String actualDecryptedContent = new String(decryptedResource.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        assertEquals(decryptedContent, actualDecryptedContent, "Decrypted content does not match!");
+
+        // Verify that the decrypt method was called
+        verify(mockDecryptor, times(1)).decrypt(any(InputStream.class), any(ByteArrayOutputStream.class));
+    }
+}
