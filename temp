@@ -316,3 +316,149 @@ public class DecryptionUtilTest {
         verify(mockDecryptor, times(1)).decrypt(any(InputStream.class), any(ByteArrayOutputStream.class));
     }
 }
+
+If your .asc file contains 3 secret key packets and each has a signature packet, the structure indicates:
+	1.	One primary secret key: Used for signing or certifying.
+	2.	Two secret subkeys: Likely used for encryption or authentication.
+	3.	Signature packets: Used to verify the integrity and ownership of the keys.
+
+This is typical for PGP key files, where:
+	•	The primary key is used for signing and generating subkeys.
+	•	The subkeys are used for encryption, signing, or authentication tasks.
+
+Structure Overview
+
+When you run gpg --list-packets private_key.asc, you might see something like this:
+
+:public key packet:
+    version 4, algo 1, created 1673900000, expires 0
+    keyid: 123456789ABCDEF1
+:secret key packet:
+    version 4, algo 1, created 1673900000, expires 0
+    keyid: 123456789ABCDEF1
+:signature packet:
+    version 4, type 0x13 (key revocation signature), keyid 123456789ABCDEF1
+:secret subkey packet:
+    version 4, algo 1, created 1673900100, expires 0
+    keyid: 23456789ABCDEF12
+:signature packet:
+    version 4, type 0x18 (subkey binding signature), keyid 123456789ABCDEF1
+:secret subkey packet:
+    version 4, algo 1, created 1673900200, expires 0
+    keyid: 3456789ABCDEF123
+:signature packet:
+    version 4, type 0x18 (subkey binding signature), keyid 123456789ABCDEF1
+
+What This Means
+	1.	Primary Secret Key:
+	•	Key ID: 123456789ABCDEF1
+	•	Role: Used for signing and certifying subkeys.
+	•	Paired with the :public key packet.
+	2.	Subkeys:
+	•	Subkey 1: Key ID 23456789ABCDEF12
+	•	Subkey 2: Key ID 3456789ABCDEF123
+	•	Subkeys are usually used for encryption or authentication.
+	3.	Signatures:
+	•	The binding signatures (type 0x18) confirm that the subkeys are tied to the primary key.
+	•	The key revocation signature (type 0x13) ensures the key can be revoked if compromised.
+
+How to Handle This in Java
+
+1. Parse the File and Identify Key Types
+
+Use Bouncy Castle to iterate through the PGPSecretKeyRingCollection, and for each key, identify whether it’s:
+	•	A primary key.
+	•	A subkey.
+
+Code Example:
+
+import org.bouncycastle.openpgp.*;
+import org.bouncycastle.openpgp.operator.jcajce.JcaKeyFingerprintCalculator;
+
+import java.io.FileInputStream;
+import java.io.InputStream;
+
+public class PGPKeyAnalyzer {
+
+    public static void analyzeKeyFile(String privateKeyFilePath) throws Exception {
+        try (InputStream keyInputStream = PGPUtil.getDecoderStream(new FileInputStream(privateKeyFilePath))) {
+            // Parse the secret keyring collection
+            PGPSecretKeyRingCollection secretKeyRingCollection =
+                new PGPSecretKeyRingCollection(keyInputStream, new JcaKeyFingerprintCalculator());
+
+            // Iterate through keyrings
+            for (PGPSecretKeyRing secretKeyRing : secretKeyRingCollection) {
+                System.out.println("Keyring ID: " + Long.toHexString(secretKeyRing.getPublicKey().getKeyID()));
+
+                // Iterate through keys (primary and subkeys)
+                for (PGPSecretKey secretKey : secretKeyRing) {
+                    System.out.println("  Key ID: " + Long.toHexString(secretKey.getKeyID()));
+                    System.out.println("  Is Signing Key: " + secretKey.isSigningKey());
+                    System.out.println("  Key Encryption Algorithm: " + secretKey.getPublicKey().getAlgorithm());
+                }
+            }
+        }
+    }
+
+    public static void main(String[] args) {
+        try {
+            analyzeKeyFile("path/to/private_key.asc");
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+}
+
+2. Extract the Keys
+
+If you need to extract the private key (e.g., for decryption or signing), you’ll need to:
+	1.	Locate the specific subkey (used for encryption or signing).
+	2.	Decrypt the private key using the passphrase.
+
+Code to Extract Private Keys:
+
+import org.bouncycastle.openpgp.*;
+import org.bouncycastle.openpgp.operator.jcajce.JcePBESecretKeyDecryptorBuilder;
+
+public class PrivateKeyExtractor {
+
+    public static PGPPrivateKey extractPrivateKey(PGPSecretKey secretKey, String passphrase) throws Exception {
+        return secretKey.extractPrivateKey(
+            new JcePBESecretKeyDecryptorBuilder().setProvider("BC").build(passphrase.toCharArray())
+        );
+    }
+}
+
+3. Decrypt a File Using the Correct Subkey
+
+Subkeys are often used for decryption. If your .asc file contains multiple subkeys:
+	1.	Identify the correct subkey based on its usage (e.g., encryption).
+	2.	Extract the private key from the subkey.
+	3.	Use the private key for decryption.
+
+Code for Decryption:
+
+for (PGPSecretKey secretKey : secretKeyRing) {
+    if (secretKey.isEncryptionKey()) {
+        PGPPrivateKey privateKey = extractPrivateKey(secretKey, "your-passphrase");
+        // Use privateKey for decryption
+    }
+}
+
+4. Identify and Use Signatures
+
+The signature packets can be used to:
+	•	Verify that a subkey is bound to the primary key.
+	•	Ensure the integrity and authenticity of the keys.
+
+Bouncy Castle provides utilities to verify signatures. However, you generally don’t need to handle signature packets manually unless you’re performing signature verification or cryptographic analysis.
+
+Next Steps
+	1.	Verify the Correct Key for Decryption:
+	•	Use the isEncryptionKey() method to filter keys for decryption.
+	2.	Handle Passphrases:
+	•	Ensure you have the correct passphrase to unlock the private key.
+	3.	Test Decryption:
+	•	Once you’ve extracted the correct private key, test it by decrypting a file or message.
+
+Let me know if you need help implementing decryption or handling signatures! 🚀
