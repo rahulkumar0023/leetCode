@@ -462,3 +462,122 @@ Next Steps
 	•	Once you’ve extracted the correct private key, test it by decrypting a file or message.
 
 Let me know if you need help implementing decryption or handling signatures! 🚀
+
+
+
+The error PGPPublicKeyRing found where PGPSecretKeyRing expected occurs because the file you’re attempting to load as a private key (PGPSecretKeyRingCollection) contains only public keys or is being parsed incorrectly.
+
+This can happen due to:
+	1.	Incorrect keyring type: The .asc file may contain public keys, but you’re trying to load it as a secret keyring.
+	2.	File format issues: The .asc file might contain a mix of public and secret keys, and you need to filter the correct key type.
+
+Let’s fix this step by step.
+
+1. Validate the File
+
+Before loading the key in your Java code, validate the .asc file using GPG on the terminal.
+
+Inspect the Key File
+
+Run:
+
+gpg --list-packets private_key.asc
+
+Look for:
+	•	:secret key packet:: Indicates the presence of a private key.
+	•	:public key packet:: Indicates the file contains a public key.
+
+If you don’t see :secret key packet:, the file does not contain private keys, and you’ll need to export the private keys again.
+
+2. Export the Correct Key (If Necessary)
+
+If the file contains only public keys, you can export the private key using the following GPG command:
+
+gpg --export-secret-keys --armor --output private_key.asc
+
+This will generate an ASCII-armored private key file that can be used in Java.
+
+3. Fix the Java Code
+
+If the .asc file contains both public and private keys, you need to filter out only the private keys while parsing the file.
+
+Updated Code to Handle Mixed Keys
+
+Here’s the updated analyzeKeyFile method:
+
+import org.bouncycastle.openpgp.*;
+import org.bouncycastle.openpgp.operator.jcajce.JcaKeyFingerprintCalculator;
+
+import java.io.FileInputStream;
+import java.io.InputStream;
+
+public class PGPKeyAnalyzer {
+
+    public static void analyzeKeyFile(String privateKeyFilePath) throws Exception {
+        try (InputStream keyInputStream = PGPUtil.getDecoderStream(new FileInputStream(privateKeyFilePath))) {
+            // Load the secret keyring collection
+            Object keyRingObject = new PGPObjectFactory(keyInputStream, new JcaKeyFingerprintCalculator()).nextObject();
+
+            if (keyRingObject instanceof PGPSecretKeyRingCollection) {
+                PGPSecretKeyRingCollection secretKeyRingCollection = (PGPSecretKeyRingCollection) keyRingObject;
+
+                // Iterate through keyrings
+                for (PGPSecretKeyRing secretKeyRing : secretKeyRingCollection) {
+                    System.out.println("Secret Keyring ID: " + Long.toHexString(secretKeyRing.getPublicKey().getKeyID()));
+
+                    // Iterate through keys (primary and subkeys)
+                    for (PGPSecretKey secretKey : secretKeyRing) {
+                        System.out.println("  Secret Key ID: " + Long.toHexString(secretKey.getKeyID()));
+                        System.out.println("  Is Signing Key: " + secretKey.isSigningKey());
+                    }
+                }
+            } else if (keyRingObject instanceof PGPPublicKeyRingCollection) {
+                System.out.println("The file contains only public keys.");
+            } else {
+                System.out.println("Unrecognized keyring type: " + keyRingObject.getClass().getName());
+            }
+        }
+    }
+
+    public static void main(String[] args) {
+        try {
+            String privateKeyPath = "path/to/private_key.asc";
+            analyzeKeyFile(privateKeyPath);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+}
+
+Explanation
+	1.	Check Keyring Type:
+	•	Use PGPObjectFactory to parse the file.
+	•	The nextObject() method helps identify whether the file contains a PGPSecretKeyRingCollection or a PGPPublicKeyRingCollection.
+	2.	Filter Secret Keys:
+	•	If the object is a PGPSecretKeyRingCollection, iterate through the secret keys.
+	•	If the object is a PGPPublicKeyRingCollection, it means the file contains only public keys.
+	3.	Fallback Handling:
+	•	Print a message if the file contains unrecognized or unsupported keyring types.
+
+4. Debugging Tips
+
+If you still encounter issues, check the following:
+	1.	File Content:
+	•	Ensure the file contains private keys (:secret key packet:) by running:
+
+gpg --list-packets private_key.asc
+
+
+	2.	Key Format:
+	•	Ensure the file is ASCII-armored. If not, convert it using GPG:
+
+gpg --export-secret-keys --armor --output private_key.asc
+
+
+	3.	Use Correct Keyring Type:
+	•	Public keys: Use PGPPublicKeyRingCollection.
+	•	Private keys: Use PGPSecretKeyRingCollection.
+	4.	Dependencies:
+	•	Ensure you’re using the latest version of Bouncy Castle (bcprov-jdk15on).
+
+Let me know if this resolves your issue or if you need further assistance! 🚀
