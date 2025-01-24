@@ -581,3 +581,48 @@ gpg --export-secret-keys --armor --output private_key.asc
 	•	Ensure you’re using the latest version of Bouncy Castle (bcprov-jdk15on).
 
 Let me know if this resolves your issue or if you need further assistance! 🚀
+
+
+import org.bouncycastle.openpgp.*;
+import org.bouncycastle.openpgp.operator.jcajce.JcaKeyFingerprintCalculator;
+
+import java.io.FileInputStream;
+import java.io.InputStream;
+
+public class PGPKeyAnalyzer {
+
+    public static void analyzeKeyFile(String privateKeyFilePath) throws Exception {
+        try (InputStream keyInputStream = PGPUtil.getDecoderStream(new FileInputStream(privateKeyFilePath))) {
+            // Load the secret keyring collection
+            Object keyRingObject = new PGPObjectFactory(keyInputStream, new JcaKeyFingerprintCalculator()).nextObject();
+
+            if (keyRingObject instanceof PGPSecretKeyRingCollection) {
+                PGPSecretKeyRingCollection secretKeyRingCollection = (PGPSecretKeyRingCollection) keyRingObject;
+
+                // Iterate through keyrings
+                for (PGPSecretKeyRing secretKeyRing : secretKeyRingCollection) {
+                    System.out.println("Secret Keyring ID: " + Long.toHexString(secretKeyRing.getPublicKey().getKeyID()));
+
+                    // Iterate through keys (primary and subkeys)
+                    for (PGPSecretKey secretKey : secretKeyRing) {
+                        System.out.println("  Secret Key ID: " + Long.toHexString(secretKey.getKeyID()));
+                        System.out.println("  Is Signing Key: " + secretKey.isSigningKey());
+                    }
+                }
+            } else if (keyRingObject instanceof PGPPublicKeyRingCollection) {
+                System.out.println("The file contains only public keys.");
+            } else {
+                System.out.println("Unrecognized keyring type: " + keyRingObject.getClass().getName());
+            }
+        }
+    }
+
+    public static void main(String[] args) {
+        try {
+            String privateKeyPath = "path/to/private_key.asc";
+            analyzeKeyFile(privateKeyPath);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+}
