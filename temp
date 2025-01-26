@@ -1,89 +1,18 @@
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
-import org.springframework.batch.item.ExecutionContext;
-import org.springframework.batch.item.file.FlatFileItemReader;
-import org.springframework.core.io.Resource;
+@Test
+void testSetEncryptedResourcesThrowsException() throws Exception {
+    // Arrange
+    Resource encryptedResource = mock(Resource.class);
+    when(encryptedResource.getFilename()).thenReturn("encrypted_file.gpg");
 
-import java.io.ByteArrayInputStream;
-import java.io.InputStream;
-import java.util.List;
+    // Mock decryption to throw an exception
+    when(decryptionUtil.decryptResource(encryptedResource))
+            .thenThrow(new RuntimeException("Decryption failed"));
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
+    // Act & Assert
+    RuntimeException exception = assertThrows(RuntimeException.class, () -> {
+        multiResourceItemReader.setEncryptedResources(new Resource[]{encryptedResource});
+    });
 
-public class DecryptingMultiResourceItemReaderTest {
-
-    private DecryptingMultiResourceItemReader<CSVModel> multiResourceItemReader;
-    private DecryptionUtil decryptionUtil;
-    private UnzipUtil unzipUtil;
-    private FlatFileItemReader<CSVModel> flatFileItemReader;
-
-    @BeforeEach
-    void setUp() {
-        // Mock dependencies
-        decryptionUtil = mock(DecryptionUtil.class);
-        unzipUtil = mock(UnzipUtil.class);
-
-        // Mock the delegate (FlatFileItemReader)
-        flatFileItemReader = mock(FlatFileItemReader.class);
-
-        // Create the multi-resource item reader
-        multiResourceItemReader = new DecryptingMultiResourceItemReader<>(decryptionUtil, unzipUtil);
-        multiResourceItemReader.setDelegate(flatFileItemReader); // Set the mocked delegate
-    }
-
-    @Test
-    void testSetEncryptedResources_withMockedBehavior() throws Exception {
-        // Arrange
-        Resource encryptedResource1 = mock(Resource.class);
-        Resource encryptedResource2 = mock(Resource.class);
-
-        // Mock resource names (helpful for debugging)
-        when(encryptedResource1.getDescription()).thenReturn("Mocked Encrypted Resource 1");
-        when(encryptedResource2.getDescription()).thenReturn("Mocked Encrypted Resource 2");
-
-        // Mock decrypted resources
-        Resource decryptedResource1 = mock(Resource.class);
-        Resource decryptedResource2 = mock(Resource.class);
-
-        // Mock decryption logic
-        when(decryptionUtil.decryptResource(encryptedResource1)).thenReturn(decryptedResource1);
-        when(decryptionUtil.decryptResource(encryptedResource2)).thenReturn(decryptedResource2);
-
-        // Mock unzipping logic
-        InputStream csvStream1 = new ByteArrayInputStream("1,John,25\n2,Jane,30".getBytes());
-        InputStream csvStream2 = new ByteArrayInputStream("3,Doe,40".getBytes());
-        when(unzipUtil.extractStreamsFromZip(decryptedResource1)).thenReturn(List.of(csvStream1));
-        when(unzipUtil.extractStreamsFromZip(decryptedResource2)).thenReturn(List.of(csvStream2));
-
-        // Act
-        multiResourceItemReader.setResources(new Resource[]{encryptedResource1, encryptedResource2});
-
-        // Verify that the delegate's resources are being set
-        ExecutionContext executionContext = new ExecutionContext();
-        multiResourceItemReader.open(executionContext);
-
-        // Mock delegate behavior to return the CSVModel objects
-        when(flatFileItemReader.read())
-                .thenReturn(new CSVModel(1, "John", 25))
-                .thenReturn(new CSVModel(2, "Jane", 30))
-                .thenReturn(new CSVModel(3, "Doe", 40))
-                .thenReturn(null); // No more data
-
-        // Assert
-        CSVModel firstItem = multiResourceItemReader.read();
-        CSVModel secondItem = multiResourceItemReader.read();
-        CSVModel thirdItem = multiResourceItemReader.read();
-        CSVModel noMoreData = multiResourceItemReader.read();
-
-        assertEquals(new CSVModel(1, "John", 25), firstItem, "First item should match the expected CSVModel");
-        assertEquals(new CSVModel(2, "Jane", 30), secondItem, "Second item should match the expected CSVModel");
-        assertEquals(new CSVModel(3, "Doe", 40), thirdItem, "Third item should match the expected CSVModel");
-        assertNull(noMoreData, "No more data should be available after processing all resources");
-
-        // Verify interactions
-        verify(decryptionUtil, times(2)).decryptResource(any(Resource.class));
-        verify(unzipUtil, times(2)).extractStreamsFromZip(any(Resource.class));
-    }
+    // Verify exception message
+    assertEquals("Decryption failed", exception.getMessage());
 }
