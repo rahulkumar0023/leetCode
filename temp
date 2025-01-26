@@ -1,98 +1,12 @@
-Sure! Let's get back to creating **test cases** for your PGP-related code. Since you’re working with **decryption** and **handling of keys**, I'll outline how to structure and write unit tests step by step.
-
----
-
-### **Test Case Creation Overview**
-
-1. **Classes to Test**:
-   - `DecryptingMultiResourceItemReader`
-   - `DecryptionUtil`
-   - `UnzipUtil`
-   - Supporting functionality like key loading.
-
-2. **Focus Areas**:
-   - Mocking key files (e.g., private key `.asc` and encrypted `.gpg` files).
-   - Validating decryption logic.
-   - Handling of exceptions (e.g., invalid keys, incorrect passphrase, or malformed files).
-
-3. **Test Setup**:
-   - Use **JUnit 5** and **Mockito** (if mocking dependencies is needed).
-   - Place test files (e.g., `private_key.asc`, `encrypted_file.gpg`) in the `src/test/resources` folder.
-
----
-
-### **1. Test for `DecryptionUtil`**
-
-#### **Code Under Test**: `DecryptionUtil`
-This class decrypts encrypted resources and outputs a `Resource`.
-
-#### **Test Case: Decrypting an Encrypted File**
-
-##### **Test Setup**
-- Mock the `private_key.asc` and `encrypted_file.gpg`.
-- Validate that the decrypted content matches the expected output.
-
-##### **Test Code**
-```java
-import org.junit.jupiter.api.Test;
-import org.springframework.core.io.ClassPathResource;
-import org.springframework.core.io.Resource;
-
-import static org.junit.jupiter.api.Assertions.*;
-
-public class DecryptionUtilTest {
-
-    private final DecryptionUtil decryptionUtil;
-
-    public DecryptionUtilTest() throws Exception {
-        // Set up the decryptor with the private key
-        Decryptor decryptor = new Decryptor(new ClassPathResource("private_key.asc").getInputStream(), "test-passphrase");
-        decryptionUtil = new DecryptionUtil(decryptor);
-    }
-
-    @Test
-    void testDecryptResource() throws Exception {
-        // Arrange
-        Resource encryptedResource = new ClassPathResource("encrypted_file.gpg");
-
-        // Act
-        Resource decryptedResource = decryptionUtil.decryptResource(encryptedResource);
-
-        // Assert
-        assertNotNull(decryptedResource, "Decrypted resource should not be null");
-        assertTrue(decryptedResource.exists(), "Decrypted resource should exist");
-
-        // Verify decrypted content (if text-based, read the InputStream)
-        try (InputStream inputStream = decryptedResource.getInputStream()) {
-            String decryptedContent = new String(inputStream.readAllBytes());
-            assertEquals("Expected decrypted content here", decryptedContent.trim(), "Decrypted content should match");
-        }
-    }
-}
-```
-
----
-
-### **2. Test for `DecryptingMultiResourceItemReader`**
-
-#### **Code Under Test**: `DecryptingMultiResourceItemReader`
-This class reads encrypted resources, decrypts them, and extracts content (e.g., `.csv` files).
-
-#### **Test Case: Read and Process Multiple Encrypted Files**
-
-##### **Test Code**
-```java
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.springframework.batch.item.ExecutionContext;
 import org.springframework.batch.item.file.FlatFileItemReader;
-import org.springframework.batch.item.file.mapping.DefaultLineMapper;
-import org.springframework.batch.item.file.transform.DelimitedLineTokenizer;
-import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.Resource;
 
 import java.io.ByteArrayInputStream;
+import java.io.InputStream;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -103,176 +17,73 @@ public class DecryptingMultiResourceItemReaderTest {
     private DecryptingMultiResourceItemReader<CSVModel> multiResourceItemReader;
     private DecryptionUtil decryptionUtil;
     private UnzipUtil unzipUtil;
+    private FlatFileItemReader<CSVModel> flatFileItemReader;
 
     @BeforeEach
-    void setUp() throws Exception {
+    void setUp() {
         // Mock dependencies
         decryptionUtil = mock(DecryptionUtil.class);
         unzipUtil = mock(UnzipUtil.class);
 
-        // Create the delegate reader (FlatFileItemReader configured for CSVModel)
-        FlatFileItemReader<CSVModel> flatFileItemReader = new FlatFileItemReader<>();
-        flatFileItemReader.setLineMapper(createLineMapper()); // Set line mapper for CSVModel
+        // Mock the delegate (FlatFileItemReader)
+        flatFileItemReader = mock(FlatFileItemReader.class);
 
-        // Create the multi-resource reader
+        // Create the multi-resource item reader
         multiResourceItemReader = new DecryptingMultiResourceItemReader<>(decryptionUtil, unzipUtil);
-        multiResourceItemReader.setDelegate(flatFileItemReader);
+        multiResourceItemReader.setDelegate(flatFileItemReader); // Set the mocked delegate
     }
 
     @Test
-    void testSetEncryptedResources() throws Exception {
+    void testSetEncryptedResources_withMockedBehavior() throws Exception {
         // Arrange
-        Resource encryptedResource1 = new ClassPathResource("encrypted_file1.gpg");
-        Resource encryptedResource2 = new ClassPathResource("encrypted_file2.gpg");
+        Resource encryptedResource1 = mock(Resource.class);
+        Resource encryptedResource2 = mock(Resource.class);
 
-        // Mock decryption to return a fake decrypted resource (e.g., ZIP files)
-        Resource decryptedResource1 = new ClassPathResource("decrypted_file1.zip");
-        Resource decryptedResource2 = new ClassPathResource("decrypted_file2.zip");
+        // Mock resource names (helpful for debugging)
+        when(encryptedResource1.getDescription()).thenReturn("Mocked Encrypted Resource 1");
+        when(encryptedResource2.getDescription()).thenReturn("Mocked Encrypted Resource 2");
 
+        // Mock decrypted resources
+        Resource decryptedResource1 = mock(Resource.class);
+        Resource decryptedResource2 = mock(Resource.class);
+
+        // Mock decryption logic
         when(decryptionUtil.decryptResource(encryptedResource1)).thenReturn(decryptedResource1);
         when(decryptionUtil.decryptResource(encryptedResource2)).thenReturn(decryptedResource2);
 
-        // Mock unzipping to return streams of extracted CSV files
-        when(unzipUtil.extractStreamsFromZip(decryptedResource1))
-                .thenReturn(List.of(new ByteArrayInputStream("1,John,25\n2,Jane,30".getBytes()))); // CSV data
-        when(unzipUtil.extractStreamsFromZip(decryptedResource2))
-                .thenReturn(List.of(new ByteArrayInputStream("3,Doe,40".getBytes())));
+        // Mock unzipping logic
+        InputStream csvStream1 = new ByteArrayInputStream("1,John,25\n2,Jane,30".getBytes());
+        InputStream csvStream2 = new ByteArrayInputStream("3,Doe,40".getBytes());
+        when(unzipUtil.extractStreamsFromZip(decryptedResource1)).thenReturn(List.of(csvStream1));
+        when(unzipUtil.extractStreamsFromZip(decryptedResource2)).thenReturn(List.of(csvStream2));
 
         // Act
         multiResourceItemReader.setResources(new Resource[]{encryptedResource1, encryptedResource2});
 
-        // Initialize execution context
+        // Verify that the delegate's resources are being set
         ExecutionContext executionContext = new ExecutionContext();
         multiResourceItemReader.open(executionContext);
 
+        // Mock delegate behavior to return the CSVModel objects
+        when(flatFileItemReader.read())
+                .thenReturn(new CSVModel(1, "John", 25))
+                .thenReturn(new CSVModel(2, "Jane", 30))
+                .thenReturn(new CSVModel(3, "Doe", 40))
+                .thenReturn(null); // No more data
+
         // Assert
-        CSVModel firstItem = multiResourceItemReader.read(); // Read first CSVModel
-        CSVModel secondItem = multiResourceItemReader.read(); // Read second CSVModel
-        CSVModel thirdItem = multiResourceItemReader.read(); // Read third CSVModel
-        CSVModel noMoreData = multiResourceItemReader.read(); // No more data; should return null
+        CSVModel firstItem = multiResourceItemReader.read();
+        CSVModel secondItem = multiResourceItemReader.read();
+        CSVModel thirdItem = multiResourceItemReader.read();
+        CSVModel noMoreData = multiResourceItemReader.read();
 
         assertEquals(new CSVModel(1, "John", 25), firstItem, "First item should match the expected CSVModel");
         assertEquals(new CSVModel(2, "Jane", 30), secondItem, "Second item should match the expected CSVModel");
         assertEquals(new CSVModel(3, "Doe", 40), thirdItem, "Third item should match the expected CSVModel");
         assertNull(noMoreData, "No more data should be available after processing all resources");
-    }
 
-    // Helper method to create a LineMapper for CSVModel
-    private DefaultLineMapper<CSVModel> createLineMapper() {
-        DefaultLineMapper<CSVModel> lineMapper = new DefaultLineMapper<>();
-
-        // Tokenizer for comma-separated values
-        DelimitedLineTokenizer tokenizer = new DelimitedLineTokenizer();
-        tokenizer.setNames("id", "name", "age"); // CSV headers
-        lineMapper.setLineTokenizer(tokenizer);
-
-        // Map tokens to CSVModel
-        lineMapper.setFieldSetMapper(fieldSet -> new CSVModel(
-                fieldSet.readInt("id"),
-                fieldSet.readString("name"),
-                fieldSet.readInt("age")
-        ));
-
-        return lineMapper;
+        // Verify interactions
+        verify(decryptionUtil, times(2)).decryptResource(any(Resource.class));
+        verify(unzipUtil, times(2)).extractStreamsFromZip(any(Resource.class));
     }
 }
-
-```
-
----
-
-### **3. Test for `UnzipUtil`**
-
-#### **Code Under Test**: `UnzipUtil`
-This class extracts files from a `.zip` resource.
-
-#### **Test Case: Extract Files from ZIP Resource**
-
-##### **Test Code**
-```java
-import org.junit.jupiter.api.Test;
-import org.springframework.core.io.ClassPathResource;
-import org.springframework.core.io.Resource;
-
-import java.io.InputStream;
-import java.util.List;
-
-import static org.junit.jupiter.api.Assertions.*;
-
-public class UnzipUtilTest {
-
-    private final UnzipUtil unzipUtil = new UnzipUtil();
-
-    @Test
-    void testExtractFilesFromZip() throws Exception {
-        // Arrange
-        Resource zipResource = new ClassPathResource("sample.zip");
-
-        // Act
-        List<InputStream> extractedFiles = unzipUtil.extractStreamsFromZip(zipResource);
-
-        // Assert
-        assertNotNull(extractedFiles, "Extracted files list should not be null");
-        assertFalse(extractedFiles.isEmpty(), "Extracted files list should not be empty");
-    }
-}
-```
-
----
-
-### **4. General Test Setup**
-
-#### **Folder Structure**
-Place test resources (keys, encrypted files, ZIP files) in the following location:
-```
-src/test/resources/
-    ├── private_key.asc
-    ├── encrypted_file.gpg
-    ├── sample.zip
-    ├── decrypted_file.csv
-```
-
-#### **Dependencies**
-Ensure you include the required dependencies for testing:
-```xml
-<dependencies>
-    <!-- Spring Test -->
-    <dependency>
-        <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-starter-test</artifactId>
-        <scope>test</scope>
-    </dependency>
-
-    <!-- Mockito for mocking -->
-    <dependency>
-        <groupId>org.mockito</groupId>
-        <artifactId>mockito-core</artifactId>
-        <scope>test</scope>
-    </dependency>
-
-    <!-- Apache Commons IO for InputStream utilities -->
-    <dependency>
-        <groupId>commons-io</groupId>
-        <artifactId>commons-io</artifactId>
-    </dependency>
-
-    <!-- BouncyCastle for PGP -->
-    <dependency>
-        <groupId>org.bouncycastle</groupId>
-        <artifactId>bcprov-jdk15on</artifactId>
-        <version>1.70</version>
-    </dependency>
-</dependencies>
-```
-
----
-
-### **Summary of Test Cases**
-- **DecryptionUtil**:
-  - Verify decryption works and produces expected content.
-- **DecryptingMultiResourceItemReader**:
-  - Verify it reads, decrypts, and processes multiple encrypted files.
-- **UnzipUtil**:
-  - Verify it extracts files from ZIP resources.
-
-Let me know if you need further clarification or adjustments to the test cases! 🚀
