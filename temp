@@ -1,50 +1,109 @@
-import java.io.InputStream;
-import java.io.BufferedInputStream;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
+If the `testExtractStreamsFromZip_withCorruptedZip` test is failing, the issue might be because the `ZipInputStream` is failing silently or not throwing an exception for corrupted data. This can happen because `ZipInputStream` does not always validate the ZIP file structure upfront. Instead, it processes entries sequentially, which might not trigger an error immediately.
 
-import org.springframework.core.io.Resource;
+To address this issue, we can explicitly validate the ZIP file structure or ensure proper error handling for corrupted data.
 
-public class UnzipUtil {
+---
 
-    /**
-     * Extracts all files from a ZIP resource.
-     *
-     * @param zipResource the decrypted Resource representing the ZIP file
-     * @return a list of InputStreams, each representing a file in the ZIP
-     * @throws RuntimeException if an error occurs during extraction
-     */
-    public List<InputStream> extractStreamsFromZip(Resource zipResource) {
-        List<InputStream> extractedStreams = new ArrayList<>();
+### **Fix for Corrupted ZIP File Test**
 
-        try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(zipResource.getInputStream()))) {
-            ZipEntry entry;
+#### **1. Update `UnzipUtil` to Validate ZIP Data**
 
-            // Iterate through the entries in the ZIP file
-            while ((entry = zis.getNextEntry()) != null) {
-                if (!entry.isDirectory()) {
-                    // Extract the file
-                    ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-                    byte[] temp = new byte[1024];
-                    int bytesRead;
+Modify the `extractStreamsFromZip` method in `UnzipUtil` to detect and handle corrupted ZIP files more robustly. For example, you can throw an exception if no valid entries are found or if reading the ZIP file fails unexpectedly.
 
-                    while ((bytesRead = zis.read(temp)) != -1) {
-                        buffer.write(temp, 0, bytesRead);
-                    }
+Updated `UnzipUtil`:
 
-                    // Add the extracted file as a ByteArrayInputStream
-                    extractedStreams.add(new ByteArrayInputStream(buffer.toByteArray()));
+```java
+public List<InputStream> extractStreamsFromZip(Resource zipResource) {
+    List<InputStream> extractedStreams = new ArrayList<>();
+    boolean hasValidEntries = false;
+
+    try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(zipResource.getInputStream()))) {
+        ZipEntry entry;
+
+        // Iterate through the entries in the ZIP file
+        while ((entry = zis.getNextEntry()) != null) {
+            hasValidEntries = true; // At least one valid entry exists
+            if (!entry.isDirectory()) {
+                // Extract the file
+                ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+                byte[] temp = new byte[1024];
+                int bytesRead;
+
+                while ((bytesRead = zis.read(temp)) != -1) {
+                    buffer.write(temp, 0, bytesRead);
                 }
-                zis.closeEntry();
+
+                // Add the extracted file as a ByteArrayInputStream
+                extractedStreams.add(new ByteArrayInputStream(buffer.toByteArray()));
             }
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to extract files from ZIP resource", e);
+            zis.closeEntry();
         }
 
-        return extractedStreams;
+        if (!hasValidEntries) {
+            throw new RuntimeException("Corrupted ZIP file: No valid entries found.");
+        }
+    } catch (Exception e) {
+        throw new RuntimeException("Failed to extract files from ZIP resource", e);
     }
+
+    return extractedStreams;
 }
+```
+
+---
+
+#### **2. Update the Test for Corrupted ZIP**
+
+The test should now expect the updated error message when no valid entries are found in a corrupted ZIP file.
+
+Updated Test Case:
+
+```java
+@Test
+void testExtractStreamsFromZip_withCorruptedZip() {
+    // Arrange: Corrupted ZIP content
+    byte[] corruptedZipBytes = "not-a-zip-file".getBytes();
+    Resource zipResource = new ByteArrayResource(corruptedZipBytes);
+
+    // Act & Assert
+    RuntimeException exception = assertThrows(RuntimeException.class, () -> {
+        unzipUtil.extractStreamsFromZip(zipResource);
+    });
+
+    assertTrue(exception.getMessage().contains("Failed to extract files"), "Exception should indicate failure");
+}
+```
+
+---
+
+### **How This Fix Works**
+
+1. **Validate ZIP Entries**:
+   - The `UnzipUtil` method tracks whether any valid entries exist in the ZIP file using the `hasValidEntries` flag.
+   - If no valid entries are found, it throws a `RuntimeException` with a meaningful message.
+
+2. **Catch Corruption Errors**:
+   - Any unexpected exception during processing is caught and wrapped in a `RuntimeException`.
+
+3. **Test Changes**:
+   - The test now confirms that a corrupted ZIP file results in a meaningful exception.
+
+---
+
+### **Why Use This Fix?**
+
+1. **Handles Corrupted Data**:
+   - Prevents silent failures by explicitly checking for valid ZIP entries.
+   - Ensures that corrupted ZIP files are detected and reported.
+
+2. **Improved Testability**:
+   - Ensures that tests for corrupted ZIP files reliably produce the expected exceptions.
+
+---
+
+### **Next Steps**
+
+- Rerun the tests with the updated `UnzipUtil` implementation.
+- If the test still fails, check the stack trace to ensure the corrupted data is reaching the `UnzipUtil` method.
+
+Let me know if you encounter further issues! 🚀
