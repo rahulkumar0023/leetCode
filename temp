@@ -86,52 +86,97 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.springframework.batch.item.ExecutionContext;
-import org.springframework.batch.item.file.MultiResourceItemReader;
+import org.springframework.batch.item.file.FlatFileItemReader;
+import org.springframework.batch.item.file.mapping.DefaultLineMapper;
+import org.springframework.batch.item.file.transform.DelimitedLineTokenizer;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.Resource;
 
+import java.io.ByteArrayInputStream;
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
 public class DecryptingMultiResourceItemReaderTest {
 
-    private DecryptingMultiResourceItemReader<String> multiResourceItemReader;
+    private DecryptingMultiResourceItemReader<CSVModel> multiResourceItemReader;
     private DecryptionUtil decryptionUtil;
     private UnzipUtil unzipUtil;
 
     @BeforeEach
     void setUp() throws Exception {
         // Mock dependencies
-        decryptionUtil = Mockito.mock(DecryptionUtil.class);
-        unzipUtil = Mockito.mock(UnzipUtil.class);
+        decryptionUtil = mock(DecryptionUtil.class);
+        unzipUtil = mock(UnzipUtil.class);
 
-        // Create the reader
+        // Create the delegate reader (FlatFileItemReader configured for CSVModel)
+        FlatFileItemReader<CSVModel> flatFileItemReader = new FlatFileItemReader<>();
+        flatFileItemReader.setLineMapper(createLineMapper()); // Set line mapper for CSVModel
+
+        // Create the multi-resource reader
         multiResourceItemReader = new DecryptingMultiResourceItemReader<>(decryptionUtil, unzipUtil);
-
-        // Mock resources
-        Resource encryptedFile1 = new ClassPathResource("encrypted_file1.gpg");
-        Resource encryptedFile2 = new ClassPathResource("encrypted_file2.gpg");
-        multiResourceItemReader.setResources(new Resource[]{encryptedFile1, encryptedFile2});
+        multiResourceItemReader.setDelegate(flatFileItemReader);
     }
 
     @Test
-    void testReadDecryptedFiles() throws Exception {
+    void testSetEncryptedResources() throws Exception {
         // Arrange
-        Mockito.when(decryptionUtil.decryptResource(Mockito.any(Resource.class)))
-                .thenReturn(new ClassPathResource("decrypted_file.csv")); // Mock decrypted file
+        Resource encryptedResource1 = new ClassPathResource("encrypted_file1.gpg");
+        Resource encryptedResource2 = new ClassPathResource("encrypted_file2.gpg");
 
-        Mockito.when(unzipUtil.extractFilesFromZip(Mockito.any(Resource.class)))
-                .thenReturn(List.of(new ByteArrayInputStream("test,data".getBytes()))); // Mock unzipped streams
+        // Mock decryption to return a fake decrypted resource (e.g., ZIP files)
+        Resource decryptedResource1 = new ClassPathResource("decrypted_file1.zip");
+        Resource decryptedResource2 = new ClassPathResource("decrypted_file2.zip");
 
+        when(decryptionUtil.decryptResource(encryptedResource1)).thenReturn(decryptedResource1);
+        when(decryptionUtil.decryptResource(encryptedResource2)).thenReturn(decryptedResource2);
+
+        // Mock unzipping to return streams of extracted CSV files
+        when(unzipUtil.extractStreamsFromZip(decryptedResource1))
+                .thenReturn(List.of(new ByteArrayInputStream("1,John,25\n2,Jane,30".getBytes()))); // CSV data
+        when(unzipUtil.extractStreamsFromZip(decryptedResource2))
+                .thenReturn(List.of(new ByteArrayInputStream("3,Doe,40".getBytes())));
+
+        // Act
+        multiResourceItemReader.setResources(new Resource[]{encryptedResource1, encryptedResource2});
+
+        // Initialize execution context
         ExecutionContext executionContext = new ExecutionContext();
         multiResourceItemReader.open(executionContext);
 
-        // Act
-        Object item = multiResourceItemReader.read();
-
         // Assert
-        assertNotNull(item, "The reader should return an item");
+        CSVModel firstItem = multiResourceItemReader.read(); // Read first CSVModel
+        CSVModel secondItem = multiResourceItemReader.read(); // Read second CSVModel
+        CSVModel thirdItem = multiResourceItemReader.read(); // Read third CSVModel
+        CSVModel noMoreData = multiResourceItemReader.read(); // No more data; should return null
+
+        assertEquals(new CSVModel(1, "John", 25), firstItem, "First item should match the expected CSVModel");
+        assertEquals(new CSVModel(2, "Jane", 30), secondItem, "Second item should match the expected CSVModel");
+        assertEquals(new CSVModel(3, "Doe", 40), thirdItem, "Third item should match the expected CSVModel");
+        assertNull(noMoreData, "No more data should be available after processing all resources");
+    }
+
+    // Helper method to create a LineMapper for CSVModel
+    private DefaultLineMapper<CSVModel> createLineMapper() {
+        DefaultLineMapper<CSVModel> lineMapper = new DefaultLineMapper<>();
+
+        // Tokenizer for comma-separated values
+        DelimitedLineTokenizer tokenizer = new DelimitedLineTokenizer();
+        tokenizer.setNames("id", "name", "age"); // CSV headers
+        lineMapper.setLineTokenizer(tokenizer);
+
+        // Map tokens to CSVModel
+        lineMapper.setFieldSetMapper(fieldSet -> new CSVModel(
+                fieldSet.readInt("id"),
+                fieldSet.readString("name"),
+                fieldSet.readInt("age")
+        ));
+
+        return lineMapper;
     }
 }
+
 ```
 
 ---
