@@ -1,16 +1,16 @@
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.Resource;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
-import java.util.Iterator;
 import java.util.List;
 import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
+import java.util.zip.ZipOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
 
 public class UnzipUtilTest {
 
@@ -23,20 +23,15 @@ public class UnzipUtilTest {
 
     @Test
     void testExtractStreamsFromZip_withValidEntries() throws Exception {
-        // Mock the Resource
-        Resource zipResource = mock(Resource.class);
-
-        // Mock the ZIP file content
-        InputStream zipInputStream = createMockZipInputStream(
-                new MockZipEntry("file1.txt", "content1"),
-                new MockZipEntry("file2.txt", "content2")
-        );
-
-        // Mock the resource's InputStream
-        when(zipResource.getInputStream()).thenReturn(zipInputStream);
+        // Arrange: Create a ZIP file with two valid entries
+        byte[] zipBytes = createZipFile(List.of(
+                new FileEntry("file1.txt", "content1"),
+                new FileEntry("file2.txt", "content2")
+        ));
+        Resource zipResource = new ByteArrayResource(zipBytes);
 
         // Act
-        var extractedStreams = unzipUtil.extractStreamsFromZip(zipResource);
+        List<InputStream> extractedStreams = unzipUtil.extractStreamsFromZip(zipResource);
 
         // Assert
         assertEquals(2, extractedStreams.size(), "Should extract 2 files");
@@ -46,15 +41,12 @@ public class UnzipUtilTest {
 
     @Test
     void testExtractStreamsFromZip_withEmptyZip() throws Exception {
-        // Mock the Resource
-        Resource zipResource = mock(Resource.class);
-
-        // Mock an empty ZIP file
-        InputStream emptyZipInputStream = createMockZipInputStream();
-        when(zipResource.getInputStream()).thenReturn(emptyZipInputStream);
+        // Arrange: Create an empty ZIP file
+        byte[] zipBytes = createZipFile(List.of());
+        Resource zipResource = new ByteArrayResource(zipBytes);
 
         // Act
-        var extractedStreams = unzipUtil.extractStreamsFromZip(zipResource);
+        List<InputStream> extractedStreams = unzipUtil.extractStreamsFromZip(zipResource);
 
         // Assert
         assertTrue(extractedStreams.isEmpty(), "Should return no streams for an empty ZIP");
@@ -62,18 +54,15 @@ public class UnzipUtilTest {
 
     @Test
     void testExtractStreamsFromZip_withDirectoryEntries() throws Exception {
-        // Mock the Resource
-        Resource zipResource = mock(Resource.class);
-
-        // Mock the ZIP file with a directory entry and a file entry
-        InputStream zipInputStream = createMockZipInputStream(
-                new MockZipEntry("dir/", null), // Directory
-                new MockZipEntry("file.txt", "file content") // File
-        );
-        when(zipResource.getInputStream()).thenReturn(zipInputStream);
+        // Arrange: Create a ZIP file with a directory and a file entry
+        byte[] zipBytes = createZipFile(List.of(
+                new FileEntry("dir/", null), // Directory
+                new FileEntry("file.txt", "file content") // File
+        ));
+        Resource zipResource = new ByteArrayResource(zipBytes);
 
         // Act
-        var extractedStreams = unzipUtil.extractStreamsFromZip(zipResource);
+        List<InputStream> extractedStreams = unzipUtil.extractStreamsFromZip(zipResource);
 
         // Assert
         assertEquals(1, extractedStreams.size(), "Should skip directories and extract only files");
@@ -81,13 +70,10 @@ public class UnzipUtilTest {
     }
 
     @Test
-    void testExtractStreamsFromZip_withCorruptedZip() throws Exception {
-        // Mock the Resource
-        Resource zipResource = mock(Resource.class);
-
-        // Mock corrupted ZIP data
-        InputStream corruptedStream = new ByteArrayInputStream("not-a-zip-file".getBytes());
-        when(zipResource.getInputStream()).thenReturn(corruptedStream);
+    void testExtractStreamsFromZip_withCorruptedZip() {
+        // Arrange: Corrupted ZIP content
+        byte[] corruptedZipBytes = "not-a-zip-file".getBytes();
+        Resource zipResource = new ByteArrayResource(corruptedZipBytes);
 
         // Act & Assert
         RuntimeException exception = assertThrows(RuntimeException.class, () -> {
@@ -104,46 +90,28 @@ public class UnzipUtilTest {
         assertEquals(expectedContent, new String(buffer, 0, bytesRead), "Stream content should match expected content");
     }
 
-    // Utility method to create a mock ZipInputStream with entries
-    private InputStream createMockZipInputStream(MockZipEntry... entries) throws Exception {
-        ZipInputStream zis = mock(ZipInputStream.class);
-
-        // Use an iterator to simulate sequential entries
-        List<MockZipEntry> entryList = List.of(entries);
-        Iterator<MockZipEntry> entryIterator = entryList.iterator();
-
-        // Mock getNextEntry to return the next entry or null if no more entries
-        when(zis.getNextEntry()).thenAnswer(invocation -> {
-            if (entryIterator.hasNext()) {
-                MockZipEntry entry = entryIterator.next();
-                return new ZipEntry(entry.name);
-            }
-            return null; // End of entries
-        });
-
-        // Mock read() for each entry's content
-        for (MockZipEntry entry : entries) {
-            if (entry.content != null) {
-                when(zis.read(any(byte[].class), anyInt(), anyInt())).thenAnswer(invocation -> {
-                    byte[] buffer = invocation.getArgument(0);
-                    int offset = invocation.getArgument(1);
-                    int length = invocation.getArgument(2);
-                    int bytesToWrite = Math.min(entry.content.length(), length);
-                    System.arraycopy(entry.content.getBytes(), 0, buffer, offset, bytesToWrite);
-                    return bytesToWrite; // Return the number of bytes read
-                });
+    // Utility method to create an in-memory ZIP file
+    private byte[] createZipFile(List<FileEntry> entries) throws Exception {
+        ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+        try (ZipOutputStream zos = new ZipOutputStream(byteArrayOutputStream)) {
+            for (FileEntry entry : entries) {
+                ZipEntry zipEntry = new ZipEntry(entry.name);
+                zos.putNextEntry(zipEntry);
+                if (entry.content != null) {
+                    zos.write(entry.content.getBytes());
+                }
+                zos.closeEntry();
             }
         }
-
-        return zis;
+        return byteArrayOutputStream.toByteArray();
     }
 
-    // Helper class to represent a mock ZIP entry
-    private static class MockZipEntry {
+    // Helper class to represent a file entry in the ZIP
+    private static class FileEntry {
         String name;
         String content;
 
-        MockZipEntry(String name, String content) {
+        FileEntry(String name, String content) {
             this.name = name;
             this.content = content;
         }
