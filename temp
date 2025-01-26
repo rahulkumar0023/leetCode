@@ -1,119 +1,50 @@
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.springframework.core.io.ByteArrayResource;
-import org.springframework.core.io.Resource;
-
+import java.io.InputStream;
+import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
+import java.util.zip.ZipInputStream;
 
-import static org.junit.jupiter.api.Assertions.*;
+import org.springframework.core.io.Resource;
 
-public class UnzipUtilTest {
+public class UnzipUtil {
 
-    private UnzipUtil unzipUtil;
+    /**
+     * Extracts all files from a ZIP resource.
+     *
+     * @param zipResource the decrypted Resource representing the ZIP file
+     * @return a list of InputStreams, each representing a file in the ZIP
+     * @throws RuntimeException if an error occurs during extraction
+     */
+    public List<InputStream> extractStreamsFromZip(Resource zipResource) {
+        List<InputStream> extractedStreams = new ArrayList<>();
 
-    @BeforeEach
-    void setUp() {
-        unzipUtil = new UnzipUtil();
-    }
+        try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(zipResource.getInputStream()))) {
+            ZipEntry entry;
 
-    @Test
-    void testExtractStreamsFromZip_withValidEntries() throws Exception {
-        // Arrange: Create a ZIP file with two valid entries
-        byte[] zipBytes = createZipFile(List.of(
-                new FileEntry("file1.txt", "content1"),
-                new FileEntry("file2.txt", "content2")
-        ));
-        Resource zipResource = new ByteArrayResource(zipBytes);
+            // Iterate through the entries in the ZIP file
+            while ((entry = zis.getNextEntry()) != null) {
+                if (!entry.isDirectory()) {
+                    // Extract the file
+                    ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+                    byte[] temp = new byte[1024];
+                    int bytesRead;
 
-        // Act
-        List<InputStream> extractedStreams = unzipUtil.extractStreamsFromZip(zipResource);
+                    while ((bytesRead = zis.read(temp)) != -1) {
+                        buffer.write(temp, 0, bytesRead);
+                    }
 
-        // Assert
-        assertEquals(2, extractedStreams.size(), "Should extract 2 files");
-        assertStreamContent(extractedStreams.get(0), "content1");
-        assertStreamContent(extractedStreams.get(1), "content2");
-    }
-
-    @Test
-    void testExtractStreamsFromZip_withEmptyZip() throws Exception {
-        // Arrange: Create an empty ZIP file
-        byte[] zipBytes = createZipFile(List.of());
-        Resource zipResource = new ByteArrayResource(zipBytes);
-
-        // Act
-        List<InputStream> extractedStreams = unzipUtil.extractStreamsFromZip(zipResource);
-
-        // Assert
-        assertTrue(extractedStreams.isEmpty(), "Should return no streams for an empty ZIP");
-    }
-
-    @Test
-    void testExtractStreamsFromZip_withDirectoryEntries() throws Exception {
-        // Arrange: Create a ZIP file with a directory and a file entry
-        byte[] zipBytes = createZipFile(List.of(
-                new FileEntry("dir/", null), // Directory
-                new FileEntry("file.txt", "file content") // File
-        ));
-        Resource zipResource = new ByteArrayResource(zipBytes);
-
-        // Act
-        List<InputStream> extractedStreams = unzipUtil.extractStreamsFromZip(zipResource);
-
-        // Assert
-        assertEquals(1, extractedStreams.size(), "Should skip directories and extract only files");
-        assertStreamContent(extractedStreams.get(0), "file content");
-    }
-
-    @Test
-    void testExtractStreamsFromZip_withCorruptedZip() {
-        // Arrange: Corrupted ZIP content
-        byte[] corruptedZipBytes = "not-a-zip-file".getBytes();
-        Resource zipResource = new ByteArrayResource(corruptedZipBytes);
-
-        // Act & Assert
-        RuntimeException exception = assertThrows(RuntimeException.class, () -> {
-            unzipUtil.extractStreamsFromZip(zipResource);
-        });
-
-        assertTrue(exception.getMessage().contains("Failed to extract files"), "Exception should indicate failure");
-    }
-
-    // Utility method to assert InputStream content
-    private void assertStreamContent(InputStream inputStream, String expectedContent) throws Exception {
-        byte[] buffer = new byte[expectedContent.length()];
-        int bytesRead = inputStream.read(buffer);
-        assertEquals(expectedContent, new String(buffer, 0, bytesRead), "Stream content should match expected content");
-    }
-
-    // Utility method to create an in-memory ZIP file
-    private byte[] createZipFile(List<FileEntry> entries) throws Exception {
-        ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
-        try (ZipOutputStream zos = new ZipOutputStream(byteArrayOutputStream)) {
-            for (FileEntry entry : entries) {
-                ZipEntry zipEntry = new ZipEntry(entry.name);
-                zos.putNextEntry(zipEntry);
-                if (entry.content != null) {
-                    zos.write(entry.content.getBytes());
+                    // Add the extracted file as a ByteArrayInputStream
+                    extractedStreams.add(new ByteArrayInputStream(buffer.toByteArray()));
                 }
-                zos.closeEntry();
+                zis.closeEntry();
             }
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to extract files from ZIP resource", e);
         }
-        return byteArrayOutputStream.toByteArray();
-    }
 
-    // Helper class to represent a file entry in the ZIP
-    private static class FileEntry {
-        String name;
-        String content;
-
-        FileEntry(String name, String content) {
-            this.name = name;
-            this.content = content;
-        }
+        return extractedStreams;
     }
 }
