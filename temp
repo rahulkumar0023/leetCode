@@ -1,10 +1,11 @@
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
 import org.springframework.core.io.Resource;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.util.Iterator;
+import java.util.List;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -106,19 +107,30 @@ public class UnzipUtilTest {
     // Utility method to create a mock ZipInputStream with entries
     private InputStream createMockZipInputStream(MockZipEntry... entries) throws Exception {
         ZipInputStream zis = mock(ZipInputStream.class);
+
+        // Use an iterator to simulate sequential entries
+        List<MockZipEntry> entryList = List.of(entries);
+        Iterator<MockZipEntry> entryIterator = entryList.iterator();
+
+        // Mock getNextEntry to return the next entry or null if no more entries
         when(zis.getNextEntry()).thenAnswer(invocation -> {
-            for (MockZipEntry entry : entries) {
+            if (entryIterator.hasNext()) {
+                MockZipEntry entry = entryIterator.next();
                 return new ZipEntry(entry.name);
             }
-            return null; // No more entries
+            return null; // End of entries
         });
 
+        // Mock read() for each entry's content
         for (MockZipEntry entry : entries) {
             if (entry.content != null) {
                 when(zis.read(any(byte[].class), anyInt(), anyInt())).thenAnswer(invocation -> {
                     byte[] buffer = invocation.getArgument(0);
-                    System.arraycopy(entry.content.getBytes(), 0, buffer, 0, entry.content.length());
-                    return entry.content.length();
+                    int offset = invocation.getArgument(1);
+                    int length = invocation.getArgument(2);
+                    int bytesToWrite = Math.min(entry.content.length(), length);
+                    System.arraycopy(entry.content.getBytes(), 0, buffer, offset, bytesToWrite);
+                    return bytesToWrite; // Return the number of bytes read
                 });
             }
         }
