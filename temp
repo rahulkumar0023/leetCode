@@ -1,35 +1,106 @@
-public List<InputStream> extractStreamsFromZip(Resource zipResource) {
-    List<InputStream> extractedStreams = new ArrayList<>();
-    boolean hasEntries = false;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.springframework.batch.item.ExecutionContext;
+import org.springframework.batch.item.file.FlatFileItemReader;
+import org.springframework.core.io.Resource;
 
-    try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(zipResource.getInputStream()))) {
-        ZipEntry entry;
+import java.io.ByteArrayInputStream;
+import java.util.List;
 
-        // Iterate through the entries in the ZIP file
-        while ((entry = zis.getNextEntry()) != null) {
-            hasEntries = true; // At least one entry exists
-            if (!entry.isDirectory()) {
-                // Extract the file
-                ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-                byte[] temp = new byte[1024];
-                int bytesRead;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
-                while ((bytesRead = zis.read(temp)) != -1) {
-                    buffer.write(temp, 0, bytesRead);
-                }
+class BatchConfigTest {
 
-                // Add the extracted file as a ByteArrayInputStream
-                extractedStreams.add(new ByteArrayInputStream(buffer.toByteArray()));
-            }
-            zis.closeEntry();
-        }
+    @Mock
+    private CosService cosService;
 
-        if (!hasEntries) {
-            throw new RuntimeException("Corrupted ZIP file: No entries found.");
-        }
-    } catch (Exception e) {
-        throw new RuntimeException("Failed to extract files from ZIP resource", e);
+    @Mock
+    private DecryptionUtil decryptionUtil;
+
+    @Mock
+    private UnzipUtil unzipUtil;
+
+    @Mock
+    private FlatFileItemReader<CSVModel> flatFileItemReader;
+
+    @InjectMocks
+    private BatchConfig batchConfig;
+
+    private DecryptingMultiResourceItemReader<CSVModel> decryptingReader;
+
+    @BeforeEach
+    void setUp() throws Exception {
+        // Initialize the @Bean manually with mocked dependencies
+        decryptingReader = batchConfig.decryptingMultiResourceItemReader(
+                cosService, decryptionUtil, unzipUtil, flatFileItemReader
+        );
     }
 
-    return extractedStreams;
+    @Test
+    void testDecryptingMultiResourceItemReaderFullFlow() throws Exception {
+        // Step 1: Mock COS Service
+        Resource encryptedResource = mock(Resource.class);
+        Resource decryptedResource = mock(Resource.class);
+
+        when(cosService.fetchEncryptedFiles("bucket-name", "prefix"))
+                .thenReturn(new Resource[]{encryptedResource});
+
+        // Step 2: Mock Decryption
+        when(decryptionUtil.decryptResource(encryptedResource))
+                .thenReturn(decryptedResource);
+
+        // Step 3: Mock Unzipping
+        InputStream csvStream = new ByteArrayInputStream("1,John,25\n2,Jane,30".getBytes());
+        when(unzipUtil.extractStreamsFromZip(decryptedResource))
+                .thenReturn(List.of(csvStream));
+
+        // Step 4: Mock Delegate (FlatFileItemReader)
+        when(flatFileItemReader.read())
+                .thenReturn(new CSVModel(1, "John", 25))
+                .thenReturn(new CSVModel(2, "Jane", 30))
+                .thenReturn(null);
+
+        // Act: Open the reader and process
+        ExecutionContext executionContext = new ExecutionContext();
+        decryptingReader.open(executionContext);
+
+        CSVModel firstItem = decryptingReader.read();
+        CSVModel secondItem = decryptingReader.read();
+        CSVModel noMoreData = decryptingReader.read();
+
+        // Assert
+        assertEquals(new CSVModel(1, "John", 25), firstItem, "First item should match");
+        assertEquals(new CSVModel(2, "Jane", 30), secondItem, "Second item should match");
+        assertNull(noMoreData, "No more data should be available after processing all resources");
+
+        // Verify all interactions
+        verify(cosService, times(1)).fetchEncryptedFiles("bucket-name", "prefix");
+        verify(decryptionUtil, times(1)).decryptResource(encryptedResource);
+        verify(unzipUtil, times(1)).extractStreamsFromZip(decryptedResource);
+        verify(flatFileItemReader, atLeastOnce()).read();
+    }
+
+    @Test
+    void testDecryptingMultiResourceItemReader_NoResources() throws Exception {
+        // Step 1: Mock COS Service to return no files
+        when(cosService.fetchEncryptedFiles("bucket-name", "prefix"))
+                .thenReturn(new Resource[0]);
+
+        // Act: Open the reader and process
+        ExecutionContext executionContext = new ExecutionContext();
+        decryptingReader.open(executionContext);
+
+        CSVModel noData = decryptingReader.read();
+
+        // Assert
+        assertNull(noData, "No data should be available when no resources are fetched");
+
+        // Verify no interactions with decryption or unzipping utilities
+        verify(cosService, times(1)).fetchEncryptedFiles("bucket-name", "prefix");
+        verifyNoInteractions(decryptionUtil);
+        verifyNoInteractions(unzipUtil);
+    }
 }
