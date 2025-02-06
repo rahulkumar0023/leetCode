@@ -1,4 +1,174 @@
- String xmlFilePath = "/path/to/existing/file.xml";  // Use actual XML file path
+Yes! Instead of creating temporary files, we can use **streams** to **zip, encrypt, and upload the XML file directly to COS** **without writing to disk**. This approach ensures efficient memory usage and avoids unnecessary I/O operations.
+
+---
+
+### **1️⃣ Workflow Overview**
+1. **Read the XML file as an InputStream.**
+2. **Zip the XML file on-the-fly** using `ZipOutputStream`.
+3. **Encrypt the zipped stream using PGP** using `PGPEncryptedDataGenerator`.
+4. **Upload the encrypted stream to COS** **without saving to disk**.
+
+---
+
+### **2️⃣ Updated Implementation (Using Streams)**
+This version eliminates **temporary files** and directly streams **zipped & encrypted data** to the COS bucket.
+
+---
+
+### **Step 1: Zip the XML File (Stream-Based)**
+We will modify the `ZipUtil` to **return an InputStream instead of a File**.
+
+```java
+import java.io.*;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
+
+public class ZipUtil {
+    public static InputStream zipFile(InputStream xmlInputStream, String xmlFileName) throws IOException {
+        PipedInputStream pipedInputStream = new PipedInputStream();
+        PipedOutputStream pipedOutputStream = new PipedOutputStream(pipedInputStream);
+
+        new Thread(() -> {
+            try (ZipOutputStream zipOutputStream = new ZipOutputStream(pipedOutputStream)) {
+                ZipEntry zipEntry = new ZipEntry(xmlFileName);
+                zipOutputStream.putNextEntry(zipEntry);
+
+                byte[] buffer = new byte[4096];
+                int bytesRead;
+                while ((bytesRead = xmlInputStream.read(buffer)) != -1) {
+                    zipOutputStream.write(buffer, 0, bytesRead);
+                }
+
+                zipOutputStream.closeEntry();
+                zipOutputStream.close();
+                pipedOutputStream.close();
+            } catch (IOException e) {
+                throw new RuntimeException("Error while zipping XML file", e);
+            }
+        }).start();
+
+        return pipedInputStream;
+    }
+}
+```
+
+---
+
+### **Step 2: Encrypt the Zipped Stream Using PGP**
+Instead of writing to a file, we will **encrypt the zipped stream and return an InputStream**.
+
+```java
+import org.bouncycastle.bcpg.ArmoredOutputStream;
+import org.bouncycastle.openpgp.*;
+
+import java.io.*;
+import java.security.SecureRandom;
+import java.util.Iterator;
+
+public class PGPEncryptor {
+    public static InputStream encryptStream(InputStream zippedInputStream, InputStream publicKeyStream) throws Exception {
+        PipedInputStream pipedInputStream = new PipedInputStream();
+        PipedOutputStream pipedOutputStream = new PipedOutputStream(pipedInputStream);
+
+        new Thread(() -> {
+            try {
+                PGPPublicKey publicKey = readPublicKey(publicKeyStream);
+                OutputStream armoredOut = new ArmoredOutputStream(pipedOutputStream);
+                PGPEncryptedDataGenerator encryptor = new PGPEncryptedDataGenerator(
+                        PGPEncryptedData.CAST5, true, new SecureRandom(), "BC");
+
+                encryptor.addMethod(publicKey);
+                OutputStream encryptedOut = encryptor.open(armoredOut, new byte[4096]);
+
+                byte[] buffer = new byte[4096];
+                int bytesRead;
+                while ((bytesRead = zippedInputStream.read(buffer)) != -1) {
+                    encryptedOut.write(buffer, 0, bytesRead);
+                }
+
+                encryptedOut.close();
+                armoredOut.close();
+                pipedOutputStream.close();
+            } catch (Exception e) {
+                throw new RuntimeException("Error encrypting data", e);
+            }
+        }).start();
+
+        return pipedInputStream;
+    }
+
+    private static PGPPublicKey readPublicKey(InputStream input) throws IOException, PGPException {
+        PGPPublicKeyRingCollection pgpPub = new PGPPublicKeyRingCollection(
+                PGPUtil.getDecoderStream(input), new JcaKeyFingerprintCalculator());
+
+        Iterator<PGPPublicKeyRing> keyRingIterator = pgpPub.getKeyRings();
+        while (keyRingIterator.hasNext()) {
+            PGPPublicKeyRing keyRing = keyRingIterator.next();
+            Iterator<PGPPublicKey> keyIterator = keyRing.getPublicKeys();
+            while (keyIterator.hasNext()) {
+                PGPPublicKey key = keyIterator.next();
+                if (key.isEncryptionKey()) {
+                    return key;
+                }
+            }
+        }
+        throw new IllegalArgumentException("No encryption key found in public key ring.");
+    }
+}
+```
+
+---
+
+### **Step 3: Upload the Encrypted Stream to COS**
+We will now **upload the encrypted InputStream directly to COS**.
+
+```java
+import com.amazonaws.services.s3.AmazonS3;
+import com.amazonaws.services.s3.model.ObjectMetadata;
+import com.amazonaws.services.s3.model.PutObjectRequest;
+
+import java.io.InputStream;
+
+public class COSUploader {
+    private final AmazonS3 s3Client;
+    private final String bucketName;
+
+    public COSUploader(AmazonS3 s3Client, String bucketName) {
+        this.s3Client = s3Client;
+        this.bucketName = bucketName;
+    }
+
+    public void uploadStream(InputStream inputStream, String objectKey, long contentLength) {
+        ObjectMetadata metadata = new ObjectMetadata();
+        metadata.setContentType("application/octet-stream");
+        metadata.setContentLength(contentLength);
+
+        PutObjectRequest request = new PutObjectRequest(bucketName, objectKey, inputStream, metadata);
+        s3Client.putObject(request);
+
+        System.out.println("File uploaded to COS: " + objectKey);
+    }
+}
+```
+
+---
+
+### **Step 4: Integrate Everything (No Temp Files)**
+Now, we integrate all steps using streams.
+
+```java
+import com.amazonaws.services.s3.AmazonS3;
+import com.amazonaws.services.s3.AmazonS3ClientBuilder;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.InputStream;
+
+public class StreamBasedFileProcessingService {
+
+    public static void main(String[] args) {
+        try {
+            String xmlFilePath = "/path/to/existing/file.xml";  // Use actual XML file path
             String publicKeyPath = "/path/to/public-key.asc";   // Use actual PGP public key
             String bucketName = "my-cos-bucket";               // Use actual COS bucket name
 
@@ -17,3 +187,39 @@
             InputStream publicKeyInputStream = new FileInputStream(publicKeyPath);
             InputStream encryptedInputStream = PGPEncryptor.encryptStream(zippedInputStream, publicKeyInputStream);
             System.out.println("Encryption done");
+
+            // Step 4: Upload Encrypted Stream to COS
+            AmazonS3 s3Client = AmazonS3ClientBuilder.defaultClient();
+            COSUploader cosUploader = new COSUploader(s3Client, bucketName);
+            cosUploader.uploadStream(encryptedInputStream, "uploads/" + xmlFile.getName() + ".zip.pgp", xmlFile.length());
+
+            System.out.println("Process completed successfully!");
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+}
+```
+
+---
+
+## **🎯 Key Benefits of This Approach**
+✅ **No Temporary Files**: Everything is done **in-memory using streams**.  
+✅ **Efficient**: Reduces I/O operations and saves disk space.  
+✅ **End-to-End Secure Processing**: Files are encrypted and uploaded directly.  
+✅ **Works for Large Files**: The **streaming approach avoids memory overflow**.
+
+---
+
+## **🚀 Final Summary**
+| Step | Action |
+|------|--------|
+| **1** | Read XML file as `InputStream` |
+| **2** | Zip the stream **without saving to disk** |
+| **3** | Encrypt the zipped stream **without saving to disk** |
+| **4** | Upload the encrypted stream **directly to COS** |
+
+🚀 **Your XML file is now zipped, encrypted, and uploaded securely without temporary files!** 🚀
+
+Let me know if you need any modifications! 😊
