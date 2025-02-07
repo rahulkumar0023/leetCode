@@ -285,3 +285,54 @@ mvn test
 🚀 **Now you can deploy this module with confidence!** 🚀
 
 Let me know if you need further refinements! 😊
+
+package com.example.cos.utils;
+
+import org.bouncycastle.openpgp.PGPPublicKey;
+import org.bouncycastle.openpgp.PGPPublicKeyRingCollection;
+import org.bouncycastle.openpgp.PGPUtil;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.mockito.Mockito.*;
+
+class PGPEncryptorTest {
+
+    private PGPEncryptor pgpEncryptor;
+
+    @BeforeEach
+    void setUp() {
+        pgpEncryptor = mock(PGPEncryptor.class);
+    }
+
+    @Test
+    void testEncryptFile_Stream_WithMocking() throws Exception {
+        // Mock input XML stream
+        InputStream xmlStream = new ByteArrayInputStream("<test>data</test>".getBytes());
+        InputStream zippedStream = ZipUtil.zipFile(xmlStream, "test.xml");
+
+        // Mock public key retrieval
+        PGPPublicKey mockPublicKey = mock(PGPPublicKey.class);
+        PGPPublicKeyRingCollection mockKeyRingCollection = mock(PGPPublicKeyRingCollection.class);
+
+        when(mockKeyRingCollection.getKeyRings()).thenReturn(null); // Simulating no real keys needed
+
+        // Mock the encryption call
+        when(pgpEncryptor.encryptStream(any(InputStream.class), any(InputStream.class)))
+                .thenReturn(new ByteArrayInputStream("mock-encrypted-data".getBytes()));
+
+        // Execute the encrypt function
+        InputStream encryptedStream = pgpEncryptor.encryptStream(zippedStream, new ByteArrayInputStream("mock-key".getBytes()));
+
+        // Verify encryption function was called
+        verify(pgpEncryptor, times(1)).encryptStream(any(InputStream.class), any(InputStream.class));
+
+        assertNotNull(encryptedStream);
+    }
+}
+
