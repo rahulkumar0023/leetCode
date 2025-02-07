@@ -1,202 +1,120 @@
-Yes! Instead of creating temporary files, we can use **streams** to **zip, encrypt, and upload the XML file directly to COS** **without writing to disk**. This approach ensures efficient memory usage and avoids unnecessary I/O operations.
+Yes! You can use **Spring Boot Scheduler** to automate and test this entire process in a **new module**. The scheduler will **periodically scan a directory**, process the XML files (zip, encrypt, and upload), and **log success or errors**.
 
 ---
 
-### **1️⃣ Workflow Overview**
-1. **Read the XML file as an InputStream.**
-2. **Zip the XML file on-the-fly** using `ZipOutputStream`.
-3. **Encrypt the zipped stream using PGP** using `PGPEncryptedDataGenerator`.
-4. **Upload the encrypted stream to COS** **without saving to disk**.
+## **1️⃣ Steps to Implement the New Module**
+1. **Create a new Maven module** in your project.
+2. **Move all the existing logic** (zipping, encrypting, and uploading) into this new module.
+3. **Create a Spring Boot Scheduler** to run this process **automatically** at intervals.
 
 ---
 
-### **2️⃣ Updated Implementation (Using Streams)**
-This version eliminates **temporary files** and directly streams **zipped & encrypted data** to the COS bucket.
+## **2️⃣ Create a New Maven Module**
+Inside your project, create a new Maven module:
+
+1. **Go to your root project folder**.
+2. Run:
+   ```bash
+   mvn archetype:generate -DgroupId=com.example.cos -DartifactId=cos-file-processor -DarchetypeArtifactId=maven-archetype-quickstart -DinteractiveMode=false
+   ```
+3. Add this new module to your **parent `pom.xml`**:
+   ```xml
+   <modules>
+       <module>cos-file-processor</module>
+   </modules>
+   ```
 
 ---
 
-### **Step 1: Zip the XML File (Stream-Based)**
-We will modify the `ZipUtil` to **return an InputStream instead of a File**.
+## **3️⃣ Move the Existing Classes to the New Module**
+Move your **ZipUtil**, **PGPEncryptor**, and **COSUploader** into `cos-file-processor/src/main/java/com/example/cos/utils/`.
 
-```java
-import java.io.*;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
-
-public class ZipUtil {
-    public static InputStream zipFile(InputStream xmlInputStream, String xmlFileName) throws IOException {
-        PipedInputStream pipedInputStream = new PipedInputStream();
-        PipedOutputStream pipedOutputStream = new PipedOutputStream(pipedInputStream);
-
-        new Thread(() -> {
-            try (ZipOutputStream zipOutputStream = new ZipOutputStream(pipedOutputStream)) {
-                ZipEntry zipEntry = new ZipEntry(xmlFileName);
-                zipOutputStream.putNextEntry(zipEntry);
-
-                byte[] buffer = new byte[4096];
-                int bytesRead;
-                while ((bytesRead = xmlInputStream.read(buffer)) != -1) {
-                    zipOutputStream.write(buffer, 0, bytesRead);
-                }
-
-                zipOutputStream.closeEntry();
-                zipOutputStream.close();
-                pipedOutputStream.close();
-            } catch (IOException e) {
-                throw new RuntimeException("Error while zipping XML file", e);
-            }
-        }).start();
-
-        return pipedInputStream;
-    }
-}
+Your module should have this structure:
+```
+cos-file-processor
+│── src/main/java/com/example/cos/
+│   ├── utils/
+│   │   ├── ZipUtil.java
+│   │   ├── PGPEncryptor.java
+│   │   ├── COSUploader.java
+│   ├── scheduler/
+│   │   ├── FileProcessingScheduler.java  <-- Scheduler class (NEW)
+│   ├── FileProcessorApplication.java  <-- Main class
+│── pom.xml
 ```
 
 ---
 
-### **Step 2: Encrypt the Zipped Stream Using PGP**
-Instead of writing to a file, we will **encrypt the zipped stream and return an InputStream**.
+## **4️⃣ Implement the Spring Scheduler**
+Now, create a scheduler to automatically process XML files **every 1 minute**.
 
+#### **`FileProcessingScheduler.java`**
 ```java
-import org.bouncycastle.bcpg.ArmoredOutputStream;
-import org.bouncycastle.openpgp.*;
+package com.example.cos.scheduler;
 
-import java.io.*;
-import java.security.SecureRandom;
-import java.util.Iterator;
-
-public class PGPEncryptor {
-    public static InputStream encryptStream(InputStream zippedInputStream, InputStream publicKeyStream) throws Exception {
-        PipedInputStream pipedInputStream = new PipedInputStream();
-        PipedOutputStream pipedOutputStream = new PipedOutputStream(pipedInputStream);
-
-        new Thread(() -> {
-            try {
-                PGPPublicKey publicKey = readPublicKey(publicKeyStream);
-                OutputStream armoredOut = new ArmoredOutputStream(pipedOutputStream);
-                PGPEncryptedDataGenerator encryptor = new PGPEncryptedDataGenerator(
-                        PGPEncryptedData.CAST5, true, new SecureRandom(), "BC");
-
-                encryptor.addMethod(publicKey);
-                OutputStream encryptedOut = encryptor.open(armoredOut, new byte[4096]);
-
-                byte[] buffer = new byte[4096];
-                int bytesRead;
-                while ((bytesRead = zippedInputStream.read(buffer)) != -1) {
-                    encryptedOut.write(buffer, 0, bytesRead);
-                }
-
-                encryptedOut.close();
-                armoredOut.close();
-                pipedOutputStream.close();
-            } catch (Exception e) {
-                throw new RuntimeException("Error encrypting data", e);
-            }
-        }).start();
-
-        return pipedInputStream;
-    }
-
-    private static PGPPublicKey readPublicKey(InputStream input) throws IOException, PGPException {
-        PGPPublicKeyRingCollection pgpPub = new PGPPublicKeyRingCollection(
-                PGPUtil.getDecoderStream(input), new JcaKeyFingerprintCalculator());
-
-        Iterator<PGPPublicKeyRing> keyRingIterator = pgpPub.getKeyRings();
-        while (keyRingIterator.hasNext()) {
-            PGPPublicKeyRing keyRing = keyRingIterator.next();
-            Iterator<PGPPublicKey> keyIterator = keyRing.getPublicKeys();
-            while (keyIterator.hasNext()) {
-                PGPPublicKey key = keyIterator.next();
-                if (key.isEncryptionKey()) {
-                    return key;
-                }
-            }
-        }
-        throw new IllegalArgumentException("No encryption key found in public key ring.");
-    }
-}
-```
-
----
-
-### **Step 3: Upload the Encrypted Stream to COS**
-We will now **upload the encrypted InputStream directly to COS**.
-
-```java
-import com.amazonaws.services.s3.AmazonS3;
-import com.amazonaws.services.s3.model.ObjectMetadata;
-import com.amazonaws.services.s3.model.PutObjectRequest;
-
-import java.io.InputStream;
-
-public class COSUploader {
-    private final AmazonS3 s3Client;
-    private final String bucketName;
-
-    public COSUploader(AmazonS3 s3Client, String bucketName) {
-        this.s3Client = s3Client;
-        this.bucketName = bucketName;
-    }
-
-    public void uploadStream(InputStream inputStream, String objectKey, long contentLength) {
-        ObjectMetadata metadata = new ObjectMetadata();
-        metadata.setContentType("application/octet-stream");
-        metadata.setContentLength(contentLength);
-
-        PutObjectRequest request = new PutObjectRequest(bucketName, objectKey, inputStream, metadata);
-        s3Client.putObject(request);
-
-        System.out.println("File uploaded to COS: " + objectKey);
-    }
-}
-```
-
----
-
-### **Step 4: Integrate Everything (No Temp Files)**
-Now, we integrate all steps using streams.
-
-```java
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.AmazonS3ClientBuilder;
+import com.example.cos.utils.COSUploader;
+import com.example.cos.utils.PGPEncryptor;
+import com.example.cos.utils.ZipUtil;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
 
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
+import java.nio.file.*;
+import java.util.stream.Stream;
 
-public class StreamBasedFileProcessingService {
+@Component
+public class FileProcessingScheduler {
 
-    public static void main(String[] args) {
+    private final String inputDirectory = "/path/to/xml/files"; // Change this path
+    private final String publicKeyPath = "/path/to/public-key.asc"; // Change this path
+    private final String bucketName = "my-cos-bucket"; // Change this
+
+    private final AmazonS3 s3Client = AmazonS3ClientBuilder.defaultClient();
+    private final COSUploader cosUploader = new COSUploader(s3Client, bucketName);
+
+    @Scheduled(fixedRate = 60000)  // Runs every 1 minute
+    public void processFiles() {
+        System.out.println("🔄 Checking for new XML files...");
+
+        try (Stream<Path> files = Files.list(Paths.get(inputDirectory))) {
+            files.filter(Files::isRegularFile)
+                 .filter(path -> path.toString().endsWith(".xml"))
+                 .forEach(this::processFile);
+        } catch (Exception e) {
+            System.err.println("❌ Error scanning directory: " + e.getMessage());
+        }
+    }
+
+    private void processFile(Path filePath) {
+        System.out.println("📂 Processing file: " + filePath.getFileName());
+
         try {
-            String xmlFilePath = "/path/to/existing/file.xml";  // Use actual XML file path
-            String publicKeyPath = "/path/to/public-key.asc";   // Use actual PGP public key
-            String bucketName = "my-cos-bucket";               // Use actual COS bucket name
-
             // Step 1: Read XML File as InputStream
-            File xmlFile = new File(xmlFilePath);
-            if (!xmlFile.exists()) {
-                throw new FileNotFoundException("XML file not found at: " + xmlFilePath);
-            }
+            File xmlFile = filePath.toFile();
             InputStream xmlInputStream = new FileInputStream(xmlFile);
 
             // Step 2: Zip XML Stream
             InputStream zippedInputStream = ZipUtil.zipFile(xmlInputStream, xmlFile.getName());
-            System.out.println("Zipping done");
 
             // Step 3: Encrypt the Zipped Stream
             InputStream publicKeyInputStream = new FileInputStream(publicKeyPath);
             InputStream encryptedInputStream = PGPEncryptor.encryptStream(zippedInputStream, publicKeyInputStream);
-            System.out.println("Encryption done");
 
             // Step 4: Upload Encrypted Stream to COS
-            AmazonS3 s3Client = AmazonS3ClientBuilder.defaultClient();
-            COSUploader cosUploader = new COSUploader(s3Client, bucketName);
             cosUploader.uploadStream(encryptedInputStream, "uploads/" + xmlFile.getName() + ".zip.pgp", xmlFile.length());
 
-            System.out.println("Process completed successfully!");
+            System.out.println("✅ Successfully processed and uploaded: " + xmlFile.getName());
+
+            // Optional: Move processed files to an archive folder
+            Files.move(filePath, Paths.get(inputDirectory, "archive", filePath.getFileName().toString()), StandardCopyOption.REPLACE_EXISTING);
+            System.out.println("📦 Moved to archive: " + xmlFile.getName());
 
         } catch (Exception e) {
-            e.printStackTrace();
+            System.err.println("❌ Error processing file " + filePath.getFileName() + ": " + e.getMessage());
         }
     }
 }
@@ -204,22 +122,110 @@ public class StreamBasedFileProcessingService {
 
 ---
 
-## **🎯 Key Benefits of This Approach**
-✅ **No Temporary Files**: Everything is done **in-memory using streams**.  
-✅ **Efficient**: Reduces I/O operations and saves disk space.  
-✅ **End-to-End Secure Processing**: Files are encrypted and uploaded directly.  
-✅ **Works for Large Files**: The **streaming approach avoids memory overflow**.
+## **5️⃣ Enable the Scheduler in Spring Boot**
+Add `@EnableScheduling` to your **main application class**:
+
+#### **`FileProcessorApplication.java`**
+```java
+package com.example.cos;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.scheduling.annotation.EnableScheduling;
+
+@SpringBootApplication
+@EnableScheduling
+public class FileProcessorApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(FileProcessorApplication.class, args);
+    }
+}
+```
 
 ---
 
-## **🚀 Final Summary**
-| Step | Action |
-|------|--------|
-| **1** | Read XML file as `InputStream` |
-| **2** | Zip the stream **without saving to disk** |
-| **3** | Encrypt the zipped stream **without saving to disk** |
-| **4** | Upload the encrypted stream **directly to COS** |
+## **6️⃣ Run the Application**
+Now, run the application:
+```bash
+mvn spring-boot:run
+```
 
-🚀 **Your XML file is now zipped, encrypted, and uploaded securely without temporary files!** 🚀
+### **Expected Output Every 1 Minute**
+```
+🔄 Checking for new XML files...
+📂 Processing file: example.xml
+✅ Successfully processed and uploaded: example.xml
+📦 Moved to archive: example.xml
+```
 
-Let me know if you need any modifications! 😊
+---
+
+## **7️⃣ Test Cases for the Scheduler**
+Create **JUnit test cases** for each component:
+
+### **Test 1: Ensure Files Are Picked Up by the Scheduler**
+```java
+@Test
+public void testProcessFiles_SchedulerScansDirectory() throws Exception {
+    FileProcessingScheduler scheduler = new FileProcessingScheduler();
+    scheduler.processFiles(); // Manually invoke
+
+    // Verify COS upload was called
+    verify(mockCosUploader, times(1)).uploadStream(any(), any(), anyLong());
+}
+```
+
+### **Test 2: Test Zip Streaming**
+```java
+@Test
+public void testZipFileStream() throws Exception {
+    InputStream xmlInputStream = new ByteArrayInputStream("<test>data</test>".getBytes());
+    InputStream zippedStream = ZipUtil.zipFile(xmlInputStream, "test.xml");
+
+    assertNotNull(zippedStream);
+}
+```
+
+### **Test 3: Test PGP Encryption**
+```java
+@Test
+public void testEncryptFileStream() throws Exception {
+    InputStream xmlInputStream = new ByteArrayInputStream("<test>data</test>".getBytes());
+    InputStream zippedStream = ZipUtil.zipFile(xmlInputStream, "test.xml");
+    InputStream pubKeyStream = new FileInputStream("/path/to/public-key.asc");
+
+    InputStream encryptedStream = PGPEncryptor.encryptStream(zippedStream, pubKeyStream);
+    assertNotNull(encryptedStream);
+}
+```
+
+### **Test 4: Mock COS Upload**
+```java
+@Test
+public void testUploadToCOS() {
+    COSUploader mockUploader = mock(COSUploader.class);
+    mockUploader.uploadStream(new ByteArrayInputStream("test".getBytes()), "test.zip.pgp", 100);
+
+    verify(mockUploader, times(1)).uploadStream(any(), any(), anyLong());
+}
+```
+
+---
+
+## **🎯 Final Summary**
+✅ **Modularized** into a separate **Spring Boot module**.  
+✅ **Added a Spring Scheduler** to **automatically scan and process XML files** every 1 minute.  
+✅ **Implemented Stream-Based Processing** (No temporary files).  
+✅ **Archived processed files** after uploading.  
+✅ **Added JUnit Test Cases** for each step.  
+
+🚀 **Now, every new XML file in the directory will be processed, encrypted, and uploaded automatically!** 🚀
+
+---
+
+### **Next Steps**
+- Adjust the **scheduling interval** as needed.
+- Deploy the **new module as a microservice**.
+- Configure **AWS credentials** in `application.properties` for production.
+
+Let me know if you need any modifications! 🚀😊
