@@ -1,338 +1,234 @@
-### **✅ Comprehensive Test Suite for All Classes**
-Now that everything is working, let's **add JUnit test cases** to ensure complete coverage for the **scheduler, zip processing, PGP encryption, COS upload, and integration flow**.
+To see what the backend (Spring Boot) receives from Keycloak, you can log and inspect the JWT token and its claims in the backend. Here's how you can do this step by step:
 
 ---
 
-## **1️⃣ Test Dependencies (Ensure These Are in `pom.xml`)**
-```xml
-<dependency>
-    <groupId>org.junit.jupiter</groupId>
-    <artifactId>junit-jupiter-api</artifactId>
-    <version>5.9.2</version>
-    <scope>test</scope>
-</dependency>
+### **1. Log Incoming JWT Token**
 
-<dependency>
-    <groupId>org.junit.jupiter</groupId>
-    <artifactId>junit-jupiter-engine</artifactId>
-    <version>5.9.2</version>
-    <scope>test</scope>
-</dependency>
+Add a custom filter or directly log the `Authorization` header and the JWT token sent to your backend.
 
-<dependency>
-    <groupId>org.mockito</groupId>
-    <artifactId>mockito-core</artifactId>
-    <version>5.3.1</version>
-    <scope>test</scope>
-</dependency>
+#### **Custom Logging Filter**
 
-<dependency>
-    <groupId>org.springframework.boot</groupId>
-    <artifactId>spring-boot-starter-test</artifactId>
-    <scope>test</scope>
-</dependency>
-```
-
----
-
-## **2️⃣ Test `FileProcessingScheduler`**
-📌 **Tests:**  
-✅ Ensures files are scanned from the mounted directory (`file:/path`)  
-✅ Ensures **successful file processing**  
-✅ Ensures errors are handled properly  
+Create a `OncePerRequestFilter` to log the JWT token and its claims:
 
 ```java
-package com.example.cos.scheduler;
+import org.springframework.web.filter.OncePerRequestFilter;
 
-import com.example.cos.utils.COSUploader;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
-import org.springframework.test.util.ReflectionTestUtils;
+import javax.servlet.FilterChain;
+import javax.servlet.ServletException;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.util.Base64;
 
-import java.io.ByteArrayInputStream;
-import java.io.File;
-import java.io.InputStream;
-import java.net.URI;
-import java.nio.file.Files;
-import java.nio.file.Path;
+public class JwtLoggingFilter extends OncePerRequestFilter {
 
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.Mockito.*;
+    @Override
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
+            throws ServletException, IOException {
 
-class FileProcessingSchedulerTest {
+        // Get the Authorization header
+        String authorizationHeader = request.getHeader("Authorization");
 
-    private FileProcessingScheduler scheduler;
-    private COSUploader mockUploader;
-    private Path tempXmlFile;
+        if (authorizationHeader != null && authorizationHeader.startsWith("Bearer ")) {
+            // Extract the token from the header
+            String jwtToken = authorizationHeader.substring(7);
+            System.out.println("JWT Token: " + jwtToken);
 
-    @BeforeEach
-    void setup() throws Exception {
-        mockUploader = mock(COSUploader.class);
-        scheduler = new FileProcessingScheduler(mockUploader);
+            // Decode the JWT token to inspect its contents (Header and Payload)
+            String[] tokenParts = jwtToken.split("\\.");
+            if (tokenParts.length == 3) {
+                String header = new String(Base64.getDecoder().decode(tokenParts[0]));
+                String payload = new String(Base64.getDecoder().decode(tokenParts[1]));
+                System.out.println("JWT Header: " + header);
+                System.out.println("JWT Payload: " + payload);
+            } else {
+                System.out.println("Invalid JWT format.");
+            }
+        } else {
+            System.out.println("No JWT token found in the request.");
+        }
 
-        // Simulate Kubernetes path with "file:/"
-        ReflectionTestUtils.setField(scheduler, "fileDirectory", "file:/tmp/data/");
-
-        // Create a temporary test XML file
-        tempXmlFile = Files.createTempFile("test-", ".xml");
-        Files.write(tempXmlFile, "<test>data</test>".getBytes());
+        // Continue the filter chain
+        filterChain.doFilter(request, response);
     }
+}
+```
 
-    @Test
-    void testProcessFiles_Success() throws Exception {
-        scheduler.processFiles();
+#### **Register the Filter**
 
-        verify(mockUploader, times(1)).uploadStream(any(InputStream.class), any(), anyLong());
+Update your `SecurityConfig` to add this filter:
+
+```java
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.web.SecurityFilterChain;
+
+@Configuration
+public class SecurityConfig {
+
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        http
+            .authorizeRequests()
+            .antMatchers("/public/**").permitAll()
+            .anyRequest().authenticated()
+            .and()
+            .oauth2ResourceServer().jwt();
+
+        // Add custom logging filter
+        http.addFilterBefore(new JwtLoggingFilter(), org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter.class);
+
+        return http.build();
     }
 }
 ```
 
 ---
 
-## **3️⃣ Test `ZipUtil`**
-📌 **Tests:**  
-✅ Ensures **XML is properly zipped**  
-✅ Ensures **ZIP file contains expected content**  
+### **2. Decode the JWT Claims**
+
+The `JwtLoggingFilter` logs the token's **header** and **payload**, but Spring Security can automatically decode and map the claims into a `Jwt` object for you.
+
+#### Use `Jwt` Object in Controller
+
+You can directly inject the decoded `Jwt` object into a controller method:
 
 ```java
-package com.example.cos.utils;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
 
-import org.junit.jupiter.api.Test;
+@RestController
+@RequestMapping("/api")
+public class JwtController {
 
-import java.io.ByteArrayInputStream;
-import java.io.InputStream;
-import java.util.zip.ZipInputStream;
-
-import static org.junit.jupiter.api.Assertions.*;
-
-class ZipUtilTest {
-
-    @Test
-    void testZipFile_Stream() throws Exception {
-        InputStream xmlStream = new ByteArrayInputStream("<test>data</test>".getBytes());
-        InputStream zippedStream = ZipUtil.zipFile(xmlStream, "test.xml");
-
-        assertNotNull(zippedStream);
-
-        ZipInputStream zipInputStream = new ZipInputStream(zippedStream);
-        assertNotNull(zipInputStream.getNextEntry()); // Ensures a file was added to the ZIP
+    @GetMapping("/secured")
+    public String securedEndpoint(Jwt jwt) {
+        // Log the claims received in the JWT
+        System.out.println("JWT Claims: " + jwt.getClaims());
+        System.out.println("Subject: " + jwt.getSubject());
+        System.out.println("Issuer: " + jwt.getIssuer());
+        System.out.println("Roles: " + jwt.getClaim("realm_access"));
+        return "Secured endpoint accessed!";
     }
 }
 ```
 
+This logs all claims in the JWT (e.g., `iss`, `sub`, `aud`, `exp`, roles, etc.) and allows you to process them.
+
 ---
 
-## **4️⃣ Test `PGPEncryptor`**
-📌 **Tests:**  
-✅ Ensures **PGP encryption works on ZIP stream**  
-✅ Ensures **only valid encryption keys are used**  
+### **3. Enable Debug Logs for Spring Security**
 
-```java
-package com.example.cos.utils;
+To see how Spring Security processes the token, enable debug logging by adding the following to `application.yaml`:
 
-import org.junit.jupiter.api.Test;
-
-import java.io.ByteArrayInputStream;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.InputStream;
-
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-
-class PGPEncryptorTest {
-
-    @Test
-    void testEncryptFile_Stream() throws Exception {
-        InputStream xmlStream = new ByteArrayInputStream("<test>data</test>".getBytes());
-        InputStream zippedStream = ZipUtil.zipFile(xmlStream, "test.xml");
-
-        File publicKeyFile = new File("/path/to/test-public-key.asc"); // Use a test PGP key
-        InputStream publicKeyStream = new FileInputStream(publicKeyFile);
-
-        InputStream encryptedStream = PGPEncryptor.encryptStream(zippedStream, publicKeyStream);
-        assertNotNull(encryptedStream);
-    }
-}
+```yaml
+logging:
+  level:
+    org.springframework.security: DEBUG
+    org.springframework.security.oauth2: DEBUG
 ```
 
----
-
-## **5️⃣ Test `COSUploader`**
-📌 **Tests:**  
-✅ Ensures **COS upload is triggered**  
-✅ Ensures **correct parameters are passed to the upload method**  
-
-```java
-package com.example.cos.utils;
-
-import com.amazonaws.services.s3.AmazonS3;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
-
-import java.io.ByteArrayInputStream;
-import java.io.InputStream;
-
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.Mockito.*;
-
-class COSUploaderTest {
-
-    private COSUploader uploader;
-    private AmazonS3 mockS3Client;
-
-    @BeforeEach
-    void setup() {
-        mockS3Client = mock(AmazonS3.class);
-        uploader = new COSUploader(mockS3Client, "test-bucket");
-    }
-
-    @Test
-    void testUploadToCOS_Success() {
-        InputStream inputStream = new ByteArrayInputStream("test-data".getBytes());
-        uploader.uploadStream(inputStream, "test-file.zip.pgp", 100L);
-
-        verify(mockS3Client, times(1)).putObject(any());
-    }
-}
-```
+This will log detailed information about the incoming token, including validation and mapping.
 
 ---
 
-## **6️⃣ Test `FileProcessingIntegrationTest` (Full Pipeline)**
-📌 **Tests the complete process:**  
-✅ XML → Zip → Encrypt → Upload to COS  
+### **4. Test the Endpoint**
 
-```java
-package com.example.cos.integration;
+1. **Get a JWT Token from Keycloak:**
 
-import com.example.cos.scheduler.FileProcessingScheduler;
-import com.example.cos.utils.COSUploader;
-import com.example.cos.utils.PGPEncryptor;
-import com.example.cos.utils.ZipUtil;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
+Use the following command to get a token from Keycloak's token endpoint:
 
-import java.io.*;
-
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.*;
-
-class FileProcessingIntegrationTest {
-
-    private FileProcessingScheduler scheduler;
-    private COSUploader mockUploader;
-
-    @BeforeEach
-    void setup() {
-        mockUploader = mock(COSUploader.class);
-        scheduler = new FileProcessingScheduler(mockUploader);
-    }
-
-    @Test
-    void testFullFlow_Zip_Encrypt_Upload() throws Exception {
-        // Step 1: Simulate XML file
-        InputStream xmlStream = new ByteArrayInputStream("<test>data</test>".getBytes());
-
-        // Step 2: Zip XML
-        InputStream zippedStream = ZipUtil.zipFile(xmlStream, "test.xml");
-
-        // Step 3: Encrypt Zipped Stream
-        File publicKeyFile = new File("/path/to/test-public-key.asc");
-        InputStream publicKeyStream = new FileInputStream(publicKeyFile);
-        InputStream encryptedStream = PGPEncryptor.encryptStream(zippedStream, publicKeyStream);
-
-        // Step 4: Upload to COS
-        scheduler.cosUploader.uploadStream(encryptedStream, "test-file.zip.pgp", 100L);
-
-        verify(mockUploader, times(1)).uploadStream(any(), any(), anyLong());
-    }
-}
-```
-
----
-
-## **🎯 Final Summary of Test Coverage**
-| Component | Test Case | Coverage |
-|-----------|----------|----------|
-| **Scheduler** | Ensures files are scanned & processed | ✅ |
-| **Zip Utility** | Ensures XML is zipped correctly | ✅ |
-| **PGP Encryption** | Ensures ZIP files are encrypted securely | ✅ |
-| **COS Upload** | Ensures encrypted files are uploaded | ✅ |
-| **Full Flow** | Simulates end-to-end processing | ✅ |
-
----
-
-## **7️⃣ Running the Tests**
-Run all tests using:
 ```bash
-mvn test
+curl --location --request POST 'http://localhost:8180/realms/my-realm/protocol/openid-connect/token' \
+--header 'Content-Type: application/x-www-form-urlencoded' \
+--data-urlencode 'grant_type=password' \
+--data-urlencode 'client_id=my-client' \
+--data-urlencode 'username=<your-username>' \
+--data-urlencode 'password=<your-password>'
 ```
 
-✅ **Now your entire COS file processing system is fully tested and production-ready!** 🎯
+The response will include a JWT token:
+
+```json
+{
+  "access_token": "<JWT-TOKEN>",
+  "expires_in": 300,
+  "refresh_expires_in": 1800,
+  "token_type": "Bearer",
+  "scope": "openid email profile",
+  ...
+}
+```
+
+2. **Send a Request to the Backend:**
+
+Use the token to call the secured endpoint:
+
+```bash
+curl --location --request GET 'http://localhost:8080/api/secured' \
+--header 'Authorization: Bearer <JWT-TOKEN>'
+```
+
+3. **Inspect the Logs:**
+
+You’ll see the decoded JWT token in the logs:
+- **Header**: Contains metadata such as the signing algorithm.
+- **Payload**: Contains claims like `sub` (subject), `roles`, `iss` (issuer), `aud` (audience), etc.
 
 ---
 
-### **Next Steps**
-- ✅ Add these tests to your **CI/CD pipeline** for automated validation.
-- ✅ Set up **logging and alerts** for real-time monitoring.
-- ✅ Optimize error handling for **high availability**.
+### **Example Logs**
 
-🚀 **Now you can deploy this module with confidence!** 🚀
+Here’s what the backend might log for a valid JWT:
 
-Let me know if you need further refinements! 😊
+#### Raw Token
+```
+JWT Token: eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsInJvbGVzIjpbIlVTRVIiLCJBRE1JTiJdLCJpc3MiOiJodHRwOi8vbG9jYWxob3N0OjgxODAvcmVhbG1zL215LXJlYWxtIiwiZXhwIjoxNjY1MjYzMjAwLCJhdWQiOiJteS1jbGllbnQifQ.Q1u9H...
+```
 
-package com.example.cos.utils;
-
-import org.bouncycastle.openpgp.PGPPublicKey;
-import org.bouncycastle.openpgp.PGPPublicKeyRingCollection;
-import org.bouncycastle.openpgp.PGPUtil;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
-
-import java.io.ByteArrayInputStream;
-import java.io.InputStream;
-
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.mockito.Mockito.*;
-
-class PGPEncryptorTest {
-
-    private PGPEncryptor pgpEncryptor;
-
-    @BeforeEach
-    void setUp() {
-        pgpEncryptor = mock(PGPEncryptor.class);
-    }
-
-    @Test
-    void testEncryptFile_Stream_WithMocking() throws Exception {
-        // Mock input XML stream
-        InputStream xmlStream = new ByteArrayInputStream("<test>data</test>".getBytes());
-        InputStream zippedStream = ZipUtil.zipFile(xmlStream, "test.xml");
-
-        // Mock public key retrieval
-        PGPPublicKey mockPublicKey = mock(PGPPublicKey.class);
-        PGPPublicKeyRingCollection mockKeyRingCollection = mock(PGPPublicKeyRingCollection.class);
-
-        when(mockKeyRingCollection.getKeyRings()).thenReturn(null); // Simulating no real keys needed
-
-        // Mock the encryption call
-        when(pgpEncryptor.encryptStream(any(InputStream.class), any(InputStream.class)))
-                .thenReturn(new ByteArrayInputStream("mock-encrypted-data".getBytes()));
-
-        // Execute the encrypt function
-        InputStream encryptedStream = pgpEncryptor.encryptStream(zippedStream, new ByteArrayInputStream("mock-key".getBytes()));
-
-        // Verify encryption function was called
-        verify(pgpEncryptor, times(1)).encryptStream(any(InputStream.class), any(InputStream.class));
-
-        assertNotNull(encryptedStream);
-    }
+#### Decoded Header
+```json
+{
+  "alg": "RS256",
+  "typ": "JWT"
 }
+```
 
+#### Decoded Payload
+```json
+{
+  "sub": "user1",
+  "roles": ["USER", "ADMIN"],
+  "iss": "http://localhost:8180/realms/my-realm",
+  "exp": 1665263200,
+  "aud": "my-client"
+}
+```
+
+#### Claims in Logs
+```
+JWT Claims: {sub=user1, roles=[USER, ADMIN], iss=http://localhost:8180/realms/my-realm, exp=1665263200, aud=my-client}
+Subject: user1
+Issuer: http://localhost:8180/realms/my-realm
+Roles: {roles=[USER, ADMIN]}
+```
+
+---
+
+### **5. Common Issues**
+
+1. **Missing Authorization Header**:
+   Ensure that the frontend (or client) sends the `Authorization: Bearer <JWT>` header.
+
+2. **Invalid Token**:
+   Check Keycloak's configuration to ensure the token is valid. Verify the `iss` and `aud` claims match the backend's configuration.
+
+3. **Expired Token**:
+   The token's `exp` claim might have passed. Obtain a new token from Keycloak.
+
+---
+
+With this setup, you can log and inspect the JWT being sent from Keycloak to your Spring Boot backend. Let me know if you need help debugging specific issues!
