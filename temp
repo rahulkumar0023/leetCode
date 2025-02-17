@@ -6,8 +6,12 @@ RUN mkdir -p /applis/certs
 # Copy Keycloak certificate to /applis/certs
 COPY keycloak.cer /applis/certs/keycloak.cer
 
-# Import Keycloak certificate into Java's trust store
-RUN $JAVA_HOME/bin/keytool -import -trustcacerts -keystore $JAVA_HOME/lib/security/cacerts \
+# Ensure JAVA_HOME is set and trust store is writable before importing certificate
+RUN export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java)))) && \
+    echo "Using JAVA_HOME: $JAVA_HOME" && \
+    chmod 644 $JAVA_HOME/lib/security/cacerts && \
+    ls -l /applis/certs/keycloak.cer && \
+    $JAVA_HOME/bin/keytool -import -trustcacerts -keystore $JAVA_HOME/lib/security/cacerts \
     -storepass changeit -noprompt -alias keycloak -file /applis/certs/keycloak.cer
 
 # Set working directory for the application
