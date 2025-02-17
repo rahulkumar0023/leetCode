@@ -1,25 +1,18 @@
 FROM registry.access.redhat.com/ubi8/openjdk-17
 
-# Create directory for certificates
+# Create a directory for the certificate
 RUN mkdir -p /applis/certs
 
-# Copy Keycloak certificate to /applis/certs
+# Copy the Keycloak certificate to the container
 COPY keycloak.cer /applis/certs/keycloak.cer
 
-# Ensure the system trusts the new certificate
-RUN update-ca-trust extract
+# Import the Keycloak certificate into Java's trust store
+RUN keytool -import -trustcacerts \
+    -keystore /etc/pki/java/cacerts \
+    -storepass changeit -noprompt -alias keycloak-cert \
+    -file /applis/certs/keycloak.cer
 
-# Set JAVA_HOME manually to avoid environment issues at build time
-RUN export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java)))) && \
-    echo "Using JAVA_HOME: $JAVA_HOME" && \
-    ls -l /applis/certs/keycloak.cer && \
-    test -f /applis/certs/keycloak.cer && \
-    $JAVA_HOME/bin/keytool -import -trustcacerts \
-    -keystore $JAVA_HOME/lib/security/cacerts \
-    -storepass changeit -noprompt -alias keycloak \
-    -file /applis/certs/keycloak.cer || exit 1
-
-# Set working directory for the application
+# Set working directory
 WORKDIR /app
 
 # Copy application JAR
