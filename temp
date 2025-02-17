@@ -1,14 +1,5 @@
-FROM registry.access.redhat.com/ubi8/openjdk-17
-
-# Copy Keycloak certificate without modifying system CA trust
-COPY keycloak.cer /applis/certs/keycloak.crt
-
-# Set working directory
-WORKDIR /app
-
-# Copy application JAR
-COPY target/myapp.jar app.jar
-EXPOSE 8080
-
-# Run Java application with custom trust store
-CMD ["java", "-Djavax.net.ssl.trustStore=/applis/certs/keycloak.crt", "-Djavax.net.ssl.trustStorePassword=changeit", "-jar", "app.jar"]
+keytool -import -trustcacerts \
+    -keystore /applis/certs/keycloak.jks \
+    -storepass changeit \
+    -noprompt -alias keycloak \
+    -file /applis/certs/keycloak.crt
