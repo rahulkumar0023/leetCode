@@ -1,5 +1,7 @@
-keytool -import -trustcacerts \
-    -keystore /applis/certs/keycloak.jks \
-    -storepass changeit \
-    -noprompt -alias keycloak \
-    -file /applis/certs/keycloak.crt
+keytool -importkeystore \
+    -srckeystore /applis/certs/keycloak.jks \
+    -srcstoretype PKCS12 \
+    -srcstorepass changeit \
+    -destkeystore /applis/certs/keycloak_new.jks \
+    -deststoretype JKS \
+    -deststorepass changeit
