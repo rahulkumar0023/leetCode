@@ -1,1 +1,6 @@
 openssl s_client -connect keycloak.example.com:443 -showcerts </dev/null 2>/dev/null | openssl x509 -outform PEM > keycloak.crt
+
+keytool -import -trustcacerts -keystore /etc/ssl/certs/java/cacerts \
+    -storepass changeit -noprompt -alias keycloak \
+    -file keycloak.crt
+
