@@ -1,7 +1,1 @@
-keytool -importkeystore \
-    -srckeystore /applis/certs/keycloak.jks \
-    -srcstoretype PKCS12 \
-    -srcstorepass changeit \
-    -destkeystore /applis/certs/keycloak_new.jks \
-    -deststoretype JKS \
-    -deststorepass changeit
+openssl s_client -connect keycloak.example.com:443 -showcerts </dev/null 2>/dev/null | openssl x509 -outform PEM > keycloak.crt
