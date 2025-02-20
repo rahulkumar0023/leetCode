@@ -1,24 +1,46 @@
-import { HttpEvent, HttpHandler, HttpInterceptor, HttpRequest } from '@angular/common/http';
-import { Injectable } from '@angular/core';
-import { KeycloakService } from 'keycloak-angular';
-import { Observable, from } from 'rxjs';
-import { mergeMap } from 'rxjs/operators';
+import org.springframework.http.*;
+import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
+import java.util.HashMap;
+import java.util.Map;
 
-@Injectable()
-export class AuthInterceptor implements HttpInterceptor {
-  constructor(private keycloak: KeycloakService) {}
+@Service
+public class RestApiClient {
 
-  intercept(req: HttpRequest<any>, next: HttpHandler): Observable<HttpEvent<any>> {
-    return from(this.keycloak.getToken()).pipe(
-      mergeMap(token => {
-        const modifiedReq = req.clone({
-          setHeaders: {
-            'Authorization': `Bearer ${token}`,  // Attach JWT token
-            'Access-Control-Allow-Origin': '*'  // Keep existing headers
-          }
-        });
-        return next.handle(modifiedReq);
-      })
-    );
-  }
+    private final RestTemplate restTemplate;
+
+    public RestApiClient(RestTemplate restTemplate) {
+        this.restTemplate = restTemplate;
+    }
+
+    public void notifyUpload(String partId, String clientId, String fileName) {
+        try {
+            // Define API endpoint with placeholders for parameters
+            String apiUrl = "https://example.com/api/notify-upload?partId={partId}&clientId={clientId}";
+
+            // Set request headers (optional)
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+
+            // Create request body as JSON
+            Map<String, String> requestBody = new HashMap<>();
+            requestBody.put("fname", fileName);
+
+            // Create HttpEntity with headers and body
+            HttpEntity<Map<String, String>> requestEntity = new HttpEntity<>(requestBody, headers);
+
+            // Define path variables (URL parameters)
+            Map<String, String> uriVariables = new HashMap<>();
+            uriVariables.put("partId", partId);
+            uriVariables.put("clientId", clientId);
+
+            // Make POST request with URL parameters and JSON body
+            ResponseEntity<String> response = restTemplate.exchange(apiUrl, HttpMethod.POST, requestEntity, String.class, uriVariables);
+
+            System.out.println("✅ API Response: " + response.getBody());
+
+        } catch (Exception e) {
+            System.err.println("❌ Error calling API: " + e.getMessage());
+        }
+    }
 }
