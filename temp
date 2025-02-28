@@ -1,64 +1,6 @@
-import org.springframework.http.*;
-import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
 
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Base64;
-import java.nio.charset.StandardCharsets;
-
-@Service
-public class RestApiClient {
-
-    private final RestTemplate restTemplate;
-    private final String username = "your-username";
-    private final String password = "your-password";
-
-    public RestApiClient(RestTemplate restTemplate) {
-        this.restTemplate = restTemplate;
-    }
-
-    public void notifyUpload(String partId, String clientId, String fileName) {
-        try {
-            // API URL
-            String apiUrl = "https://example.com/api/notify-upload?partId={partId}&clientId={clientId}";
-
-            // Encode Basic Auth
-            String auth = username + ":" + password;
-            String encodedAuth = Base64.getEncoder().encodeToString(auth.getBytes(StandardCharsets.UTF_8));
-            String authHeader = "Basic " + encodedAuth;
-
-            // Create headers
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.set("Authorization", authHeader);
-
-            // Create JSON request body
-            Map<String, String> requestBody = new HashMap<>();
-            requestBody.put("fname", fileName);
-
-            // Create HTTP request entity
-            HttpEntity<Map<String, String>> requestEntity = new HttpEntity<>(requestBody, headers);
-
-            // Log Request
-            System.out.println("🔹 Sending POST Request to: " + apiUrl);
-            System.out.println("🔹 Headers: " + headers);
-            System.out.println("🔹 Body: " + requestBody);
-
-            // Define path variables
-            Map<String, String> uriVariables = new HashMap<>();
-            uriVariables.put("partId", partId);
-            uriVariables.put("clientId", clientId);
-
-            // Send API request
-            ResponseEntity<String> response = restTemplate.exchange(apiUrl, HttpMethod.POST, requestEntity, String.class, uriVariables);
-
-            // Log Response
-            System.out.println("✅ API Response: " + response.getStatusCode());
-            System.out.println("✅ Response Body: " + response.getBody());
-
-        } catch (Exception e) {
-            System.err.println("❌ API Call Failed: " + e.getMessage());
-        }
-    }
-}
+curl -X POST "https://example.com/api/notify-upload?partId=12345&clientId=67890" \
+     -H "Content-Type: application/json" \
+     -H "Authorization: Basic $(echo -n 'your-username:your-password' | base64)" \
+     -d '{"fname": "uploaded-file.pgp"}' \
+     -v
