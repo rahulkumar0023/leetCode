@@ -1,6 +1,81 @@
+import org.springframework.http.*;
+import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
+import org.springframework.web.client.RestTemplateBuilder;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
+import java.security.cert.X509Certificate;
+import java.util.HashMap;
+import java.util.Map;
 
-curl -X POST "https://example.com/api/notify-upload?partId=12345&clientId=67890" \
-     -H "Content-Type: application/json" \
-     -H "Authorization: Basic $(echo -n 'your-username:your-password' | base64)" \
-     -d '{"fname": "uploaded-file.pgp"}' \
-     -v
+@Service
+public class RestApiClient {
+
+    private final RestTemplate restTemplate;
+
+    public RestApiClient(RestTemplateBuilder restTemplateBuilder) {
+        this.restTemplate = restTemplateBuilder
+                .basicAuthentication("your-username", "your-password") // Basic Auth
+                .requestFactory(() -> new HttpComponentsClientHttpRequestFactory(createUnsecuredHttpClient())) // Disable SSL
+                .build();
+    }
+
+    public void notifyUpload(String partId, String clientId, String fileName) {
+        try {
+            // API URL with parameters
+            String apiUrl = "https://example.com/api/notify-upload?partId={partId}&clientId={clientId}";
+
+            // Set request headers
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+
+            // JSON Request Body
+            Map<String, String> requestBody = new HashMap<>();
+            requestBody.put("fname", fileName);
+
+            // HTTP Entity with headers and body
+            HttpEntity<Map<String, String>> requestEntity = new HttpEntity<>(requestBody, headers);
+
+            // URL Parameters
+            Map<String, String> uriVariables = new HashMap<>();
+            uriVariables.put("partId", partId);
+            uriVariables.put("clientId", clientId);
+
+            // Log API Call
+            System.out.println("🔹 Sending API Request: " + apiUrl);
+            System.out.println("🔹 Headers: " + headers);
+            System.out.println("🔹 Body: " + requestBody);
+
+            // Send API Request
+            ResponseEntity<String> response = restTemplate.exchange(apiUrl, HttpMethod.POST, requestEntity, String.class, uriVariables);
+
+            // Log API Response
+            System.out.println("✅ API Response Status: " + response.getStatusCode());
+            System.out.println("✅ API Response Body: " + response.getBody());
+
+        } catch (Exception e) {
+            System.err.println("❌ API Call Failed: " + e.getMessage());
+        }
+    }
+
+    // ✅ Method to Disable SSL Verification (Matches --insecure in Curl)
+    private static CloseableHttpClient createUnsecuredHttpClient() {
+        try {
+            SSLContext sslContext = SSLContext.getInstance("TLS");
+            sslContext.init(null, new TrustManager[]{new X509TrustManager() {
+                public void checkClientTrusted(X509Certificate[] chain, String authType) {}
+                public void checkServerTrusted(X509Certificate[] chain, String authType) {}
+                public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+            }}, null);
+
+            return HttpClients.custom()
+                    .setSSLContext(sslContext)
+                    .setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE)
+                    .build();
+
+        } catch (Exception e) {
+            throw new RuntimeException("Error creating SSL Ignoring HTTP Client", e);
+        }
+    }
+}
