@@ -373,3 +373,52 @@ public class RestApiClient {
         }
     }
 }
+
+import java.util.Base64;
+
+public void notifyUpload(String partId, String clientId, String fileName) {
+    try {
+        // ✅ API URL with query parameters
+        String apiUrl = "https://example.com/api/notify-upload?partId=" + partId + "&clientId=" + clientId;
+
+        // ✅ Set request headers
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        
+        // 🔹 Add Basic Authentication Header (Manually Encode Username & Password)
+        String username = "your-username";
+        String password = "your-password";
+        String basicAuth = Base64.getEncoder().encodeToString((username + ":" + password).getBytes());
+        headers.set("Authorization", "Basic " + basicAuth);
+
+        // ✅ Create JSON request body
+        String requestBody = "{\"fname\":\"" + fileName + "\"}";
+
+        // ✅ Create HTTP Entity with headers & body
+        HttpEntity<String> requestEntity = new HttpEntity<>(requestBody, headers);
+
+        // 🔹 Print the Request as a cURL Command
+        String curlCommand = "curl -X POST \"" + apiUrl + "\" \\\n" +
+                "     -H \"Content-Type: application/json\" \\\n" +
+                "     -H \"Authorization: Basic " + basicAuth + "\" \\\n" +
+                "     -d '" + requestBody + "' --insecure";
+
+        System.out.println("\n🔹 [DEBUG] Equivalent cURL Command:");
+        System.out.println(curlCommand);
+        System.out.println("🔹 --------------------------------------");
+
+        // ✅ Execute API Call
+        ResponseEntity<String> response = restTemplate.exchange(apiUrl, HttpMethod.POST, requestEntity, String.class);
+
+        // ✅ Log Response
+        System.out.println("\n✅ API Response Status: " + response.getStatusCode());
+        System.out.println("✅ API Response Headers: " + response.getHeaders());
+        System.out.println("✅ API Response Body: " + response.getBody());
+
+    } catch (Exception e) {
+        System.err.println("\n❌ API Call Failed: " + e.getMessage());
+    }
+}
+
+
+
