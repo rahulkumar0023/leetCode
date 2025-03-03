@@ -4,9 +4,9 @@ import static org.junit.jupiter.api.Assertions.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.InjectMocks;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.*;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.client.RestTemplateBuilder;
@@ -14,6 +14,7 @@ import org.springframework.web.client.RestTemplateBuilder;
 import java.util.HashMap;
 import java.util.Map;
 
+@ExtendWith(MockitoExtension.class)
 class RestApiClientTest {
 
     @Mock
@@ -25,14 +26,16 @@ class RestApiClientTest {
     @Mock
     private ObjectMapper objectMapper;
 
-    @InjectMocks
     private RestApiClient restApiClient;
 
     @BeforeEach
     void setUp() {
-        MockitoAnnotations.openMocks(this);
+        // Mock RestTemplate behavior
         when(restTemplateBuilder.basicAuthentication(anyString(), anyString())).thenReturn(restTemplateBuilder);
         when(restTemplateBuilder.build()).thenReturn(restTemplate);
+
+        // Manually instantiate RestApiClient with mocked dependencies
+        restApiClient = new RestApiClient(restTemplateBuilder, objectMapper);
     }
 
     @Test
@@ -85,6 +88,3 @@ class RestApiClientTest {
         assertEquals("API Error", exception.getMessage());
     }
 }
-
-
-
