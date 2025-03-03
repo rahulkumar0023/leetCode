@@ -1,422 +1,88 @@
-import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
-import org.apache.hc.client5.http.impl.classic.HttpClients;
-import org.apache.hc.client5.http.ssl.NoopHostnameVerifier;
-import org.apache.hc.core5.ssl.SSLContextBuilder;
-import org.apache.hc.core5.ssl.TrustStrategy;
+import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.*;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
 import org.springframework.http.*;
-import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
-import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.client.RestTemplateBuilder;
 
-import javax.net.ssl.SSLContext;
-import java.security.cert.X509Certificate;
 import java.util.HashMap;
 import java.util.Map;
 
-@Service
-public class RestApiClient {
+class RestApiClientTest {
 
-    private final RestTemplate restTemplate;
+    @Mock
+    private RestTemplateBuilder restTemplateBuilder;
 
-    public RestApiClient(RestTemplateBuilder restTemplateBuilder) {
-        this.restTemplate = restTemplateBuilder
-                .basicAuthentication("your-username", "your-password") // ✅ Basic Authentication
-                .requestFactory(() -> new HttpComponentsClientHttpRequestFactory(createUnsecuredHttpClient())) // ✅ Fix SSL issue
-                .build();
+    @Mock
+    private RestTemplate restTemplate;
+
+    @Mock
+    private ObjectMapper objectMapper;
+
+    @InjectMocks
+    private RestApiClient restApiClient;
+
+    @BeforeEach
+    void setUp() {
+        MockitoAnnotations.openMocks(this);
+        when(restTemplateBuilder.basicAuthentication(anyString(), anyString())).thenReturn(restTemplateBuilder);
+        when(restTemplateBuilder.build()).thenReturn(restTemplate);
     }
 
-    public void notifyUpload(String partId, String clientId, String fileName) {
-        try {
-            // ✅ API URL with query parameters
-            String apiUrl = "https://example.com/api/notify-upload?partId={partId}&clientId={clientId}";
+    @Test
+    void testNotifyUpload_Success_A() throws Exception {
+        // Mock Response
+        ResponseEntity<String> mockResponse = new ResponseEntity<>("Success", HttpStatus.OK);
+        when(restTemplate.exchange(anyString(), any(), any(), eq(String.class), any(Map.class)))
+                .thenReturn(mockResponse);
+        when(objectMapper.writeValueAsString(any())).thenReturn("{\"fname\":\"test-file.pgp\"}");
 
-            // ✅ Set request headers
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
+        // Execute
+        assertDoesNotThrow(() -> restApiClient.notifyUpload("A", "test-file.pgp"));
 
-            // ✅ Create JSON request body
-            Map<String, String> requestBody = new HashMap<>();
-            requestBody.put("fname", fileName);
-
-            // ✅ Create HTTP Entity with headers & body
-            HttpEntity<Map<String, String>> requestEntity = new HttpEntity<>(requestBody, headers);
-
-            // ✅ Define URL parameters
-            Map<String, String> uriVariables = new HashMap<>();
-            uriVariables.put("partId", partId);
-            uriVariables.put("clientId", clientId);
-
-            // ✅ Log Request
-            System.out.println("🔹 Sending API Request to: " + apiUrl);
-            System.out.println("🔹 Headers: " + headers);
-            System.out.println("🔹 Body: " + requestBody);
-
-            // ✅ Execute API Call
-            ResponseEntity<String> response = restTemplate.exchange(apiUrl, HttpMethod.POST, requestEntity, String.class, uriVariables);
-
-            // ✅ Log Response
-            System.out.println("✅ API Response Status: " + response.getStatusCode());
-            System.out.println("✅ API Response Body: " + response.getBody());
-
-        } catch (Exception e) {
-            System.err.println("❌ API Call Failed: " + e.getMessage());
-        }
+        // Verify that exchange() was called once
+        verify(restTemplate, times(1)).exchange(anyString(), any(), any(), eq(String.class), any(Map.class));
     }
 
-    // ✅ Fixed SSL Configuration for Apache HttpClient 5
-    private static CloseableHttpClient createUnsecuredHttpClient() {
-        try {
-            // Create an SSL Context that trusts all certificates
-            SSLContext sslContext = SSLContextBuilder.create()
-                    .loadTrustMaterial((TrustStrategy) (X509Certificate[] chain, String authType) -> true) // Trust All
-                    .build();
+    @Test
+    void testNotifyUpload_Success_B() throws Exception {
+        // Mock Response
+        ResponseEntity<String> mockResponse = new ResponseEntity<>("Success", HttpStatus.OK);
+        when(restTemplate.exchange(anyString(), any(), any(), eq(String.class), any(Map.class)))
+                .thenReturn(mockResponse);
+        when(objectMapper.writeValueAsString(any())).thenReturn("{\"fname\":\"test-file.pgp\"}");
 
-            return HttpClients.custom()
-                    .setSSLContext(sslContext)
-                    .setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE) // Ignore Hostname verification
-                    .build();
+        // Execute
+        assertDoesNotThrow(() -> restApiClient.notifyUpload("B", "test-file.pgp"));
 
-        } catch (Exception e) {
-            throw new RuntimeException("Error creating SSL Ignoring HTTP Client", e);
-        }
-    }
-}
-
-
-
-import org.apache.hc.client5.http.config.RequestConfig;
-import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
-import org.apache.hc.client5.http.impl.classic.HttpClients;
-import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
-import org.apache.hc.client5.http.ssl.NoopHostnameVerifier;
-import org.apache.hc.core5.ssl.SSLContextBuilder;
-import org.apache.hc.core5.ssl.TrustStrategy;
-import org.springframework.http.*;
-import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
-import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
-import org.springframework.web.client.RestTemplateBuilder;
-
-import javax.net.ssl.SSLContext;
-import java.security.cert.X509Certificate;
-import java.util.HashMap;
-import java.util.Map;
-
-@Service
-public class RestApiClient {
-
-    private final RestTemplate restTemplate;
-
-    public RestApiClient(RestTemplateBuilder restTemplateBuilder) {
-        this.restTemplate = restTemplateBuilder
-                .basicAuthentication("your-username", "your-password") // ✅ Basic Authentication
-                .requestFactory(() -> new HttpComponentsClientHttpRequestFactory(createUnsecuredHttpClient())) // ✅ Fix SSL issue
-                .build();
+        // Verify that exchange() was called once
+        verify(restTemplate, times(1)).exchange(anyString(), any(), any(), eq(String.class), any(Map.class));
     }
 
-    public void notifyUpload(String partId, String clientId, String fileName) {
-        try {
-            // ✅ API URL with query parameters
-            String apiUrl = "https://example.com/api/notify-upload?partId={partId}&clientId={clientId}";
-
-            // ✅ Set request headers
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-
-            // ✅ Create JSON request body
-            Map<String, String> requestBody = new HashMap<>();
-            requestBody.put("fname", fileName);
-
-            // ✅ Create HTTP Entity with headers & body
-            HttpEntity<Map<String, String>> requestEntity = new HttpEntity<>(requestBody, headers);
-
-            // ✅ Define URL parameters
-            Map<String, String> uriVariables = new HashMap<>();
-            uriVariables.put("partId", partId);
-            uriVariables.put("clientId", clientId);
-
-            // ✅ Log Request
-            System.out.println("🔹 Sending API Request to: " + apiUrl);
-            System.out.println("🔹 Headers: " + headers);
-            System.out.println("🔹 Body: " + requestBody);
-
-            // ✅ Execute API Call
-            ResponseEntity<String> response = restTemplate.exchange(apiUrl, HttpMethod.POST, requestEntity, String.class, uriVariables);
-
-            // ✅ Log Response
-            System.out.println("✅ API Response Status: " + response.getStatusCode());
-            System.out.println("✅ API Response Body: " + response.getBody());
-
-        } catch (Exception e) {
-            System.err.println("❌ API Call Failed: " + e.getMessage());
-        }
+    @Test
+    void testNotifyUpload_InvalidDestination() {
+        IllegalArgumentException exception = assertThrows(IllegalArgumentException.class, () ->
+                restApiClient.notifyUpload("C", "test-file.pgp")
+        );
+        assertEquals("❌ Invalid destination: C", exception.getMessage());
     }
 
-    // ✅ Fixed SSL Configuration for Apache HttpClient 5.3.x
-    private static CloseableHttpClient createUnsecuredHttpClient() {
-        try {
-            // ✅ Create an SSL Context that trusts all certificates
-            SSLContext sslContext = SSLContextBuilder.create()
-                    .loadTrustMaterial((TrustStrategy) (X509Certificate[] chain, String authType) -> true) // Trust All
-                    .build();
+    @Test
+    void testNotifyUpload_ApiCallFailure() throws Exception {
+        when(objectMapper.writeValueAsString(any())).thenReturn("{\"fname\":\"test-file.pgp\"}");
+        when(restTemplate.exchange(anyString(), any(), any(), eq(String.class), any(Map.class)))
+                .thenThrow(new RuntimeException("API Error"));
 
-            // ✅ Use HttpClientBuilder (Instead of HttpClients.custom())
-            return HttpClients.custom()
-                    .setConnectionManager(PoolingHttpClientConnectionManagerBuilder.create().build()) // ✅ Fix for 5.3.x
-                    .setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE) // Ignore Hostname verification
-                    .build();
-
-        } catch (Exception e) {
-            throw new RuntimeException("Error creating SSL Ignoring HTTP Client", e);
-        }
-    }
-}
-
-
-
-
-import org.apache.hc.client5.http.config.RequestConfig;
-import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
-import org.apache.hc.client5.http.impl.classic.HttpClients;
-import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
-import org.apache.hc.client5.http.socket.ConnectionSocketFactory;
-import org.apache.hc.client5.http.socket.PlainConnectionSocketFactory;
-import org.apache.hc.client5.http.ssl.SSLConnectionSocketFactory;
-import org.apache.hc.core5.ssl.SSLContextBuilder;
-import org.apache.hc.core5.ssl.TrustStrategy;
-import org.springframework.http.*;
-import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
-import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
-import org.springframework.web.client.RestTemplateBuilder;
-
-import javax.net.ssl.SSLContext;
-import java.security.cert.X509Certificate;
-import java.util.HashMap;
-import java.util.Map;
-
-@Service
-public class RestApiClient {
-
-    private final RestTemplate restTemplate;
-
-    public RestApiClient(RestTemplateBuilder restTemplateBuilder) {
-        this.restTemplate = restTemplateBuilder
-                .basicAuthentication("your-username", "your-password") // ✅ Basic Authentication
-                .requestFactory(() -> new HttpComponentsClientHttpRequestFactory(createUnsecuredHttpClient())) // ✅ Fix SSL issue
-                .build();
-    }
-
-    public void notifyUpload(String partId, String clientId, String fileName) {
-        try {
-            // ✅ API URL with query parameters
-            String apiUrl = "https://example.com/api/notify-upload?partId={partId}&clientId={clientId}";
-
-            // ✅ Set request headers
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-
-            // ✅ Create JSON request body
-            Map<String, String> requestBody = new HashMap<>();
-            requestBody.put("fname", fileName);
-
-            // ✅ Create HTTP Entity with headers & body
-            HttpEntity<Map<String, String>> requestEntity = new HttpEntity<>(requestBody, headers);
-
-            // ✅ Define URL parameters
-            Map<String, String> uriVariables = new HashMap<>();
-            uriVariables.put("partId", partId);
-            uriVariables.put("clientId", clientId);
-
-            // ✅ Log Request
-            System.out.println("🔹 Sending API Request to: " + apiUrl);
-            System.out.println("🔹 Headers: " + headers);
-            System.out.println("🔹 Body: " + requestBody);
-
-            // ✅ Execute API Call
-            ResponseEntity<String> response = restTemplate.exchange(apiUrl, HttpMethod.POST, requestEntity, String.class, uriVariables);
-
-            // ✅ Log Response
-            System.out.println("✅ API Response Status: " + response.getStatusCode());
-            System.out.println("✅ API Response Body: " + response.getBody());
-
-        } catch (Exception e) {
-            System.err.println("❌ API Call Failed: " + e.getMessage());
-        }
-    }
-
-    // ✅ Fixed SSL Configuration for Apache HttpClient 5.3.x
-    private static CloseableHttpClient createUnsecuredHttpClient() {
-        try {
-            // ✅ Create an SSL Context that trusts all certificates
-            SSLContext sslContext = SSLContextBuilder.create()
-                    .loadTrustMaterial((TrustStrategy) (X509Certificate[] chain, String authType) -> true) // Trust All Certificates
-                    .build();
-
-            // ✅ Create SSLConnectionSocketFactory with the SSLContext
-            SSLConnectionSocketFactory sslsf = new SSLConnectionSocketFactory(sslContext, (hostname, session) -> true); // Ignore host verification
-
-            // ✅ Create Connection Manager with SSL Support
-            PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager();
-            connectionManager.setValidateAfterInactivity(org.apache.hc.core5.util.Timeout.ofSeconds(30)); // Fix connection timeout issues
-
-            // ✅ Use HttpClientBuilder with SSL Support
-            return HttpClients.custom()
-                    .setConnectionManager(connectionManager)
-                    .setSSLSocketFactory(sslsf) // ✅ Fix for missing `setSSLContext()`
-                    .evictExpiredConnections()
-                    .evictIdleConnections(org.apache.hc.core5.util.Timeout.ofSeconds(30))
-                    .build();
-
-        } catch (Exception e) {
-            throw new RuntimeException("Error creating SSL Ignoring HTTP Client", e);
-        }
-    }
-}
-
-
-
-import org.apache.hc.client5.http.config.ConnectionConfig;
-import org.apache.hc.client5.http.config.RequestConfig;
-import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
-import org.apache.hc.client5.http.impl.classic.HttpClients;
-import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
-import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
-import org.apache.hc.core5.ssl.SSLContextBuilder;
-import org.apache.hc.core5.ssl.TrustStrategy;
-import org.apache.hc.core5.util.Timeout;
-import org.springframework.http.*;
-import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
-import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
-import org.springframework.web.client.RestTemplateBuilder;
-
-import javax.net.ssl.SSLContext;
-import java.security.cert.X509Certificate;
-import java.util.HashMap;
-import java.util.Map;
-
-@Service
-public class RestApiClient {
-
-    private final RestTemplate restTemplate;
-
-    public RestApiClient(RestTemplateBuilder restTemplateBuilder) {
-        this.restTemplate = restTemplateBuilder
-                .basicAuthentication("your-username", "your-password") // ✅ Basic Authentication
-                .requestFactory(() -> new HttpComponentsClientHttpRequestFactory(createUnsecuredHttpClient())) // ✅ Fix SSL issue
-                .build();
-    }
-
-    public void notifyUpload(String partId, String clientId, String fileName) {
-        try {
-            // ✅ API URL with query parameters
-            String apiUrl = "https://example.com/api/notify-upload?partId={partId}&clientId={clientId}";
-
-            // ✅ Set request headers
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-
-            // ✅ Create JSON request body
-            Map<String, String> requestBody = new HashMap<>();
-            requestBody.put("fname", fileName);
-
-            // ✅ Create HTTP Entity with headers & body
-            HttpEntity<Map<String, String>> requestEntity = new HttpEntity<>(requestBody, headers);
-
-            // ✅ Define URL parameters
-            Map<String, String> uriVariables = new HashMap<>();
-            uriVariables.put("partId", partId);
-            uriVariables.put("clientId", clientId);
-
-            // ✅ Log Request
-            System.out.println("🔹 Sending API Request to: " + apiUrl);
-            System.out.println("🔹 Headers: " + headers);
-            System.out.println("🔹 Body: " + requestBody);
-
-            // ✅ Execute API Call
-            ResponseEntity<String> response = restTemplate.exchange(apiUrl, HttpMethod.POST, requestEntity, String.class, uriVariables);
-
-            // ✅ Log Response
-            System.out.println("✅ API Response Status: " + response.getStatusCode());
-            System.out.println("✅ API Response Body: " + response.getBody());
-
-        } catch (Exception e) {
-            System.err.println("❌ API Call Failed: " + e.getMessage());
-        }
-    }
-
-    // ✅ Fixed SSL Configuration for Apache HttpClient 5.3.x
-    private static CloseableHttpClient createUnsecuredHttpClient() {
-        try {
-            // ✅ Create an SSL Context that trusts all certificates
-            SSLContext sslContext = SSLContextBuilder.create()
-                    .loadTrustMaterial((TrustStrategy) (X509Certificate[] chain, String authType) -> true) // Trust All Certificates
-                    .build();
-
-            // ✅ Create Connection Manager with SSL Support
-            PoolingHttpClientConnectionManager connectionManager =
-                    PoolingHttpClientConnectionManagerBuilder.create()
-                            .setSSLSocketFactory(sslContext.getSocketFactory()) // ✅ Corrected SSL Configuration
-                            .build();
-
-            // ✅ Use HttpClientBuilder with the correct connection manager
-            return HttpClients.custom()
-                    .setConnectionManager(connectionManager)
-                    .evictExpiredConnections()
-                    .evictIdleConnections(Timeout.ofSeconds(30))
-                    .build();
-
-        } catch (Exception e) {
-            throw new RuntimeException("Error creating SSL Ignoring HTTP Client", e);
-        }
-    }
-}
-
-import java.util.Base64;
-
-public void notifyUpload(String partId, String clientId, String fileName) {
-    try {
-        // ✅ API URL with query parameters
-        String apiUrl = "https://example.com/api/notify-upload?partId=" + partId + "&clientId=" + clientId;
-
-        // ✅ Set request headers
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        
-        // 🔹 Add Basic Authentication Header (Manually Encode Username & Password)
-        String username = "your-username";
-        String password = "your-password";
-        String basicAuth = Base64.getEncoder().encodeToString((username + ":" + password).getBytes());
-        headers.set("Authorization", "Basic " + basicAuth);
-
-        // ✅ Create JSON request body
-        String requestBody = "{\"fname\":\"" + fileName + "\"}";
-
-        // ✅ Create HTTP Entity with headers & body
-        HttpEntity<String> requestEntity = new HttpEntity<>(requestBody, headers);
-
-        // 🔹 Print the Request as a cURL Command
-        String curlCommand = "curl -X POST \"" + apiUrl + "\" \\\n" +
-                "     -H \"Content-Type: application/json\" \\\n" +
-                "     -H \"Authorization: Basic " + basicAuth + "\" \\\n" +
-                "     -d '" + requestBody + "' --insecure";
-
-        System.out.println("\n🔹 [DEBUG] Equivalent cURL Command:");
-        System.out.println(curlCommand);
-        System.out.println("🔹 --------------------------------------");
-
-        // ✅ Execute API Call
-        ResponseEntity<String> response = restTemplate.exchange(apiUrl, HttpMethod.POST, requestEntity, String.class);
-
-        // ✅ Log Response
-        System.out.println("\n✅ API Response Status: " + response.getStatusCode());
-        System.out.println("✅ API Response Headers: " + response.getHeaders());
-        System.out.println("✅ API Response Body: " + response.getBody());
-
-    } catch (Exception e) {
-        System.err.println("\n❌ API Call Failed: " + e.getMessage());
+        Exception exception = assertThrows(RuntimeException.class, () ->
+                restApiClient.notifyUpload("A", "test-file.pgp")
+        );
+        assertEquals("API Error", exception.getMessage());
     }
 }
 
