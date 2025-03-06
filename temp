@@ -88,3 +88,80 @@ class RestApiClientTest {
         assertEquals("API Error", exception.getMessage());
     }
 }
+
+
+🚀 Convert a PGP Key String to a File Parameter Without Writing to Disk
+
+Since your encryption utility expects a File parameter, but you only have the key as a String, you can use an in-memory temporary file.
+
+⸻
+
+✅ Convert PGP Key String to a File in Java
+
+Use File.createTempFile() to convert the string to a temporary file and pass it as a parameter.
+
+🔹 Convert String to a Temporary File
+
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+
+public class PGPFileUtil {
+
+    public static File convertStringToTempFile(String keyContent, String filePrefix) throws IOException {
+        // ✅ Create a temporary file with .asc extension
+        File tempFile = File.createTempFile(filePrefix, ".asc");
+        
+        // ✅ Write the key content to the temporary file
+        try (FileWriter writer = new FileWriter(tempFile)) {
+            writer.write(keyContent);
+        }
+
+        // ✅ Auto-delete file when JVM exits
+        tempFile.deleteOnExit();
+        return tempFile;
+    }
+}
+
+
+
+⸻
+
+✅ Example: Pass PGP Key as a File Parameter
+
+Now, modify your method that requires a File parameter.
+
+import java.io.File;
+import java.io.IOException;
+
+public class PGPKeyLoader {
+
+    public void loadPGPKey(File pgpKeyFile) {
+        // Your encryption utility logic that accepts a File
+        System.out.println("Using PGP Key File: " + pgpKeyFile.getAbsolutePath());
+    }
+
+    public static void main(String[] args) throws IOException {
+        // Simulated PGP Key as a String
+        String pgpKeyString = "-----BEGIN PGP PRIVATE KEY BLOCK-----\n...\n-----END PGP PRIVATE KEY BLOCK-----";
+
+        // ✅ Convert to temporary File
+        File pgpKeyFile = PGPFileUtil.convertStringToTempFile(pgpKeyString, "pgp-key");
+
+        // ✅ Pass the file to the method
+        new PGPKeyLoader().loadPGPKey(pgpKeyFile);
+    }
+}
+
+
+
+⸻
+
+✅ Why This Works
+
+✔ Your method still receives a File parameter ✅
+✔ No manual disk storage (temporary file is deleted automatically) ✅
+✔ Works seamlessly with utilities that require file input ✅
+
+🚀 Now, you can use PGP keys from a string without needing permanent storage!
+Let me know if you need further refinements! 😊
