@@ -361,3 +361,92 @@ class DecryptionUtilTest {
 🔥 Now Your JUnit Test Works Without File Access!
 
 Let me know if you need further refinements! 🚀😊
+
+
+
+🚀 Fix: Mocking pgpDecrypt.decrypt(InputStream encryptedInput, OutputStream decryptedOutput) in JUnit + Mockito
+
+Since pgpDecrypt.decrypt() takes an encrypted InputStream as input and writes to a decrypted OutputStream, your test should:
+	1.	Mock an encrypted InputStream (fake encrypted content).
+	2.	Mock a ByteArrayOutputStream to capture the decrypted output.
+	3.	Mock pgpDecrypt.decrypt() to simulate the decryption process.
+
+⸻
+
+✅ Solution: Mock pgpDecrypt.decrypt(InputStream encryptedInput, OutputStream decryptedOutput)
+
+Since decrypt() does not return anything (void method), we use doAnswer() to modify the output OutputStream.
+
+🔹 Modify Your Test Class
+
+import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.*;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+
+class DecryptionUtilTest {
+
+    @Mock
+    private PGPDecrypt pgpDecrypt;  // ✅ Mock PGPDecrypt
+
+    @InjectMocks
+    private DecryptionUtil decryptionUtil;  // ✅ Inject mocks into DecryptionUtil
+
+    @BeforeEach
+    void setUp() {
+        MockitoAnnotations.openMocks(this); // ✅ Initialize Mockito
+    }
+
+    @Test
+    void testDecrypt() throws Exception {
+        // ✅ Mock Encrypted Input Stream
+        String encryptedData = "mocked-encrypted-content";
+        InputStream encryptedInputStream = new ByteArrayInputStream(encryptedData.getBytes());
+
+        // ✅ Mock Decrypted Output Stream (Capture Decryption Output)
+        ByteArrayOutputStream decryptedOutputStream = new ByteArrayOutputStream();
+
+        // ✅ Define Mock Behavior: Simulate `pgpDecrypt.decrypt()`
+        doAnswer(invocation -> {
+            OutputStream outputStream = invocation.getArgument(1);  // Get the provided output stream
+            outputStream.write("mocked-decrypted-content".getBytes());  // Simulate decryption
+            return null;  // Since `decrypt()` is a void method
+        }).when(pgpDecrypt).decrypt(any(InputStream.class), any(OutputStream.class));
+
+        // ✅ Call the method being tested
+        decryptionUtil.decrypt(encryptedInputStream, decryptedOutputStream);
+
+        // ✅ Verify that the output matches the expected decrypted content
+        assertEquals("mocked-decrypted-content", decryptedOutputStream.toString());
+    }
+}
+
+
+
+⸻
+
+✅ Why This Works
+
+✔ Mocks InputStream and OutputStream, so no real files are needed ✅
+✔ Simulates decrypt() logic by writing to the output stream ✅
+✔ Ensures decryptionUtil.decrypt() correctly processes the streams ✅
+
+⸻
+
+❌ What Not to Do
+
+🚫 Do not use real files in tests (always use ByteArrayInputStream and ByteArrayOutputStream).
+🚫 Do not expect a return value from decrypt() (since it’s a void method).
+
+⸻
+
+🔥 Now Your JUnit Test Works Without File Access!
+
+Let me know if you need further refinements! 🚀😊
