@@ -164,4 +164,110 @@ public class PGPKeyLoader {
 ✔ Works seamlessly with utilities that require file input ✅
 
 🚀 Now, you can use PGP keys from a string without needing permanent storage!
-Let me know if you need further refinements! 😊
+Let me know if you need further 🚀 Fix: Stop DecryptionUtil from Reading Files in JUnit Tests
+
+Since your code is still trying to read a file, the issue is likely due to static methods inside PGPEncrypt or PGPDecrypt. Mockito cannot mock static methods directly by default, but there is a way to handle this.
+
+⸻
+
+🔹 Why Is Your Test Still Reading a File?
+	•	Static methods in PGPEncrypt or PGPDecrypt are not mocked → they execute real logic.
+	•	A method inside DecryptionUtil is directly reading a file instead of getting mocked data.
+	•	Mockito.doAnswer() only works for instance methods → static methods need special handling.
+
+⸻
+
+✅ Solution 1: Use Mockito.mockStatic() to Mock Static Methods
+
+Since your PGPDecrypt class has static methods, use Mockito.mockStatic() to override their behavior.
+
+🔹 Modify Your Test Class
+
+import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.*;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import org.mockito.MockitoAnnotations;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+
+class DecryptionUtilTest {
+
+    @Mock
+    private PGPEncrypt pgpEncrypt;  // ✅ Mock PGPEncrypt
+
+    @Mock
+    private PGPDecrypt pgpDecrypt;  // ✅ Mock PGPDecrypt
+
+    @InjectMocks
+    private DecryptionUtil decryptionUtil;  // ✅ Inject mocks into DecryptionUtil
+
+    @BeforeEach
+    void setUp() {
+        MockitoAnnotations.openMocks(this); // ✅ Initialize Mockito
+    }
+
+    @Test
+    void testDecrypt_withMockedStaticMethods() throws Exception {
+        // ✅ Simulate an encrypted input stream
+        InputStream encryptedInput = new ByteArrayInputStream("mocked-encrypted-data".getBytes());
+        ByteArrayOutputStream decryptedOutput = new ByteArrayOutputStream();
+
+        // ✅ Mock Static Methods of `PGPDecrypt`
+        try (MockedStatic<PGPDecrypt> mockedPGPDecrypt = Mockito.mockStatic(PGPDecrypt.class)) {
+            mockedPGPDecrypt.when(() -> PGPDecrypt.decrypt(any(InputStream.class), any(ByteArrayOutputStream.class)))
+                    .thenAnswer(invocation -> {
+                        ((ByteArrayOutputStream) invocation.getArgument(1)).write("decrypted-data".getBytes());
+                        return null;
+                    });
+
+            // ✅ Call the method being tested
+            decryptionUtil.decrypt(encryptedInput, decryptedOutput);
+
+            // ✅ Verify that decryption happened
+            assertEquals("decrypted-data", decryptedOutput.toString());
+        }
+    }
+}
+
+✅ Now, your static method inside PGPDecrypt will not try to read from a file anymore!
+
+⸻
+
+✅ Solution 2: Mock File Reading (If DecryptionUtil Reads Files Directly)
+
+If DecryptionUtil has a method that loads a key from a file, mock that file reading instead.
+
+🔹 Example
+
+@Mock
+private FileReader fileReader; // ✅ Mock FileReader
+
+@BeforeEach
+void setUp() {
+    when(fileReader.read(anyString())).thenReturn("-----BEGIN PGP PRIVATE KEY----- MOCKED");
+}
+
+✅ Now, no real file reading will happen.
+
+⸻
+
+🚀 Final Fix Checklist
+
+Issue	Solution
+❌ Static methods in PGPDecrypt still execute	✅ Use Mockito.mockStatic(PGPDecrypt.class)
+❌ DecryptionUtil tries to read a file	✅ Mock file reading using when(fileReader.read(anyString()))
+❌ Tests fail because decryption still happens	✅ Mock decryption using thenAnswer()
+
+
+
+⸻
+
+🔥 Now Your JUnit Test Works Without Reading a File!
+
+Let me know if you need further refinements! 🚀😊
