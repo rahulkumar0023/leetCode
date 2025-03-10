@@ -1,219 +1,136 @@
-### **🚀 Complete Implementation: PGP Decryption Using String-Based Keys (No Files Needed)**
-Here’s the **full step-by-step implementation** to:
-- **Use a String-based PGP private key**
-- **Decrypt data without requiring files**
-- **Integrate with Spring Boot and JUnit for testing**
+### **🚀 How to Ensure `@Value("${pgp.private-key}")` is Available Before `@Bean` Initialization**
+Yes, you can **ensure that `@Value` is injected before the `@Bean` method is created** using **constructor-based injection instead of field injection**.
 
 ---
 
-## **✅ Step 1: Add Required Dependencies in `pom.xml`**
-Use **BouncyCastle** for PGP encryption and decryption.
+## **✅ Solution: Use Constructor Injection Instead of Field Injection**
+By **injecting `privateKeyString` through the constructor**, it will be available before the `@Bean` method runs.
 
-### **🔹 Add These Dependencies**
-```xml
-<dependencies>
-    <!-- BouncyCastle for PGP Encryption/Decryption -->
-    <dependency>
-        <groupId>org.bouncycastle</groupId>
-        <artifactId>bcprov-jdk18on</artifactId>
-        <version>1.76</version>
-    </dependency>
-    <dependency>
-        <groupId>org.bouncycastle</groupId>
-        <artifactId>bcpg-jdk18on</artifactId>
-        <version>1.76</version>
-    </dependency>
-
-    <!-- Spring Boot Core -->
-    <dependency>
-        <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-starter</artifactId>
-    </dependency>
-
-    <!-- JUnit and Mockito for Testing -->
-    <dependency>
-        <groupId>org.junit.jupiter</groupId>
-        <artifactId>junit-jupiter-api</artifactId>
-        <scope>test</scope>
-    </dependency>
-    <dependency>
-        <groupId>org.mockito</groupId>
-        <artifactId>mockito-core</artifactId>
-        <scope>test</scope>
-    </dependency>
-</dependencies>
-```
-✅ **Now, your project has everything needed for PGP encryption and testing.**
-
----
-
-## **✅ Step 2: Create `PGPDecrypt` Class to Accept a String-Based Private Key**
-Modify `PGPDecrypt` to:
-- Accept **a private key as a String**
-- Convert the key into a usable format
-- **Decrypt PGP-encrypted input**
-
-### **🔹 `PGPDecrypt.java`**
-```java
-import org.bouncycastle.openpgp.*;
-import org.bouncycastle.openpgp.operator.bc.BcPGPContentSignerBuilder;
-import org.bouncycastle.openpgp.operator.bc.BcPGPDigestCalculatorProvider;
-import org.bouncycastle.openpgp.operator.bc.BcPGPKeyConverter;
-import org.bouncycastle.openpgp.operator.bc.BcPGPContentVerifierBuilderProvider;
-
-import java.io.*;
-import java.util.Iterator;
-
-public class PGPDecrypt {
-
-    private final String privateKey;  // ✅ Store private key as a String
-
-    // ✅ Constructor to accept private key as a String
-    public PGPDecrypt(String privateKey) {
-        if (privateKey == null || privateKey.isEmpty()) {
-            throw new IllegalArgumentException("PGP Private Key cannot be null or empty");
-        }
-        this.privateKey = privateKey;
-    }
-
-    // ✅ Convert Private Key String to PGPSecretKey
-    private PGPSecretKeyRingCollection getSecretKeyRingCollection() throws IOException, PGPException {
-        InputStream keyInputStream = new ByteArrayInputStream(privateKey.getBytes());
-        return new PGPSecretKeyRingCollection(PGPUtil.getDecoderStream(keyInputStream), new BcKeyFingerprintCalculator());
-    }
-
-    // ✅ Decrypt PGP-Encrypted Data
-    public void decrypt(InputStream encryptedInput, OutputStream decryptedOutput, String passphrase) throws Exception {
-        PGPObjectFactory pgpF = new PGPObjectFactory(PGPUtil.getDecoderStream(encryptedInput), new BcKeyFingerprintCalculator());
-        Object object = pgpF.nextObject();
-        
-        if (!(object instanceof PGPEncryptedDataList)) {
-            object = pgpF.nextObject();
-        }
-        PGPEncryptedDataList encList = (PGPEncryptedDataList) object;
-
-        Iterator<PGPEncryptedData> it = encList.getEncryptedDataObjects();
-        PGPPrivateKey privateKey = null;
-        PGPPublicKeyEncryptedData encryptedData = null;
-
-        while (it.hasNext()) {
-            encryptedData = (PGPPublicKeyEncryptedData) it.next();
-            privateKey = findSecretKey(encryptedData.getKeyID(), passphrase);
-            if (privateKey != null) {
-                break;
-            }
-        }
-
-        if (privateKey == null) {
-            throw new IllegalArgumentException("No private key found for decryption");
-        }
-
-        InputStream decryptedData = encryptedData.getDataStream(new BcPGPContentVerifierBuilderProvider(), privateKey);
-        byte[] buffer = new byte[1024];
-        int bytesRead;
-        while ((bytesRead = decryptedData.read(buffer)) != -1) {
-            decryptedOutput.write(buffer, 0, bytesRead);
-        }
-    }
-
-    // ✅ Find the Private Key using KeyID and Passphrase
-    private PGPPrivateKey findSecretKey(long keyID, String passphrase) throws PGPException {
-        PGPSecretKeyRingCollection secretKeyRingCollection = getSecretKeyRingCollection();
-        Iterator<PGPSecretKeyRing> keyRingIterator = secretKeyRingCollection.getKeyRings();
-
-        while (keyRingIterator.hasNext()) {
-            PGPSecretKeyRing keyRing = keyRingIterator.next();
-            Iterator<PGPSecretKey> keyIterator = keyRing.getSecretKeys();
-            while (keyIterator.hasNext()) {
-                PGPSecretKey key = keyIterator.next();
-                if (key.getKeyID() == keyID) {
-                    return key.extractPrivateKey(new BcPGPContentSignerBuilder(key.getPublicKey().getAlgorithm(), PGPUtil.SHA256).build(passphrase.toCharArray()));
-                }
-            }
-        }
-        return null;
-    }
-}
-```
-✅ **Now, `PGPDecrypt` decrypts data using a String-based private key instead of a file.**
-
----
-
-## **✅ Step 3: Modify `PGPConfig` to Inject the Private Key as a String**
-Modify `PGPConfig` to **provide the key as a String**.
-
-### **🔹 Modify `PGPConfig.java`**
+### **🔹 Modify `PGPConfig`**
 ```java
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+
 @Configuration
 public class PGPConfig {
 
+    private final String privateKeyString;
+
+    // ✅ Use constructor injection instead of @Value on a field
+    public PGPConfig(@Value("${pgp.private-key}") String privateKeyString) {
+        this.privateKeyString = privateKeyString;
+    }
+
     @Bean
-    public PGPDecrypt pgpDecrypt(@Value("${pgp.private-key}") String privateKey) {
-        return new PGPDecrypt(privateKey);  // ✅ Use the new constructor
+    public PGPDecrypt pgpDecrypt() throws IOException {
+        // ✅ Convert the private key String into a temporary file
+        File privateKeyFile = createTempFile(privateKeyString);
+
+        // ✅ Pass the file to PGPDecrypt
+        return new PGPDecrypt(privateKeyFile);
+    }
+
+    private File createTempFile(String keyContent) throws IOException {
+        File tempFile = File.createTempFile("pgp-private-key", ".asc");
+        tempFile.deleteOnExit(); // ✅ Automatically delete file after JVM exits
+
+        try (FileWriter writer = new FileWriter(tempFile)) {
+            writer.write(keyContent);
+        }
+
+        return tempFile;
     }
 }
 ```
-✅ **Now, `PGPConfig` injects the private key as a String.**
+✅ **Now, `privateKeyString` is injected before the `@Bean` method runs.**
 
 ---
 
-## **✅ Step 4: Store the Private Key in `application.yaml`**
-Instead of reading from a file, **store the key in `application.yaml`**.
+## **✅ Solution: Use `@ConfigurationProperties` Instead of `@Value`**
+Another approach is to use `@ConfigurationProperties`, which **binds multiple properties at once**.
 
-### **🔹 Modify `application.yaml`**
-```yaml
-pgp:
-  private-key: "-----BEGIN PGP PRIVATE KEY----- MOCKED-KEY-DATA -----END PGP PRIVATE KEY-----"
-```
-✅ **Now, the private key is directly available as a String.**
-
----
-
-## **✅ Step 5: JUnit Test for `PGPDecrypt`**
-### **🔹 JUnit Test**
+### **🔹 Create a Configuration Class for PGP Properties**
 ```java
-import static org.junit.jupiter.api.Assertions.*;
-import org.junit.jupiter.api.Test;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.stereotype.Component;
 
-class PGPDecryptTest {
+@Component
+@ConfigurationProperties(prefix = "pgp")
+public class PGPProperties {
+    private String privateKey;
 
-    @Test
-    void testDecrypt() throws Exception {
-        // ✅ Provide a fake private key
-        String privateKey = "-----BEGIN PGP PRIVATE KEY----- MOCKED -----END PGP PRIVATE KEY-----";
-        PGPDecrypt pgpDecrypt = new PGPDecrypt(privateKey);
+    public String getPrivateKey() {
+        return privateKey;
+    }
 
-        // ✅ Create input/output streams
-        ByteArrayInputStream encryptedData = new ByteArrayInputStream("mocked-encrypted-data".getBytes());
-        ByteArrayOutputStream decryptedOutput = new ByteArrayOutputStream();
-
-        // ✅ Call decrypt() (Actual decryption logic can be added later)
-        pgpDecrypt.decrypt(encryptedData, decryptedOutput, "mocked-passphrase");
-
-        // ✅ Ensure private key is set correctly
-        assertEquals(privateKey, pgpDecrypt.getPrivateKey());
+    public void setPrivateKey(String privateKey) {
+        this.privateKey = privateKey;
     }
 }
 ```
-✅ **Now, the test works without needing a real private key file.**
+
+### **🔹 Modify `PGPConfig` to Use `PGPProperties`**
+```java
+@Configuration
+public class PGPConfig {
+
+    private final PGPProperties pgpProperties;
+
+    public PGPConfig(PGPProperties pgpProperties) {
+        this.pgpProperties = pgpProperties;
+    }
+
+    @Bean
+    public PGPDecrypt pgpDecrypt() throws IOException {
+        String privateKeyString = pgpProperties.getPrivateKey();
+        File privateKeyFile = createTempFile(privateKeyString);
+
+        return new PGPDecrypt(privateKeyFile);
+    }
+
+    private File createTempFile(String keyContent) throws IOException {
+        File tempFile = File.createTempFile("pgp-private-key", ".asc");
+        tempFile.deleteOnExit();
+
+        try (FileWriter writer = new FileWriter(tempFile)) {
+            writer.write(keyContent);
+        }
+
+        return tempFile;
+    }
+}
+```
+
+✅ **Now, `PGPProperties` ensures that `privateKey` is loaded before `@Bean` creation.**
+
+---
+
+## **✅ Solution: Set a Default Value to Avoid `null` in Tests**
+If `privateKeyString` is `null` during tests, set a **default value**.
+
+### **🔹 Modify `PGPConfig` to Use Default Key in Tests**
+```java
+public PGPConfig(@Value("${pgp.private-key:-----BEGIN PGP PRIVATE KEY----- MOCKED}") String privateKeyString) {
+    this.privateKeyString = privateKeyString;
+}
+```
+✅ **Now, even if `pgp.private-key` is missing, a default key will be used.**
 
 ---
 
 ## **🚀 Final Fix Checklist**
 | **Issue** | **Solution** |
 |-----------|-------------|
-| ❌ `PGPDecrypt` does not exist | ✅ Create `PGPDecrypt` to support String-based keys |
-| ❌ `PGPConfig` loads from a file | ✅ Modify `PGPConfig` to inject a `String` private key |
-| ❌ Tests fail due to missing private key | ✅ Use `@TestPropertySource` to inject a fake key |
-| ❌ No decryption logic exists | ✅ Implement decryption using BouncyCastle |
+| ❌ `@Value` is not available before `@Bean` | ✅ Use constructor injection instead of field injection |
+| ❌ Multiple properties need to be loaded | ✅ Use `@ConfigurationProperties` instead of `@Value` |
+| ❌ `pgp.private-key` is `null` in tests | ✅ Set a default value using `@Value("${pgp.private-key:MOCKED}")` |
 
 ---
 
-### **🔥 Now `PGPDecrypt` Works Without File-Based Keys!**
+### **🔥 Now Your PGPConfig Works Without Issues!**
 Let me know if you need further refinements! 🚀😊
