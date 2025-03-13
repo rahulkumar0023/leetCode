@@ -1,4 +1,23 @@
- response = given()
-        .header("Refog-ID", refogId)
-        .when()
-        .get("/employee/details");
+import java.util.Base64;
+
+public class ManualJwtDecoder {
+    public static void main(String[] args) {
+        // ✅ Replace with your JWT token
+        String jwtToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyZWZvZ0lkIjoiMTIzNDU2IiwiaXNBZG1pbiI6dHJ1ZX0.signature";
+
+        // ✅ Split the token into Header, Payload, and Signature
+        String[] parts = jwtToken.split("\\.");
+        if (parts.length != 3) {
+            System.out.println("❌ Invalid JWT format!");
+            return;
+        }
+
+        // ✅ Decode Header & Payload
+        String header = new String(Base64.getDecoder().decode(parts[0]));
+        String payload = new String(Base64.getDecoder().decode(parts[1]));
+
+        // ✅ Print Decoded JWT
+        System.out.println("✅ Header: " + header);
+        System.out.println("✅ Payload: " + payload);
+    }
+}
