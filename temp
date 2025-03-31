@@ -21,3 +21,27 @@ public class ManualJwtDecoder {
         System.out.println("✅ Payload: " + payload);
     }
 }
+@Bean
+public SynchronizedItemStreamReader<MyModel> synchronizedItemReader(
+        MultiResourceItemReader<MyModel> multiReader) {
+
+    SynchronizedItemStreamReader<MyModel> syncReader = new SynchronizedItemStreamReader<>();
+    syncReader.setDelegate(multiReader);  
+
+    return syncReader;
+}
+
+@Bean
+public Step myStep() {
+    return stepBuilderFactory.get("myStep")
+            .<MyModel, MyModel>chunk(10)
+            .reader(synchronizedItemReader(multiResourceItemReader()))
+            .processor(myProcessor())
+            .writer(myWriter())
+            .taskExecutor(new SimpleAsyncTaskExecutor())  // ✅ Still supports parallelism
+            .throttleLimit(4)
+            .faultTolerant()
+            .skip(Exception.class)
+            .skipLimit(10)
+            .build();
+}
