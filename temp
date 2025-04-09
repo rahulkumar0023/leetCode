@@ -1,47 +1,104 @@
-import java.util.Base64;
+✅ Step-by-Step Fix Plan
+✅ 1. Confirm Each Resource is Valid
+Add this log inside your setEncryptedResources():
 
-public class ManualJwtDecoder {
-    public static void main(String[] args) {
-        // ✅ Replace with your JWT token
-        String jwtToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyZWZvZ0lkIjoiMTIzNDU2IiwiaXNBZG1pbiI6dHJ1ZX0.signature";
+java
+Copy
+Edit
+for (Resource res : decryptedCsvResources) {
+    System.out.println("📄 Resource: " + res.getDescription());
+    System.out.println("   - Exists: " + res.exists());
+    System.out.println("   - Filename: " + res.getFilename());
+    System.out.println("   - Readable: " + res.isReadable());
+}
+If filename is null, or exists() is false, Spring Batch skips that resource without error.
 
-        // ✅ Split the token into Header, Payload, and Signature
-        String[] parts = jwtToken.split("\\.");
-        if (parts.length != 3) {
-            System.out.println("❌ Invalid JWT format!");
-            return;
+✅ 2. Wrap Resource with Required Overrides
+If you're returning a ByteArrayResource, wrap like this:
+
+java
+Copy
+Edit
+Resource csvResource = new ByteArrayResource(csvBytes) {
+    @Override
+    public String getFilename() {
+        return "decrypted-" + UUID.randomUUID() + ".csv";
+    }
+
+    @Override
+    public boolean exists() {
+        return true;
+    }
+
+    @Override
+    public boolean isReadable() {
+        return true;
+    }
+};
+Same if you're using InputStreamResource.
+
+✅ 3. Optional: Use Temp File Instead (Recommended for Big Files)
+If it’s a 450MB file, prefer:
+
+java
+Copy
+Edit
+File tempCsv = File.createTempFile("decrypted-", ".csv");
+try (FileOutputStream out = new FileOutputStream(tempCsv)) {
+    out.write(csvBytes); // or StreamUtils.copy(...)
+}
+Resource fileResource = new FileSystemResource(tempCsv);
+✅ This works perfectly with Spring Batch
+✅ No custom overrides needed
+✅ No memory pressure
+🧹 Just clean up after job ends
+
+✅ 4. Use SynchronizedItemStreamReader
+Make sure you’re wrapping the multi-reader:
+
+java
+Copy
+Edit
+@Bean
+public SynchronizedItemStreamReader<MyModel> synchronizedItemReader() {
+    SynchronizedItemStreamReader<MyModel> reader = new SynchronizedItemStreamReader<>();
+    reader.setDelegate(decryptingMultiResourceItemReader());
+    return reader;
+}
+This is required if you're using parallel steps or taskExecutor().
+
+🛠️ Final Checkpoint
+What to Check	Status
+.getFilename() returns a non-null string	✅
+.exists() returns true	✅
+.getInputStream() returns real data	✅
+You log all this to verify	✅
+You're using setResources() with those Resources	✅
+You're setting the delegate reader after that	✅
+🧪 Want a Debug Helper?
+Add a StepExecutionListener or ItemReadListener:
+
+java
+Copy
+Edit
+@Bean
+public ItemReadListener<MyModel> debugReadListener() {
+    return new ItemReadListener<>() {
+        @Override
+        public void beforeRead() {
+            System.out.println("🔍 Reading next item...");
         }
 
-        // ✅ Decode Header & Payload
-        String header = new String(Base64.getDecoder().decode(parts[0]));
-        String payload = new String(Base64.getDecoder().decode(parts[1]));
+        @Override
+        public void afterRead(MyModel item) {
+            System.out.println("✅ Read: " + item);
+        }
 
-        // ✅ Print Decoded JWT
-        System.out.println("✅ Header: " + header);
-        System.out.println("✅ Payload: " + payload);
-    }
+        @Override
+        public void onReadError(Exception ex) {
+            System.out.println("❌ Read error: " + ex.getMessage());
+            ex.printStackTrace();
+        }
+    };
 }
-@Bean
-public SynchronizedItemStreamReader<MyModel> synchronizedItemReader(
-        MultiResourceItemReader<MyModel> multiReader) {
-
-    SynchronizedItemStreamReader<MyModel> syncReader = new SynchronizedItemStreamReader<>();
-    syncReader.setDelegate(multiReader);  
-
-    return syncReader;
-}
-
-@Bean
-public Step myStep() {
-    return stepBuilderFactory.get("myStep")
-            .<MyModel, MyModel>chunk(10)
-            .reader(synchronizedItemReader(multiResourceItemReader()))
-            .processor(myProcessor())
-            .writer(myWriter())
-            .taskExecutor(new SimpleAsyncTaskExecutor())  // ✅ Still supports parallelism
-            .throttleLimit(4)
-            .faultTolerant()
-            .skip(Exception.class)
-            .skipLimit(10)
-            .build();
-}
+Attach with .listener(debugReadListener()) in the step.
