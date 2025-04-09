@@ -1,162 +1,124 @@
-1. Your Decryption Utility (Assumed Already Implemented)
-For example, your decryption utility might look like this:
+1. Store References and Clean Up via a StepExecutionListener
+You can store the file paths (or even File references) in the Spring Batch ExecutionContext when you create the temporary files. Then, in a StepExecutionListener.afterStep() method, retrieve these references and delete the files manually.
+
+Example: Adding File References to ExecutionContext
+In your composite service (or wherever you create the temporary file), after you create the temp file you can store its absolute path in the ExecutionContext:
 
 java
 Copy
-public class DecryptionUtil {
-    /**
-     * Decrypts the given encrypted input stream and writes the decrypted (ZIP) data to the output stream.
-     */
-    public void decrypt(InputStream encryptedInputStream, OutputStream outputStream) throws Exception {
-        // Your decryption logic here.
-        // For example, using PGP libraries to decrypt and write the plain ZIP data to outputStream.
+public Resource decryptAndUnzip(InputStream encryptedInputStream, StepExecution stepExecution) throws Exception {
+    // --- Step 1: Decrypt into a temporary ZIP file ---
+    File decryptedZipFile = File.createTempFile("decrypted-", ".zip");
+    // Save file path for cleanup later
+    stepExecution.getExecutionContext().put("decryptedZipFile", decryptedZipFile.getAbsolutePath());
+    
+    try (OutputStream fileOut = new FileOutputStream(decryptedZipFile)) {
+        decryptionUtil.decrypt(encryptedInputStream, fileOut);
     }
+
+    // --- Step 2: Unzip the decrypted ZIP file ---
+    List<File> extractedFiles = unzipUtil.unzipFile(decryptedZipFile);
+    if (extractedFiles == null || extractedFiles.isEmpty()) {
+        throw new RuntimeException("No files extracted from the decrypted ZIP file.");
+    }
+    // For this example, pick the first extracted file and store its path for cleanup.
+    File extractedFile = extractedFiles.get(0);
+    stepExecution.getExecutionContext().put("extractedFile", extractedFile.getAbsolutePath());
+
+    // --- Step 3: Wrap it as a Resource ---
+    return new FileSystemResource(extractedFile);
 }
-2. Your Unzip Utility
-This utility takes a ZIP file and extracts its contents into a list of temporary files.
+Example: StepExecutionListener for Cleanup
+Create a listener that deletes temporary files after the step completes:
 
 java
 Copy
-import java.io.*;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
+import org.springframework.batch.core.ExitStatus;
+import org.springframework.batch.core.StepExecution;
+import org.springframework.batch.core.StepExecutionListener;
+import java.io.File;
 
-public class UnzipUtil {
+public class TempFileCleanupListener implements StepExecutionListener {
 
-    /**
-     * Unzips the given ZIP file and returns a list of the extracted temporary files.
-     *
-     * @param zipFile the ZIP file to unzip.
-     * @return A list of Files extracted from the ZIP.
-     * @throws Exception if an error occurs during unzipping.
-     */
-    public List<File> unzipFile(File zipFile) throws Exception {
-        List<File> extractedFiles = new ArrayList<>();
-        try (ZipInputStream zis = new ZipInputStream(new FileInputStream(zipFile))) {
-            ZipEntry entry;
-            while ((entry = zis.getNextEntry()) != null) {
-                if (!entry.isDirectory()) {
-                    // Create a temporary file for the extracted entry.
-                    File tempFile = File.createTempFile("unzipped-", ".tmp");
-                    tempFile.deleteOnExit();
-                    try (OutputStream os = new FileOutputStream(tempFile)) {
-                        byte[] buffer = new byte[8192];
-                        int len;
-                        while ((len = zis.read(buffer)) != -1) {
-                            os.write(buffer, 0, len);
-                        }
-                    }
-                    extractedFiles.add(tempFile);
-                    // If you're only expecting one file, you can break after the first entry.
-                    break;
-                }
+    @Override
+    public void beforeStep(StepExecution stepExecution) {
+        // No cleanup needed before the step starts.
+    }
+
+    @Override
+    public ExitStatus afterStep(StepExecution stepExecution) {
+        // Retrieve file paths from the ExecutionContext
+        String decryptedZipFilePath = stepExecution.getExecutionContext().getString("decryptedZipFile");
+        String extractedFilePath = stepExecution.getExecutionContext().getString("extractedFile");
+
+        if (decryptedZipFilePath != null) {
+            File decryptedZipFile = new File(decryptedZipFilePath);
+            if (decryptedZipFile.exists() && decryptedZipFile.delete()) {
+                System.out.println("Deleted temporary decrypted ZIP file: " + decryptedZipFilePath);
+            } else {
+                System.err.println("Failed to delete temporary decrypted ZIP file: " + decryptedZipFilePath);
             }
         }
-        return extractedFiles;
+
+        if (extractedFilePath != null) {
+            File extractedFile = new File(extractedFilePath);
+            if (extractedFile.exists() && extractedFile.delete()) {
+                System.out.println("Deleted temporary extracted file: " + extractedFilePath);
+            } else {
+                System.err.println("Failed to delete temporary extracted file: " + extractedFilePath);
+            }
+        }
+        return stepExecution.getExitStatus();
     }
 }
-3. Composite Service: FileBasedDecryptionAndUnzipService
-This service uses your separate utilities to process the single .zip.pgp file. It decrypts the encrypted file into a temporary ZIP file, unzips it, and returns the first extracted file as a FileSystemResource.
+Then attach this listener to your step:
 
 java
 Copy
-import org.springframework.core.io.FileSystemResource;
-import org.springframework.core.io.Resource;
-import org.springframework.stereotype.Service;
-import java.io.*;
-import java.util.List;
-
-@Service
-public class FileBasedDecryptionAndUnzipService {
-
-    private final DecryptionUtil decryptionUtil;
-    private final UnzipUtil unzipUtil;
-
-    public FileBasedDecryptionAndUnzipService(DecryptionUtil decryptionUtil, UnzipUtil unzipUtil) {
-        this.decryptionUtil = decryptionUtil;
-        this.unzipUtil = unzipUtil;
-    }
-
-    /**
-     * Processes an encrypted .zip.pgp file:
-     * 1. Decrypts the encrypted input stream into a temporary ZIP file.
-     * 2. Unzips the temporary ZIP file.
-     * 3. Returns the first extracted file wrapped as a FileSystemResource.
-     *
-     * @param encryptedInputStream the InputStream of the .zip.pgp file.
-     * @return a Resource representing the unzipped file.
-     * @throws Exception if decryption or unzipping fails.
-     */
-    public Resource decryptAndUnzip(InputStream encryptedInputStream) throws Exception {
-        // ----- Step 1: Decrypt into a Temporary ZIP File -----
-        File decryptedZipFile = File.createTempFile("decrypted-", ".zip");
-        decryptedZipFile.deleteOnExit(); // Mark the file for deletion on JVM exit
-        
-        try (OutputStream fileOut = new FileOutputStream(decryptedZipFile)) {
-            decryptionUtil.decrypt(encryptedInputStream, fileOut);
-        }
-
-        // ----- Step 2: Unzip the Decrypted ZIP File -----
-        List<File> extractedFiles = unzipUtil.unzipFile(decryptedZipFile);
-        if (extractedFiles == null || extractedFiles.isEmpty()) {
-            throw new RuntimeException("No files extracted from the decrypted ZIP file.");
-        }
-        // For this scenario, assume only one file is needed and pick the first one.
-        File firstExtractedFile = extractedFiles.get(0);
-
-        // ----- Step 3: Wrap the Extracted File as a Spring Resource -----
-        Resource resource = new FileSystemResource(firstExtractedFile);
-        return resource;
-    }
+@Bean
+public Step myStep() {
+    return stepBuilderFactory.get("myStep")
+            .<MyModel, MyModel>chunk(10)
+            .reader(reader())
+            .processor(processor())
+            .writer(writer())
+            .listener(new TempFileCleanupListener())
+            .build();
 }
-4. Usage Example
-You could then use the FileBasedDecryptionAndUnzipService in a Spring component (like a batch processor) to process your encrypted file. For example:
+2. Use a JobExecutionListener for Global Cleanup
+If your job consists of multiple steps and you want a global cleanup after the whole job completes, you can create a JobExecutionListener instead:
 
 java
 Copy
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.core.io.Resource;
-import org.springframework.stereotype.Component;
-import java.io.FileInputStream;
-import java.io.InputStream;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.JobExecutionListener;
+import java.io.File;
 
-@Component
-public class BatchProcessingComponent {
+public class TempJobCleanupListener implements JobExecutionListener {
 
-    private final FileBasedDecryptionAndUnzipService decryptionAndUnzipService;
-
-    @Autowired
-    public BatchProcessingComponent(FileBasedDecryptionAndUnzipService decryptionAndUnzipService) {
-        this.decryptionAndUnzipService = decryptionAndUnzipService;
+    @Override
+    public void beforeJob(JobExecution jobExecution) {
+        // No pre-cleanup logic needed here.
     }
 
-    public void processEncryptedFile(String encryptedFilePath) {
-        try (InputStream encryptedInputStream = new FileInputStream(encryptedFilePath)) {
-            Resource extractedResource = decryptionAndUnzipService.decryptAndUnzip(encryptedInputStream);
-            System.out.println("Successfully extracted file: " + extractedResource.getFilename());
-            
-            // Now pass the resource to a Spring Batch reader (e.g., MultiResourceItemReader)
-            // Or do further processing as needed.
-            
-        } catch (Exception e) {
-            e.printStackTrace();
-            // Handle exception appropriately here.
+    @Override
+    public void afterJob(JobExecution jobExecution) {
+        // Retrieve temporary file paths from job execution context
+        // (You would need to store them in the job context as well)
+        String decryptedZipFilePath = jobExecution.getExecutionContext().getString("decryptedZipFile");
+        String extractedFilePath = jobExecution.getExecutionContext().getString("extractedFile");
+
+        if (decryptedZipFilePath != null) {
+            File decryptedZipFile = new File(decryptedZipFilePath);
+            if (decryptedZipFile.exists() && decryptedZipFile.delete()) {
+                System.out.println("Deleted temporary decrypted ZIP file: " + decryptedZipFilePath);
+            }
+        }
+        if (extractedFilePath != null) {
+            File extractedFile = new File(extractedFilePath);
+            if (extractedFile.exists() && extractedFile.delete()) {
+                System.out.println("Deleted temporary extracted file: " + extractedFilePath);
+            }
         }
     }
 }
-Key Advantages of This Approach
-Memory Efficiency:
-Decryption is performed into a temporary file, avoiding heavy in-memory usage for large files.
-
-FileSystemResource Compatibility:
-The extracted file is returned as a FileSystemResource—this type is fully compatible with Spring Batch readers (e.g., MultiResourceItemReader), which rely on methods like .exists() and .getFilename().
-
-Clear Separation of Concerns:
-The decryption and unzip logic remain in their own utility classes, while the composite service orchestrates the overall file processing.
-
-Manageable Temporary Files:
-By marking files with deleteOnExit() or implementing a cleanup routine, temporary files are handled without manual intervention.
-
-Feel free to adjust the error handling or add logging as needed. This is a robust, file-based solution for processing a single .zip.pgp file using your existing utilities. Let me know if you need further refinements or additional features!
