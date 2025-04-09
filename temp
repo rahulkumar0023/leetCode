@@ -1,104 +1,171 @@
-✅ Step-by-Step Fix Plan
-✅ 1. Confirm Each Resource is Valid
-Add this log inside your setEncryptedResources():
+Reasoned for 7 seconds
+Below is a complete, self-contained example that uses file‑based decryption and unzipping. In this example, we assume:
+
+You have a DecryptionUtil class that decrypts an InputStream (encrypted file) and writes the decrypted ZIP data to an OutputStream.
+
+You have an UnzipUtil class that unzips a ZIP file (on disk) and returns a list of extracted files.
+
+Only one file is expected when unzipped.
+
+The composite service decrypts the encrypted file into a temporary ZIP file, unzips it, and wraps the first extracted file as a Spring Resource (a FileSystemResource).
+
+You can then inject and use this composite service in your application (for example, to pass to a MultiResourceItemReader).
+
+1. DecryptionUtil.java
+(This is a stub; replace the body with your actual decryption logic.)
 
 java
 Copy
-Edit
-for (Resource res : decryptedCsvResources) {
-    System.out.println("📄 Resource: " + res.getDescription());
-    System.out.println("   - Exists: " + res.exists());
-    System.out.println("   - Filename: " + res.getFilename());
-    System.out.println("   - Readable: " + res.isReadable());
+import java.io.InputStream;
+import java.io.OutputStream;
+
+public class DecryptionUtil {
+
+    /**
+     * Decrypts the encryptedInputStream and writes the decrypted ZIP content to the outputStream.
+     * Replace the dummy implementation with your actual decryption logic.
+     */
+    public void decrypt(InputStream encryptedInputStream, OutputStream outputStream) throws Exception {
+        // Dummy implementation for demonstration:
+        // In production, use your PGP decryption logic here.
+        // For now, simply copy input to output.
+        byte[] buffer = new byte[8192];
+        int len;
+        while ((len = encryptedInputStream.read(buffer)) != -1) {
+            outputStream.write(buffer, 0, len);
+        }
+        outputStream.flush();
+    }
 }
-If filename is null, or exists() is false, Spring Batch skips that resource without error.
-
-✅ 2. Wrap Resource with Required Overrides
-If you're returning a ByteArrayResource, wrap like this:
+2. UnzipUtil.java
+This class unzips a given ZIP file and returns a list of extracted File objects. We assume only one file is needed so we stop after extracting the first file.
 
 java
 Copy
-Edit
-Resource csvResource = new ByteArrayResource(csvBytes) {
-    @Override
-    public String getFilename() {
-        return "decrypted-" + UUID.randomUUID() + ".csv";
+import java.io.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+
+public class UnzipUtil {
+
+    /**
+     * Unzips the given ZIP file and returns a list of extracted File objects.
+     * For this example, we only extract one file (the first non-directory entry).
+     *
+     * @param zipFile The ZIP file to unzip.
+     * @return A list containing the extracted File.
+     * @throws Exception if an error occurs during unzipping.
+     */
+    public List<File> unzipFile(File zipFile) throws Exception {
+        List<File> extractedFiles = new ArrayList<>();
+        try (ZipInputStream zis = new ZipInputStream(new FileInputStream(zipFile))) {
+            ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                if (!entry.isDirectory()) {
+                    // Create a temporary file for the extracted entry.
+                    File tempFile = File.createTempFile("unzipped-", ".tmp");
+                    tempFile.deleteOnExit();
+                    try (OutputStream os = new FileOutputStream(tempFile)) {
+                        byte[] buffer = new byte[8192];
+                        int len;
+                        while ((len = zis.read(buffer)) != -1) {
+                            os.write(buffer, 0, len);
+                        }
+                    }
+                    extractedFiles.add(tempFile);
+                    // Stop after processing the first valid file.
+                    break;
+                }
+            }
+        }
+        return extractedFiles;
+    }
+}
+3. FileBasedDecryptionAndUnzipService.java
+This service combines the decryption and unzip steps and returns the resulting file as a Spring Resource.
+
+java
+Copy
+import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.io.Resource;
+import org.springframework.stereotype.Service;
+
+import java.io.*;
+import java.util.List;
+
+@Service
+public class FileBasedDecryptionAndUnzipService {
+
+    private final DecryptionUtil decryptionUtil;
+    private final UnzipUtil unzipUtil;
+
+    public FileBasedDecryptionAndUnzipService(DecryptionUtil decryptionUtil, UnzipUtil unzipUtil) {
+        this.decryptionUtil = decryptionUtil;
+        this.unzipUtil = unzipUtil;
     }
 
-    @Override
-    public boolean exists() {
-        return true;
+    /**
+     * Decrypts an encrypted .zip.pgp file (provided as an InputStream) into a temporary ZIP file,
+     * then unzips the file and returns the first extracted file wrapped as a FileSystemResource.
+     *
+     * @param encryptedInputStream The InputStream of the encrypted file.
+     * @return a Resource representing the unzipped file.
+     * @throws Exception if decryption or unzipping fails.
+     */
+    public Resource decryptAndUnzip(InputStream encryptedInputStream) throws Exception {
+        // ----- Step 1: Decrypt into a temporary ZIP file -----
+        File decryptedZipFile = File.createTempFile("decrypted-", ".zip");
+        decryptedZipFile.deleteOnExit();
+
+        try (OutputStream fileOut = new FileOutputStream(decryptedZipFile)) {
+            decryptionUtil.decrypt(encryptedInputStream, fileOut);
+        }
+
+        // ----- Step 2: Unzip the decrypted ZIP file -----
+        List<File> extractedFiles = unzipUtil.unzipFile(decryptedZipFile);
+        if (extractedFiles == null || extractedFiles.isEmpty()) {
+            throw new RuntimeException("No files extracted from the decrypted ZIP file.");
+        }
+        
+        // Since we expect only one file, use the first extracted file.
+        File extractedFile = extractedFiles.get(0);
+
+        // ----- Step 3: Wrap the extracted file as a Spring Resource -----
+        return new FileSystemResource(extractedFile);
+    }
+}
+4. Usage Example in a Spring Component
+Here's how you might use the composite service in your application. For example, in a Spring Batch job or any component:
+
+java
+Copy
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.io.Resource;
+import org.springframework.stereotype.Component;
+
+import java.io.FileInputStream;
+import java.io.InputStream;
+
+@Component
+public class BatchProcessingComponent {
+
+    private final FileBasedDecryptionAndUnzipService decryptionAndUnzipService;
+
+    @Autowired
+    public BatchProcessingComponent(FileBasedDecryptionAndUnzipService decryptionAndUnzipService) {
+        this.decryptionAndUnzipService = decryptionAndUnzipService;
     }
 
-    @Override
-    public boolean isReadable() {
-        return true;
+    public void processEncryptedFile(String encryptedFilePath) {
+        try (InputStream encryptedInputStream = new FileInputStream(encryptedFilePath)) {
+            Resource resource = decryptionAndUnzipService.decryptAndUnzip(encryptedInputStream);
+            System.out.println("Successfully extracted file: " + resource.getFilename());
+            // Now you can pass this Resource to your Spring Batch reader (e.g. MultiResourceItemReader) or other processing components.
+        } catch (Exception e) {
+            e.printStackTrace();
+            // Handle error appropriately
+        }
     }
-};
-Same if you're using InputStreamResource.
-
-✅ 3. Optional: Use Temp File Instead (Recommended for Big Files)
-If it’s a 450MB file, prefer:
-
-java
-Copy
-Edit
-File tempCsv = File.createTempFile("decrypted-", ".csv");
-try (FileOutputStream out = new FileOutputStream(tempCsv)) {
-    out.write(csvBytes); // or StreamUtils.copy(...)
 }
-Resource fileResource = new FileSystemResource(tempCsv);
-✅ This works perfectly with Spring Batch
-✅ No custom overrides needed
-✅ No memory pressure
-🧹 Just clean up after job ends
-
-✅ 4. Use SynchronizedItemStreamReader
-Make sure you’re wrapping the multi-reader:
-
-java
-Copy
-Edit
-@Bean
-public SynchronizedItemStreamReader<MyModel> synchronizedItemReader() {
-    SynchronizedItemStreamReader<MyModel> reader = new SynchronizedItemStreamReader<>();
-    reader.setDelegate(decryptingMultiResourceItemReader());
-    return reader;
-}
-This is required if you're using parallel steps or taskExecutor().
-
-🛠️ Final Checkpoint
-What to Check	Status
-.getFilename() returns a non-null string	✅
-.exists() returns true	✅
-.getInputStream() returns real data	✅
-You log all this to verify	✅
-You're using setResources() with those Resources	✅
-You're setting the delegate reader after that	✅
-🧪 Want a Debug Helper?
-Add a StepExecutionListener or ItemReadListener:
-
-java
-Copy
-Edit
-@Bean
-public ItemReadListener<MyModel> debugReadListener() {
-    return new ItemReadListener<>() {
-        @Override
-        public void beforeRead() {
-            System.out.println("🔍 Reading next item...");
-        }
-
-        @Override
-        public void afterRead(MyModel item) {
-            System.out.println("✅ Read: " + item);
-        }
-
-        @Override
-        public void onReadError(Exception ex) {
-            System.out.println("❌ Read error: " + ex.getMessage());
-            ex.printStackTrace();
-        }
-    };
-}
-Attach with .listener(debugReadListener()) in the step.
