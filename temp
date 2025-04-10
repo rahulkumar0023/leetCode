@@ -1,275 +1,302 @@
-1. Your Decryption Utility (Assumed Already Implemented)
-For example, your decryption utility might look like this:
+package com.example.batch;
 
-java
-Copy
-public class DecryptionUtil {
-    /**
-     * Decrypts the given encrypted input stream and writes the decrypted (ZIP) data to the output stream.
-     */
-    public void decrypt(InputStream encryptedInputStream, OutputStream outputStream) throws Exception {
-        // Your decryption logic here.
-        // For example, using PGP libraries to decrypt and write the plain ZIP data to outputStream.
-    }
-}
-2. Your Unzip Utility
-This utility takes a ZIP file and extracts its contents into a list of temporary files.
+import com.amazonaws.auth.AWSStaticCredentialsProvider;
+import com.amazonaws.auth.BasicAWSCredentials;
+import com.amazonaws.client.builder.AwsClientBuilder;
+import com.amazonaws.services.s3.AmazonS3;
+import com.amazonaws.services.s3.AmazonS3ClientBuilder;
+import com.amazonaws.services.s3.model.ListObjectsV2Result;
+import com.amazonaws.services.s3.model.S3Object;
+import com.amazonaws.services.s3.model.S3ObjectSummary;
+import org.apache.commons.io.FileUtils;
+import org.springframework.batch.core.Job;
+import org.springframework.batch.core.Step;
+import org.springframework.batch.core.ItemStreamException;
+import org.springframework.batch.core.configuration.annotation.EnableBatchProcessing;
+import org.springframework.batch.core.configuration.annotation.JobBuilderFactory;
+import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
+import org.springframework.batch.item.ExecutionContext;
+import org.springframework.batch.item.ItemReader;
+import org.springframework.batch.item.file.MultiResourceItemReader;
+import org.springframework.batch.item.json.JacksonJsonObjectReader;
+import org.springframework.batch.item.json.JsonItemReader;
+import org.springframework.batch.item.json.builder.JsonItemReaderBuilder;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.io.Resource;
 
-java
-Copy
-import java.io.*;
+import java.io.BufferedInputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
-public class UnzipUtil {
+// Domain model: adjust fields as needed.
+public class CustomJsonFileModel {
+    private String field;
+    // Other properties with getters/setters
+
+    public String getField() {
+        return field;
+    }
+    public void setField(String field) {
+        this.field = field;
+    }
+    @Override
+    public String toString() {
+        return "CustomJsonFileModel[field=" + field + "]";
+    }
+}
+
+/**
+ * Custom reader that extends MultiResourceItemReader and applies decryption/unzip before
+ * delegating to a file-based JSON reader.
+ */
+public class DecryptingMultiResourceItemReader<T> extends MultiResourceItemReader<T> {
+
+    // Encrypted resources, such as those downloaded from COS.
+    private Resource[] encryptedResources;
+
+    public void setEncryptedResources(Resource[] resources) {
+        this.encryptedResources = resources;
+    }
+
+    @Override
+    public void open(ExecutionContext executionContext) throws ItemStreamException {
+        // For each encrypted resource, decrypt and unzip to obtain a plain JSON file.
+        if (encryptedResources != null) {
+            Resource[] decryptedResources = new Resource[encryptedResources.length];
+            for (int i = 0; i < encryptedResources.length; i++) {
+                decryptedResources[i] = getDecryptedResource(encryptedResources[i]);
+            }
+            // Pass the decrypted JSON file resources to the MultiResourceItemReader.
+            setResources(decryptedResources);
+        }
+        super.open(executionContext);
+    }
+    
+    /**
+     * Decrypts the given encrypted resource and then unzips it to extract the JSON file.
+     * Returns a Resource pointing to the decrypted JSON file.
+     */
+    private Resource getDecryptedResource(Resource encryptedResource) {
+        try (InputStream encryptedInputStream = encryptedResource.getInputStream()) {
+            // Call our utility to decrypt (using PGP) and then unzip the decrypted ZIP file.
+            File decryptedJsonFile = DecryptionUtil.decryptAndExtract(encryptedInputStream);
+            return new FileSystemResource(decryptedJsonFile);
+        } catch (Exception e) {
+            throw new ItemStreamException("Error decrypting and extracting resource: " 
+                                             + encryptedResource.getFilename(), e);
+        }
+    }
+}
+
+/**
+ * Utility class for decryption and extraction of the JSON file.
+ */
+class DecryptionUtil {
 
     /**
-     * Unzips the given ZIP file and returns a list of the extracted temporary files.
+     * Decrypts the given encrypted input stream (from a .json.zip.pgp file) by invoking your
+     * PGP decryption logic, writes the decrypted bytes to a temporary ZIP file, then unzips that
+     * ZIP file to extract the JSON file.
      *
-     * @param zipFile the ZIP file to unzip.
-     * @return A list of Files extracted from the ZIP.
-     * @throws Exception if an error occurs during unzipping.
+     * @param encryptedInputStream The input stream of the encrypted file.
+     * @return A File pointing to the extracted JSON file.
+     * @throws Exception if decryption or extraction fails.
      */
-    public List<File> unzipFile(File zipFile) throws Exception {
-        List<File> extractedFiles = new ArrayList<>();
-        try (ZipInputStream zis = new ZipInputStream(new FileInputStream(zipFile))) {
+    public static File decryptAndExtract(InputStream encryptedInputStream) throws Exception {
+        // Create a temporary file to hold the decrypted ZIP.
+        File tempZipFile = File.createTempFile("decrypted_", ".zip");
+        try (FileOutputStream fos = new FileOutputStream(tempZipFile)) {
+            // Call your decryption logic.
+            // This method is assumed to take an InputStream and an OutputStream.
+            // Replace PgpDecrypt.decryptResource with your actual decryption call.
+            PgpDecrypt.decryptResource(encryptedInputStream, fos);
+        }
+        // Now unzip the decrypted ZIP file to extract the JSON file.
+        return unzipJsonFile(tempZipFile);
+    }
+    
+    /**
+     * Unzips the given ZIP file and returns the first JSON file found inside.
+     *
+     * @param zipFile The ZIP file to unzip.
+     * @return A File pointing to the extracted JSON file.
+     * @throws Exception if no JSON file is found or if extraction fails.
+     */
+    private static File unzipJsonFile(File zipFile) throws Exception {
+        // Open the zip file stream.
+        try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(new FileInputStream(zipFile)))) {
             ZipEntry entry;
             while ((entry = zis.getNextEntry()) != null) {
-                if (!entry.isDirectory()) {
-                    // Create a temporary file for the extracted entry.
-                    File tempFile = File.createTempFile("unzipped-", ".tmp");
-                    tempFile.deleteOnExit();
-                    try (OutputStream os = new FileOutputStream(tempFile)) {
-                        byte[] buffer = new byte[8192];
+                // Look for the first file entry that ends with .json.
+                if (!entry.isDirectory() && entry.getName().endsWith(".json")) {
+                    File tempJsonFile = File.createTempFile("extracted_", ".json");
+                    try (FileOutputStream fos = new FileOutputStream(tempJsonFile)) {
+                        byte[] buffer = new byte[4096];
                         int len;
-                        while ((len = zis.read(buffer)) != -1) {
-                            os.write(buffer, 0, len);
+                        while ((len = zis.read(buffer)) > 0) {
+                            fos.write(buffer, 0, len);
                         }
                     }
-                    extractedFiles.add(tempFile);
-                    // If you're only expecting one file, you can break after the first entry.
-                    break;
+                    return tempJsonFile;
+                }
+                zis.closeEntry();
+            }
+        }
+        throw new Exception("No JSON file found in the decrypted ZIP archive.");
+    }
+}
+
+/**
+ * Dummy implementation of a PGP decryption routine.
+ * Replace this with your actual PGP decryption logic.
+ */
+class PgpDecrypt {
+    /**
+     * Decrypts data from the given InputStream and writes the decrypted bytes to the provided
+     * OutputStream.
+     *
+     * @param encryptedIn  The InputStream of the encrypted file.
+     * @param decryptedOut The OutputStream to write decrypted data.
+     * @throws Exception if decryption fails.
+     */
+    public static void decryptResource(InputStream encryptedIn, FileOutputStream decryptedOut) throws Exception {
+        // In your real implementation, use your PGP library to decrypt the stream.
+        // For this example, we simply copy the input to the output (acting as a passthrough).
+        byte[] buffer = new byte[4096];
+        int bytesRead;
+        while ((bytesRead = encryptedIn.read(buffer)) != -1) {
+            decryptedOut.write(buffer, 0, bytesRead);
+        }
+        // Make sure to flush and close are handled by the caller.
+    }
+}
+
+@Configuration
+@EnableBatchProcessing
+public class BatchConfiguration {
+
+    private final StepBuilderFactory stepBuilderFactory;
+    private final JobBuilderFactory jobBuilderFactory;
+    
+    public BatchConfiguration(StepBuilderFactory stepBuilderFactory, JobBuilderFactory jobBuilderFactory) {
+        this.stepBuilderFactory = stepBuilderFactory;
+        this.jobBuilderFactory = jobBuilderFactory;
+    }
+    
+    /**
+     * Creates a JsonItemReader that is built with a JacksonJsonObjectReader.
+     * The resource is a dummy placeholder; it will be replaced by a decrypted file.
+     */
+    @Bean
+    public JsonItemReader<CustomJsonFileModel> jsonItemReader() {
+        JacksonJsonObjectReader<CustomJsonFileModel> jsonObjectReader =
+                new JacksonJsonObjectReader<>(CustomJsonFileModel.class);
+        // Configure your ObjectMapper if needed:
+        // ObjectMapper mapper = new ObjectMapper();
+        // jsonObjectReader.setMapper(mapper);
+        
+        return new JsonItemReaderBuilder<CustomJsonFileModel>()
+                .name("jsonItemReader")
+                .resource(new FileSystemResource("dummy.json"))
+                .jsonObjectReader(jsonObjectReader)
+                .build();
+    }
+    
+    /**
+     * This reader downloads encrypted files from COS, decrypts/unzips them,
+     * and delegates the actual JSON item reading to a file-based reader.
+     */
+    @Bean
+    public ItemReader<CustomJsonFileModel> decryptingMultiResourceItemReader() {
+        DecryptingMultiResourceItemReader<CustomJsonFileModel> reader = new DecryptingMultiResourceItemReader<>();
+        // Dynamically fetch encrypted files from COS.
+        Resource[] encryptedResources = fetchEncryptedResourcesFromCOS();
+        reader.setEncryptedResources(encryptedResources);
+        reader.setDelegate(jsonItemReader());
+        reader.setSaveState(true);
+        return reader;
+    }
+    
+    /**
+     * Example code to fetch encrypted resources from a COS bucket using an S3-compatible client.
+     * Adjust credentials, endpoint, and bucket name as needed.
+     */
+    private Resource[] fetchEncryptedResourcesFromCOS() {
+        AmazonS3 s3Client = AmazonS3ClientBuilder.standard()
+                .withEndpointConfiguration(new AwsClientBuilder.EndpointConfiguration("https://your-cos-endpoint", "your-region"))
+                .withCredentials(new AWSStaticCredentialsProvider(new BasicAWSCredentials("YOUR_API_KEY", "YOUR_SECRET_KEY")))
+                .build();
+        
+        String bucketName = "your-bucket-name";
+        ListObjectsV2Result result = s3Client.listObjectsV2(bucketName);
+        List<S3ObjectSummary> summaries = result.getObjectSummaries();
+        List<Resource> resourceList = new ArrayList<>();
+        
+        // Filter files that end with ".json.zip.pgp"
+        for (S3ObjectSummary summary : summaries) {
+            String key = summary.getKey();
+            if (key.endsWith(".json.zip.pgp")) {
+                try {
+                    S3Object s3Object = s3Client.getObject(bucketName, key);
+                    InputStream objectData = s3Object.getObjectContent();
+                    File tempFile = File.createTempFile("encrypted_", ".json.zip.pgp");
+                    FileUtils.copyInputStreamToFile(objectData, tempFile);
+                    resourceList.add(new FileSystemResource(tempFile));
+                } catch (Exception e) {
+                    System.err.println("Error processing file: " + key + " : " + e.getMessage());
                 }
             }
         }
-        return extractedFiles;
+        return resourceList.toArray(new Resource[0]);
     }
-}
-3. Composite Service: FileBasedDecryptionAndUnzipService
-This service uses your separate utilities to process the single .zip.pgp file. It decrypts the encrypted file into a temporary ZIP file, unzips it, and returns the first extracted file as a FileSystemResource.
-
-java
-Copy
-import org.springframework.core.io.FileSystemResource;
-import org.springframework.core.io.Resource;
-import org.springframework.stereotype.Service;
-import java.io.*;
-import java.util.List;
-
-@Service
-public class FileBasedDecryptionAndUnzipService {
-
-    private final DecryptionUtil decryptionUtil;
-    private final UnzipUtil unzipUtil;
-
-    public FileBasedDecryptionAndUnzipService(DecryptionUtil decryptionUtil, UnzipUtil unzipUtil) {
-        this.decryptionUtil = decryptionUtil;
-        this.unzipUtil = unzipUtil;
-    }
-
-    /**
-     * Processes an encrypted .zip.pgp file:
-     * 1. Decrypts the encrypted input stream into a temporary ZIP file.
-     * 2. Unzips the temporary ZIP file.
-     * 3. Returns the first extracted file wrapped as a FileSystemResource.
-     *
-     * @param encryptedInputStream the InputStream of the .zip.pgp file.
-     * @return a Resource representing the unzipped file.
-     * @throws Exception if decryption or unzipping fails.
-     */
-    public Resource decryptAndUnzip(InputStream encryptedInputStream) throws Exception {
-        // ----- Step 1: Decrypt into a Temporary ZIP File -----
-        File decryptedZipFile = File.createTempFile("decrypted-", ".zip");
-        decryptedZipFile.deleteOnExit(); // Mark the file for deletion on JVM exit
-        
-        try (OutputStream fileOut = new FileOutputStream(decryptedZipFile)) {
-            decryptionUtil.decrypt(encryptedInputStream, fileOut);
-        }
-
-        // ----- Step 2: Unzip the Decrypted ZIP File -----
-        List<File> extractedFiles = unzipUtil.unzipFile(decryptedZipFile);
-        if (extractedFiles == null || extractedFiles.isEmpty()) {
-            throw new RuntimeException("No files extracted from the decrypted ZIP file.");
-        }
-        // For this scenario, assume only one file is needed and pick the first one.
-        File firstExtractedFile = extractedFiles.get(0);
-
-        // ----- Step 3: Wrap the Extracted File as a Spring Resource -----
-        Resource resource = new FileSystemResource(firstExtractedFile);
-        return resource;
-    }
-}
-4. Usage Example
-You could then use the FileBasedDecryptionAndUnzipService in a Spring component (like a batch processor) to process your encrypted file. For example:
-
-java
-Copy
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.core.io.Resource;
-import org.springframework.stereotype.Component;
-import java.io.FileInputStream;
-import java.io.InputStream;
-
-@Component
-public class BatchProcessingComponent {
-
-    private final FileBasedDecryptionAndUnzipService decryptionAndUnzipService;
-
-    @Autowired
-    public BatchProcessingComponent(FileBasedDecryptionAndUnzipService decryptionAndUnzipService) {
-        this.decryptionAndUnzipService = decryptionAndUnzipService;
-    }
-
-    public void processEncryptedFile(String encryptedFilePath) {
-        try (InputStream encryptedInputStream = new FileInputStream(encryptedFilePath)) {
-            Resource extractedResource = decryptionAndUnzipService.decryptAndUnzip(encryptedInputStream);
-            System.out.println("Successfully extracted file: " + extractedResource.getFilename());
-            
-            // Now pass the resource to a Spring Batch reader (e.g., MultiResourceItemReader)
-            // Or do further processing as needed.
-            
-        } catch (Exception e) {
-            e.printStackTrace();
-            // Handle exception appropriately here.
-        }
-    }
-}
-
-
-
-1. Store References and Clean Up via a StepExecutionListener
-You can store the file paths (or even File references) in the Spring Batch ExecutionContext when you create the temporary files. Then, in a StepExecutionListener.afterStep() method, retrieve these references and delete the files manually.
-
-Example: Adding File References to ExecutionContext
-In your composite service (or wherever you create the temporary file), after you create the temp file you can store its absolute path in the ExecutionContext:
-
-java
-Copy
-public Resource decryptAndUnzip(InputStream encryptedInputStream, StepExecution stepExecution) throws Exception {
-    // --- Step 1: Decrypt into a temporary ZIP file ---
-    File decryptedZipFile = File.createTempFile("decrypted-", ".zip");
-    // Save file path for cleanup later
-    stepExecution.getExecutionContext().put("decryptedZipFile", decryptedZipFile.getAbsolutePath());
     
-    try (OutputStream fileOut = new FileOutputStream(decryptedZipFile)) {
-        decryptionUtil.decrypt(encryptedInputStream, fileOut);
+    /**
+     * A simple processor that logs each item.
+     */
+    @Bean
+    public org.springframework.batch.item.ItemProcessor<CustomJsonFileModel, CustomJsonFileModel> itemProcessor() {
+        return item -> {
+            System.out.println("Processing item: " + item);
+            return item;
+        };
     }
-
-    // --- Step 2: Unzip the decrypted ZIP file ---
-    List<File> extractedFiles = unzipUtil.unzipFile(decryptedZipFile);
-    if (extractedFiles == null || extractedFiles.isEmpty()) {
-        throw new RuntimeException("No files extracted from the decrypted ZIP file.");
+    
+    /**
+     * A simple writer that prints each item to the console.
+     */
+    @Bean
+    public org.springframework.batch.item.ItemWriter<CustomJsonFileModel> itemWriter() {
+        return items -> items.forEach(item -> System.out.println("Writing item: " + item));
     }
-    // For this example, pick the first extracted file and store its path for cleanup.
-    File extractedFile = extractedFiles.get(0);
-    stepExecution.getExecutionContext().put("extractedFile", extractedFile.getAbsolutePath());
-
-    // --- Step 3: Wrap it as a Resource ---
-    return new FileSystemResource(extractedFile);
-}
-Example: StepExecutionListener for Cleanup
-Create a listener that deletes temporary files after the step completes:
-
-java
-Copy
-import org.springframework.batch.core.ExitStatus;
-import org.springframework.batch.core.StepExecution;
-import org.springframework.batch.core.StepExecutionListener;
-import java.io.File;
-
-public class TempFileCleanupListener implements StepExecutionListener {
-
-    @Override
-    public void beforeStep(StepExecution stepExecution) {
-        // No cleanup needed before the step starts.
+    
+    /**
+     * Batch step tying the reader, processor, and writer together.
+     */
+    @Bean
+    public Step step1() {
+        return stepBuilderFactory.get("step1")
+                .<CustomJsonFileModel, CustomJsonFileModel>chunk(10)
+                .reader(decryptingMultiResourceItemReader())
+                .processor(itemProcessor())
+                .writer(itemWriter())
+                .build();
     }
-
-    @Override
-    public ExitStatus afterStep(StepExecution stepExecution) {
-        // Retrieve file paths from the ExecutionContext
-        String decryptedZipFilePath = stepExecution.getExecutionContext().getString("decryptedZipFile");
-        String extractedFilePath = stepExecution.getExecutionContext().getString("extractedFile");
-
-        if (decryptedZipFilePath != null) {
-            File decryptedZipFile = new File(decryptedZipFilePath);
-            if (decryptedZipFile.exists() && decryptedZipFile.delete()) {
-                System.out.println("Deleted temporary decrypted ZIP file: " + decryptedZipFilePath);
-            } else {
-                System.err.println("Failed to delete temporary decrypted ZIP file: " + decryptedZipFilePath);
-            }
-        }
-
-        if (extractedFilePath != null) {
-            File extractedFile = new File(extractedFilePath);
-            if (extractedFile.exists() && extractedFile.delete()) {
-                System.out.println("Deleted temporary extracted file: " + extractedFilePath);
-            } else {
-                System.err.println("Failed to delete temporary extracted file: " + extractedFilePath);
-            }
-        }
-        return stepExecution.getExitStatus();
-    }
-}
-Then attach this listener to your step:
-
-java
-Copy
-@Bean
-public Step myStep() {
-    return stepBuilderFactory.get("myStep")
-            .<MyModel, MyModel>chunk(10)
-            .reader(reader())
-            .processor(processor())
-            .writer(writer())
-            .listener(new TempFileCleanupListener())
-            .build();
-}
-2. Use a JobExecutionListener for Global Cleanup
-If your job consists of multiple steps and you want a global cleanup after the whole job completes, you can create a JobExecutionListener instead:
-
-java
-Copy
-import org.springframework.batch.core.JobExecution;
-import org.springframework.batch.core.JobExecutionListener;
-import java.io.File;
-
-public class TempJobCleanupListener implements JobExecutionListener {
-
-    @Override
-    public void beforeJob(JobExecution jobExecution) {
-        // No pre-cleanup logic needed here.
-    }
-
-    @Override
-    public void afterJob(JobExecution jobExecution) {
-        // Retrieve temporary file paths from job execution context
-        // (You would need to store them in the job context as well)
-        String decryptedZipFilePath = jobExecution.getExecutionContext().getString("decryptedZipFile");
-        String extractedFilePath = jobExecution.getExecutionContext().getString("extractedFile");
-
-        if (decryptedZipFilePath != null) {
-            File decryptedZipFile = new File(decryptedZipFilePath);
-            if (decryptedZipFile.exists() && decryptedZipFile.delete()) {
-                System.out.println("Deleted temporary decrypted ZIP file: " + decryptedZipFilePath);
-            }
-        }
-        if (extractedFilePath != null) {
-            File extractedFile = new File(extractedFilePath);
-            if (extractedFile.exists() && extractedFile.delete()) {
-                System.out.println("Deleted temporary extracted file: " + extractedFilePath);
-            }
-        }
+    
+    /**
+     * A simple job that executes the step.
+     */
+    @Bean
+    public Job job() {
+        return jobBuilderFactory.get("job")
+                .start(step1())
+                .build();
     }
 }
