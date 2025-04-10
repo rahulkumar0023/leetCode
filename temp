@@ -8,59 +8,95 @@ import org.springframework.batch.item.json.JsonItemReader;
 import org.springframework.batch.item.json.builder.JsonItemReaderBuilder;
 import org.springframework.core.io.Resource;
 
-public class ValidatedJsonItemReader<T> extends JsonItemReader<T> {
+/**
+ * A wrapper for JsonItemReader<T> that validates the underlying Jackson JsonParser.
+ * Uses composition: it builds and holds a delegate JsonItemReader,
+ * while keeping our own reference to the Resource and JacksonJsonObjectReader.
+ */
+public class ValidatedJsonItemReader<T> {
 
-    // Hold our Jackson JSON object reader for access.
-    private JacksonJsonObjectReader<T> jsonObjectReader;
-    // Store the resource (if not already available via the superclass).
-    private Resource resource;
+    // Our delegate JSON reader
+    private final JsonItemReader<T> delegate;
 
+    // Stored resource (for validation and logging)
+    private final Resource resource;
+
+    // Stored Jackson JSON object reader, so that we can validate its internal JsonParser.
+    private final JacksonJsonObjectReader<T> jsonObjectReader;
+
+    /**
+     * Constructs the reader with the given resource and target type.
+     *
+     * @param resource the Resource pointing to the JSON file
+     * @param type     the target type to which JSON will be mapped
+     */
     public ValidatedJsonItemReader(Resource resource, Class<T> type) {
-        JacksonJsonObjectReader<T> reader = new JacksonJsonObjectReader<>(type);
-        reader.setMapper(new ObjectMapper());
-        this.jsonObjectReader = reader;
         this.resource = resource;
-        // Build the delegate reader.
-        JsonItemReader<T> delegate = new JsonItemReaderBuilder<T>()
+        this.jsonObjectReader = new JacksonJsonObjectReader<>(type);
+        // Configure the ObjectMapper as needed.
+        ObjectMapper objectMapper = new ObjectMapper();
+        this.jsonObjectReader.setMapper(objectMapper);
+
+        // Build the delegate JsonItemReader.
+        this.delegate = new JsonItemReaderBuilder<T>()
                 .name("validatedJsonItemReader")
                 .resource(resource)
-                .jsonObjectReader(reader)
+                .jsonObjectReader(this.jsonObjectReader)
                 .build();
-        // Set up this instance using the delegate properties.
-        this.setName(delegate.getName());
-        this.setResource(resource);
-        // (Optionally, you could delegate read() calls to the delegate here.)
     }
 
-    // Custom getter for the JacksonJsonObjectReader.
-    public JacksonJsonObjectReader<T> getJsonObjectReader() {
-        return this.jsonObjectReader;
+    /**
+     * Opens the reader by delegating to the underlying JsonItemReader, then validates that the
+     * JsonParser is properly initialized.
+     *
+     * @param executionContext the current step execution context.
+     * @throws ItemStreamException if any error occurs.
+     */
+    public void open(ExecutionContext executionContext) throws ItemStreamException {
+        // Open the delegate; this should initialize the parser.
+        this.delegate.open(executionContext);
+
+        // Check that the JacksonJsonObjectReader's parser is not null.
+        if (this.jsonObjectReader.getJsonParser() == null) {
+            throw new ItemStreamException("JsonParser is null in ValidatedJsonItemReader.open() for resource: " + resource);
+        }
+        System.out.println("ValidatedJsonItemReader opened successfully for resource: " + resource);
     }
 
-    // Custom getter for resource. If the superclass doesn't expose it, store it as above.
-    @Override
+    /**
+     * Reads an item from the underlying delegate. Validates that the parser is still available.
+     *
+     * @return the next item or null if end-of-file is reached.
+     * @throws Exception if any error occurs during reading.
+     */
+    public T read() throws Exception {
+        // Check the parser before reading.
+        if (this.jsonObjectReader.getJsonParser() == null) {
+            throw new ItemStreamException("JsonParser is null in ValidatedJsonItemReader.read() for resource: " + resource);
+        }
+        T item = this.delegate.read();
+        if (item == null) {
+            System.out.println("Reached end of JSON file for resource: " + resource);
+        }
+        return item;
+    }
+
+    /**
+     * Closes the underlying delegate.
+     *
+     * @throws ItemStreamException if an error occurs during closing.
+     */
+    public void close() throws ItemStreamException {
+        this.delegate.close();
+    }
+
+    // Optional: expose resource getter for logging or debugging.
     public Resource getResource() {
         return this.resource;
     }
 
-    @Override
-    public void open(ExecutionContext executionContext) throws ItemStreamException {
-        super.open(executionContext);
-        if (this.jsonObjectReader == null || this.jsonObjectReader.getJsonParser() == null) {
-            throw new ItemStreamException("JsonParser is null in ValidatedJsonItemReader.open() for resource: " + getResource());
-        }
-        System.out.println("ValidatedJsonItemReader opened for resource: " + getResource());
-    }
-
-    @Override
-    public T read() throws Exception {
-        if (this.jsonObjectReader == null || this.jsonObjectReader.getJsonParser() == null) {
-            throw new ItemStreamException("JsonParser is null in ValidatedJsonItemReader.read() for resource: " + getResource());
-        }
-        T item = super.read();
-        if (item == null) {
-            System.out.println("Reached end of JSON file for resource: " + getResource());
-        }
-        return item;
+    // Optional: expose the underlying JacksonJsonObjectReader if needed.
+    public JacksonJsonObjectReader<T> getJsonObjectReader() {
+        return this.jsonObjectReader;
     }
 }
