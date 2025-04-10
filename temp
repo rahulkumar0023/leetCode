@@ -664,3 +664,72 @@ public class UnzipUtil {
     */
 }
 
+package com.example.batch;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.batch.item.ExecutionContext;
+import org.springframework.batch.item.ItemStreamException;
+import org.springframework.batch.item.json.JacksonJsonObjectReader;
+import org.springframework.batch.item.json.JsonItemReader;
+import org.springframework.batch.item.json.builder.JsonItemReaderBuilder;
+import org.springframework.core.io.Resource;
+
+/**
+ * A wrapper around Spring Batch's JsonItemReader that performs extra validation to ensure
+ * the underlying JsonParser is properly initialized.
+ *
+ * This can help diagnose issues like "cannot invoke JsonParser.nextToken() because this.jsonParser is null."
+ */
+public class ValidatedJsonItemReader<T> extends JsonItemReader<T> {
+
+    /**
+     * Constructs a ValidatedJsonItemReader using the given resource and target type.
+     *
+     * @param resource the Resource pointing to a valid JSON file.
+     * @param type     the Class type that the JSON should be mapped to.
+     */
+    public ValidatedJsonItemReader(Resource resource, Class<T> type) {
+        // Create and configure the Jackson-based JSON Object Reader.
+        JacksonJsonObjectReader<T> jsonObjectReader = new JacksonJsonObjectReader<>(type);
+        jsonObjectReader.setMapper(new ObjectMapper());
+        
+        // Build the JsonItemReader using the builder.
+        JsonItemReader<T> reader = new JsonItemReaderBuilder<T>()
+                .name("validatedJsonItemReader")
+                .resource(resource)
+                .jsonObjectReader(jsonObjectReader)
+                .build();
+        
+        // Since JsonItemReader is not directly designed for extension,
+        // we copy the configured properties from the built reader.
+        // (For demonstration, we simply delegate open() and read() methods to our super.)
+        this.setName(reader.getName());
+        this.setJsonObjectReader(jsonObjectReader);
+        this.setResource(resource);
+    }
+
+    @Override
+    public void open(ExecutionContext executionContext) throws ItemStreamException {
+        // First, call the parent open() so that the JsonParser is created.
+        super.open(executionContext);
+        // Now check that the JSON parser was properly initialized.
+        if (this.getJsonObjectReader() == null || this.getJsonObjectReader().getJsonParser() == null) {
+            throw new ItemStreamException("JsonParser is null in ValidatedJsonItemReader.open() for resource: " + getResource());
+        }
+        System.out.println("ValidatedJsonItemReader.open() successful for resource: " + getResource());
+    }
+
+    @Override
+    public T read() throws Exception {
+        // Before reading, ensure that the JsonParser is still available.
+        if (this.getJsonObjectReader() == null || this.getJsonObjectReader().getJsonParser() == null) {
+            throw new ItemStreamException("JsonParser is null in ValidatedJsonItemReader.read() for resource: " + getResource());
+        }
+        // Delegate to the super class.
+        T item = super.read();
+        if (item == null) {
+            System.out.println("Reached end of JSON file: " + getResource());
+        }
+        return item;
+    }
+}
