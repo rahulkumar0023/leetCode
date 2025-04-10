@@ -480,3 +480,108 @@ public class UnzipUtil {
    - We check for non-null using `Objects.nonNull()` to ensure our code is safe and concise.
 
 This modernized approach makes the code more readable and concise while taking full advantage of Java 8 (or later) language features.
+
+
+package com.example.batch;
+
+import org.springframework.batch.item.ExecutionContext;
+import org.springframework.batch.item.ItemStreamException;
+import org.springframework.batch.item.file.MultiResourceItemReader;
+import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.io.Resource;
+
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.util.Objects;
+import java.util.stream.IntStream;
+
+/**
+ * A custom MultiResourceItemReader that first decrypts and unzips encrypted resources before delegating to a file-based JSON reader.
+ */
+public class DecryptingMultiResourceItemReader<T> extends MultiResourceItemReader<T> {
+
+    // Utility fields for performing decryption and unzipping.
+    private final DecryptionUtil decryptionUtil;
+    private final UnzipUtil unzipUtil;
+
+    // Encrypted resources provided by the caller (e.g., loaded from COS).
+    private Resource[] encryptedResources;
+
+    /**
+     * Constructor accepting the decryption and unzip utilities.
+     *
+     * @param decryptionUtil The utility for decrypting encrypted files.
+     * @param unzipUtil      The utility for unzipping decrypted files.
+     */
+    public DecryptingMultiResourceItemReader(DecryptionUtil decryptionUtil, UnzipUtil unzipUtil) {
+        this.decryptionUtil = decryptionUtil;
+        this.unzipUtil = unzipUtil;
+    }
+
+    /**
+     * Setter for encrypted resources. These are provided manually in configuration,
+     * so Spring autowiring is not required.
+     *
+     * @param resources An array of Resource objects representing the encrypted files.
+     */
+    public void setEncryptedResources(Resource[] resources) {
+        this.encryptedResources = resources;
+    }
+
+    /**
+     * Overrides open() to first decrypt and unzip each encrypted resource and
+     * then pass the resulting decrypted JSON file resources to the delegate reader.
+     *
+     * @param executionContext The current execution context.
+     * @throws ItemStreamException if an error occurs during resource decryption or unzipping.
+     */
+    @Override
+    public void open(ExecutionContext executionContext) throws ItemStreamException {
+        if (Objects.nonNull(encryptedResources)) {
+            Resource[] decryptedResources = IntStream.range(0, encryptedResources.length)
+                    .mapToObj(i -> getDecryptedResource(encryptedResources[i]))
+                    .toArray(Resource[]::new);
+            // Set the decrypted JSON file resources in the underlying MultiResourceItemReader.
+            setResources(decryptedResources);
+        }
+        super.open(executionContext);
+    }
+    
+    /**
+     * Decrypts the given encrypted resource and then unzips it to extract the JSON file.
+     *
+     * @param encryptedResource The encrypted Resource.
+     * @return A Resource pointing to the decrypted JSON file.
+     * @throws ItemStreamException if decryption or unzipping fails.
+     */
+    private Resource getDecryptedResource(Resource encryptedResource) {
+        try (InputStream encryptedInputStream = encryptedResource.getInputStream()) {
+            // 1. Decrypt: decryptionUtil.decryptResource returns an OutputStream (assumed to be a ByteArrayOutputStream).
+            OutputStream decryptedOutputStream = decryptionUtil.decryptResource(encryptedInputStream);
+            // Convert the OutputStream to an InputStream.
+            ByteArrayInputStream decryptedZipStream = new ByteArrayInputStream(
+                    ((java.io.ByteArrayOutputStream) decryptedOutputStream).toByteArray());
+            
+            // 2. Unzip: unzipUtil.unzipJsonFile takes the decrypted ZIP stream and returns a File containing the JSON.
+            File decryptedJsonFile = unzipUtil.unzipJsonFile(decryptedZipStream);
+            
+            // Wrap the File in a Spring Resource.
+            return new FileSystemResource(decryptedJsonFile);
+        } catch (Exception e) {
+            throw new ItemStreamException("Error decrypting and extracting resource: " 
+                    + encryptedResource.getFilename(), e);
+        }
+    }
+    
+    /**
+     * Override the close method to clear out any state (e.g., the encryptedResources) so that stale values 
+     * don't persist in subsequent runs.
+     */
+    @Override
+    public void close() throws ItemStreamException {
+        super.close();
+        this.encryptedResources = null;
+    }
+}
