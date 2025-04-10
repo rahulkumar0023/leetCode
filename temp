@@ -585,3 +585,82 @@ public class DecryptingMultiResourceItemReader<T> extends MultiResourceItemReade
         this.encryptedResources = null;
     }
 }
+
+
+import java.io.BufferedInputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.FileInputStream;
+import java.io.InputStream;
+import java.util.Enumeration;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+import org.apache.commons.io.IOUtils; // Optional: For stream copying
+
+/**
+ * Utility class for unzipping a decrypted ZIP file and extracting the JSON file.
+ */
+public class UnzipUtil {
+
+    /**
+     * Unzips the given decrypted ZIP file and returns a File corresponding to the first JSON file found.
+     *
+     * @param decryptedZipFile The decrypted ZIP file.
+     * @return A File pointing to the extracted JSON.
+     * @throws Exception if no JSON file is found or extraction fails.
+     */
+    public static File unzipJsonFile(File decryptedZipFile) throws Exception {
+        // Use ZipFile for random access into ZIP archive
+        try (ZipFile zipFile = new ZipFile(decryptedZipFile)) {
+            // Enumerate through all entries in the ZIP file.
+            Enumeration<? extends ZipEntry> entries = zipFile.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
+                // Check if this entry is a JSON file.
+                if (!entry.isDirectory() && entry.getName().endsWith(".json")) {
+                    // Create a temporary file to hold the extracted JSON.
+                    File tempJsonFile = File.createTempFile("extracted-", ".json");
+                    // Ensure the temp file is deleted on exit.
+                    tempJsonFile.deleteOnExit();
+                    
+                    // Open an InputStream for the ZIP entry.
+                    try (InputStream is = new BufferedInputStream(zipFile.getInputStream(entry));
+                         FileOutputStream fos = new FileOutputStream(tempJsonFile)) {
+                        // Copy the data from the ZIP entry to the temporary file.
+                        IOUtils.copy(is, fos);
+                    }
+                    // Return the extracted JSON file.
+                    return tempJsonFile;
+                }
+            }
+        }
+        throw new Exception("No JSON file found in the decrypted ZIP archive.");
+    }
+    
+    // Alternatively, if you prefer not to use Apache Commons IO, you could use a manual copy:
+    /*
+    public static File unzipJsonFile(File decryptedZipFile) throws Exception {
+        try (ZipFile zipFile = new ZipFile(decryptedZipFile)) {
+            Enumeration<? extends ZipEntry> entries = zipFile.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
+                if (!entry.isDirectory() && entry.getName().endsWith(".json")) {
+                    File tempJsonFile = File.createTempFile("extracted-", ".json");
+                    tempJsonFile.deleteOnExit();
+                    try (InputStream is = new BufferedInputStream(zipFile.getInputStream(entry));
+                         FileOutputStream fos = new FileOutputStream(tempJsonFile)) {
+                        byte[] buffer = new byte[4096];
+                        int len;
+                        while ((len = is.read(buffer)) > 0) {
+                            fos.write(buffer, 0, len);
+                        }
+                    }
+                    return tempJsonFile;
+                }
+            }
+        }
+        throw new Exception("No JSON file found in the decrypted ZIP archive.");
+    }
+    */
+}
+
