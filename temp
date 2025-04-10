@@ -1,117 +1,43 @@
-package com.example.batch;
+import org.springframework.batch.core.SkipListener;
+import java.io.BufferedWriter;
+import java.io.FileWriter;
+import java.io.PrintWriter;
+import java.time.LocalDateTime;
 
-import com.fasterxml.jackson.core.JsonParser;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.batch.item.ExecutionContext;
-import org.springframework.batch.item.ItemStreamException;
-import org.springframework.batch.item.json.JacksonJsonObjectReader;
-import org.springframework.batch.item.json.JsonItemReader;
-import org.springframework.batch.item.json.builder.JsonItemReaderBuilder;
-import org.springframework.core.io.Resource;
-
-import java.lang.reflect.Field;
-
-/**
- * A wrapper for JsonItemReader<T> that validates the underlying Jackson JsonParser.
- * This version uses reflection to access the internal 'jsonParser' field of JacksonJsonObjectReader.
- */
-public class ValidatedJsonItemReader<T> {
-
-    // Our delegate JSON reader built using the builder
-    private final JsonItemReader<T> delegate;
-
-    // Stored resource (for debugging/logging)
-    private final Resource resource;
-
-    // Stored Jackson JSON Object Reader so we can use reflection to inspect its internal parser.
-    private final JacksonJsonObjectReader<T> jsonObjectReader;
-
-    /**
-     * Constructs the reader with the given resource and target type.
-     *
-     * @param resource the Resource pointing to the JSON file.
-     * @param type     the target type to which the JSON should be mapped.
-     */
-    public ValidatedJsonItemReader(Resource resource, Class<T> type) {
-        this.resource = resource;
-        this.jsonObjectReader = new JacksonJsonObjectReader<>(type);
-        // Set up the ObjectMapper as needed.
-        ObjectMapper objectMapper = new ObjectMapper();
-        this.jsonObjectReader.setMapper(objectMapper);
-
-        this.delegate = new JsonItemReaderBuilder<T>()
-                .name("validatedJsonItemReader")
-                .resource(resource)
-                .jsonObjectReader(this.jsonObjectReader)
-                .build();
+public class CustomSkipListener implements SkipListener<CustomJsonFileModel, CustomJsonFileModel> {
+    
+    // Path to your error log file.
+    private final String errorFilePath = "errors.log";
+    
+    @Override
+    public void onSkipInRead(Throwable t) {
+        // Optionally log read errors.
+        writeError("Read error at " + LocalDateTime.now() + ": " + t.getMessage());
     }
 
-    /**
-     * Attempts to retrieve the internal JsonParser from the JacksonJsonObjectReader using reflection.
-     *
-     * @return the internal JsonParser, or null if not available.
-     */
-    private JsonParser getInternalJsonParser() {
-        try {
-            Field field = JacksonJsonObjectReader.class.getDeclaredField("jsonParser");
-            field.setAccessible(true);
-            return (JsonParser) field.get(this.jsonObjectReader);
+    @Override
+    public void onSkipInProcess(CustomJsonFileModel item, Throwable t) {
+        // Log and write error details for processing errors.
+        String errorMessage = "Processing error for item " + item + " at " + LocalDateTime.now()
+                + ": " + t.getMessage();
+        System.err.println(errorMessage);
+        writeError(errorMessage);
+    }
+
+    @Override
+    public void onSkipInWrite(CustomJsonFileModel item, Throwable t) {
+        // Log and write error details for write errors.
+        String errorMessage = "Write error for item " + item + " at " + LocalDateTime.now()
+                + ": " + t.getMessage();
+        System.err.println(errorMessage);
+        writeError(errorMessage);
+    }
+    
+    private void writeError(String errorMessage) {
+        try(PrintWriter pw = new PrintWriter(new BufferedWriter(new FileWriter(errorFilePath, true)))) {
+            pw.println(errorMessage);
         } catch (Exception e) {
-            // In case of any reflection error, log it and return null.
-            System.err.println("Reflection error accessing jsonParser: " + e.getMessage());
-            return null;
+            System.err.println("Error writing to error file: " + e.getMessage());
         }
-    }
-
-    /**
-     * Opens the reader by delegating to the underlying JsonItemReader,
-     * then uses reflection to validate that the internal JsonParser is initialized.
-     *
-     * @param executionContext the current step execution context.
-     * @throws ItemStreamException if any error occurs.
-     */
-    public void open(ExecutionContext executionContext) throws ItemStreamException {
-        this.delegate.open(executionContext);
-        JsonParser parser = getInternalJsonParser();
-        if (parser == null) {
-            throw new ItemStreamException("JsonParser is null in ValidatedJsonItemReader.open() for resource: " + resource);
-        }
-        System.out.println("ValidatedJsonItemReader opened successfully for resource: " + resource);
-    }
-
-    /**
-     * Reads an item from the delegate reader. Uses reflection to check that the JsonParser is still available.
-     *
-     * @return the next item, or null if end-of-file is reached.
-     * @throws Exception if an error occurs during reading.
-     */
-    public T read() throws Exception {
-        if (getInternalJsonParser() == null) {
-            throw new ItemStreamException("JsonParser is null in ValidatedJsonItemReader.read() for resource: " + resource);
-        }
-        T item = this.delegate.read();
-        if (item == null) {
-            System.out.println("Reached end of JSON file for resource: " + resource);
-        }
-        return item;
-    }
-
-    /**
-     * Closes the underlying delegate reader.
-     *
-     * @throws ItemStreamException if an error occurs during closing.
-     */
-    public void close() throws ItemStreamException {
-        this.delegate.close();
-    }
-
-    // Optional getters for debugging.
-
-    public Resource getResource() {
-        return this.resource;
-    }
-
-    public JacksonJsonObjectReader<T> getJsonObjectReader() {
-        return this.jsonObjectReader;
     }
 }
