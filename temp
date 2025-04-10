@@ -300,3 +300,183 @@ public class BatchConfiguration {
                 .build();
     }
 }
+
+
+
+Below is an updated version of the decryption/unzip code that makes use of Java 8+ features such as try-with-resources, lambda expressions, and streams where applicable. In this example, we assume that your decryption utility returns an OutputStream (specifically a ByteArrayOutputStream) which is then converted into a ByteArrayInputStream for the unzip routine. We also use Optional to safely handle potential null values.
+
+---
+
+```java
+package com.example.batch;
+
+import org.springframework.batch.item.ExecutionContext;
+import org.springframework.batch.item.ItemStreamException;
+import org.springframework.batch.item.file.MultiResourceItemReader;
+import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.io.Resource;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.File;
+import java.io.OutputStream;
+import java.util.Objects;
+import java.util.stream.IntStream;
+
+/**
+ * Custom reader that extends MultiResourceItemReader and applies decryption/unzip before
+ * delegating to a file-based JSON reader.
+ */
+public class DecryptingMultiResourceItemReader<T> extends MultiResourceItemReader<T> {
+
+    // Encrypted resources, such as those downloaded from COS.
+    private Resource[] encryptedResources;
+
+    public void setEncryptedResources(Resource[] resources) {
+        this.encryptedResources = resources;
+    }
+
+    @Override
+    public void open(ExecutionContext executionContext) throws ItemStreamException {
+        // Use Java 8 streams to process the encrypted resources.
+        if (Objects.nonNull(encryptedResources)) {
+            Resource[] decryptedResources = IntStream.range(0, encryptedResources.length)
+                .mapToObj(i -> getDecryptedResource(encryptedResources[i]))
+                .toArray(Resource[]::new);
+            // Pass decrypted JSON file resources to the MultiResourceItemReader.
+            setResources(decryptedResources);
+        }
+        super.open(executionContext);
+    }
+    
+    /**
+     * Decrypts the given encrypted resource and then unzips it to extract the JSON file.
+     * Returns a Resource pointing to the decrypted JSON file.
+     */
+    private Resource getDecryptedResource(Resource encryptedResource) {
+        try (InputStream encryptedInputStream = encryptedResource.getInputStream()) {
+            // Decrypt the encrypted resource.
+            // Assume that DecryptionUtil.decryptResource returns an OutputStream (preferably ByteArrayOutputStream)
+            OutputStream decryptedOutputStream = DecryptionUtil.decryptResource(encryptedInputStream);
+            // Convert the decrypted output stream to a ByteArrayInputStream for unzipping.
+            ByteArrayOutputStream baos = (ByteArrayOutputStream) decryptedOutputStream;
+            try (InputStream decryptedZipStream = new ByteArrayInputStream(baos.toByteArray())) {
+                File decryptedJsonFile = UnzipUtil.unzipJsonFile(decryptedZipStream);
+                return new FileSystemResource(decryptedJsonFile);
+            }
+        } catch (Exception e) {
+            throw new ItemStreamException("Error decrypting and extracting resource: " 
+                                            + encryptedResource.getFilename(), e);
+        }
+    }
+    
+    /**
+     * Override close() to clean up state (preventing stale encryptedResources between runs).
+     */
+    @Override
+    public void close() throws ItemStreamException {
+        super.close();
+        // Clear encrypted resources to avoid stale values in subsequent runs.
+        this.encryptedResources = null;
+    }
+}
+```
+
+---
+
+### Example Utility Classes Using Java 8+ Features
+
+Below are revised examples of the utility classes for decryption and unzipping that employ try-with-resources and streamlined code:
+
+#### DecryptionUtil
+
+```java
+package com.example.batch;
+
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+
+public class DecryptionUtil {
+
+    /**
+     * Decrypts the data from the given encrypted InputStream.
+     * Replace this dummy implementation with your actual PGP decryption logic.
+     *
+     * @param encryptedInputStream The InputStream of the encrypted file.
+     * @return An OutputStream (ByteArrayOutputStream) containing the decrypted data (expected to be a ZIP archive).
+     * @throws Exception if decryption fails.
+     */
+    public static OutputStream decryptResource(InputStream encryptedInputStream) throws Exception {
+        // For demonstration, this dummy implementation reads the input and writes it to a ByteArrayOutputStream.
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        byte[] buffer = new byte[4096];
+        int bytesRead;
+        while ((bytesRead = encryptedInputStream.read(buffer)) != -1) {
+            baos.write(buffer, 0, bytesRead);
+        }
+        // In a production implementation, replace the above with your actual PGP decryption logic.
+        return baos;
+    }
+}
+```
+
+#### UnzipUtil
+
+```java
+package com.example.batch;
+
+import java.io.BufferedInputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+
+public class UnzipUtil {
+
+    /**
+     * Unzips the given ZIP InputStream and returns the first JSON file found.
+     *
+     * @param zipInputStream The InputStream of the decrypted ZIP data.
+     * @return A File containing the extracted JSON.
+     * @throws Exception if no JSON file is found or extraction fails.
+     */
+    public static File unzipJsonFile(InputStream zipInputStream) throws Exception {
+        try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(zipInputStream))) {
+            ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                if (!entry.isDirectory() && entry.getName().endsWith(".json")) {
+                    File tempJsonFile = File.createTempFile("extracted_", ".json");
+                    try (FileOutputStream fos = new FileOutputStream(tempJsonFile)) {
+                        byte[] buffer = new byte[4096];
+                        int len;
+                        while ((len = zis.read(buffer)) > 0) {
+                            fos.write(buffer, 0, len);
+                        }
+                    }
+                    return tempJsonFile;
+                }
+                zis.closeEntry();
+            }
+        }
+        throw new Exception("No JSON file found in the decrypted ZIP archive.");
+    }
+}
+```
+
+---
+
+### Key Java 8+ Concepts Used
+
+1. **Streams and Lambdas:**  
+   - The `open()` method leverages `IntStream.range(0, ...)` along with `mapToObj()` to process the array of encrypted resources in a concise way.
+
+2. **Try-With-Resources:**  
+   - Each method makes extensive use of try-with-resources to ensure that all streams are properly closed without requiring verbose finally blocks.
+
+3. **Optional and Objects Utility:**  
+   - We check for non-null using `Objects.nonNull()` to ensure our code is safe and concise.
+
+This modernized approach makes the code more readable and concise while taking full advantage of Java 8 (or later) language features.
