@@ -1,162 +1,127 @@
+package com.example.soapclient.config;
 
-Below are two common approaches depending on whether you’re building a truststore (to simply trust these certificates) or you’re trying to assemble a certificate chain for an identity entry (typically one with a private key).
+import com.example.soapclient.wsdl.MyRequest;
+import com.example.soapclient.wsdl.MyResponse;
+import org.apache.http.conn.ssl.NoopHostnameVerifier;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClients;
+import org.apache.http.ssl.SSLContextBuilder;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.io.Resource;
+import org.springframework.oxm.jaxb.Jaxb2Marshaller;
+import org.springframework.stereotype.Service;
+import org.springframework.ws.client.core.WebServiceTemplate;
+import org.springframework.ws.client.support.interceptor.ClientInterceptor;
+import org.springframework.ws.client.support.interceptor.LoggingClientInterceptor;
+import org.springframework.ws.transport.http.HttpComponentsMessageSender;
 
----
+import javax.annotation.PostConstruct;
+import javax.net.ssl.SSLContext;
+import java.io.InputStream;
+import java.security.KeyStore;
 
-## Option 1: Importing Multiple Certificates into a Truststore
+@Configuration
+public class SoapClientConfig {
 
-A truststore is used to hold trusted certificates, and you can import each certificate as a separate entry using a unique alias. For example, if you have three certificate files (e.g., certificate1.cer, certificate2.cer, and certificate3.cer), you can import them like this:
+    @Value("${soap.client.keystore.path}")
+    private Resource keyStore;
 
-```bash
-keytool -import -trustcacerts -alias cert1 -file certificate1.cer -keystore truststore.jks
-keytool -import -trustcacerts -alias cert2 -file certificate2.cer -keystore truststore.jks
-keytool -import -trustcacerts -alias cert3 -file certificate3.cer -keystore truststore.jks
-```
+    @Value("${soap.client.keystore.password}")
+    private String keyStorePassword;
 
-**Notes:**
+    @Value("${soap.client.truststore.path}")
+    private Resource trustStore;
 
-- Each certificate gets its own alias (cert1, cert2, cert3).
-- When prompted, confirm that you trust the certificate.
-- This approach is ideal when you simply need the truststore to verify peers’ certificates.
+    @Value("${soap.client.truststore.password}")
+    private String trustStorePassword;
 
----
+    @Value("${soap.client.default-uri}")
+    private String defaultUri;
 
-## Option 2: Assembling a Full Certificate Chain for an Identity Keystore
+    @Bean
+    public WebServiceTemplate webServiceTemplate(Jaxb2Marshaller marshaller) throws Exception {
+        WebServiceTemplate template = new WebServiceTemplate(marshaller);
+        template.setDefaultUri(defaultUri);
+        template.setInterceptors(new ClientInterceptor[]{loggingInterceptor()});
+        template.setMessageSender(httpComponentsMessageSender());
+        return template;
+    }
 
-If your keystore is intended to store an identity (that is, a private key along with its certificate chain), you need to ensure the certificate chain is imported as one complete entry. Unfortunately, keytool doesn’t provide a command to add additional certificates to an existing entry. Instead, you must combine the certificates into a single file so that the chain is included when you create your PKCS12 file (or re-create the keystore).
+    @Bean
+    public Jaxb2Marshaller marshaller() {
+        Jaxb2Marshaller marshaller = new Jaxb2Marshaller();
+        marshaller.setContextPath("com.example.soapclient.wsdl");
+        return marshaller;
+    }
 
-### Steps:
+    @Bean
+    public LoggingClientInterceptor loggingInterceptor() {
+        LoggingClientInterceptor interceptor = new LoggingClientInterceptor();
+        interceptor.setLogRequest(true);
+        interceptor.setLogResponse(true);
+        interceptor.setLogMessages(true);
+        return interceptor;
+    }
 
-1. **Concatenate the Certificates**
+    @Bean
+    public HttpComponentsMessageSender httpComponentsMessageSender() throws Exception {
+        KeyStore clientStore = KeyStore.getInstance(KeyStore.getDefaultType());
+        try (InputStream ksStream = keyStore.getInputStream()) {
+            clientStore.load(ksStream, keyStorePassword.toCharArray());
+        }
 
-   Create a single file that lists the certificates in the proper order (the end-entity certificate first, followed by any intermediates, and ending with the root if needed). For example, on a Unix-like system:
+        KeyStore trustStoreInstance = KeyStore.getInstance(KeyStore.getDefaultType());
+        try (InputStream tsStream = trustStore.getInputStream()) {
+            trustStoreInstance.load(tsStream, trustStorePassword.toCharArray());
+        }
 
-   ```bash
-   cat client.cer intermediate.cer root.cer > chain.pem
-   ```
+        SSLContext sslContext = SSLContextBuilder.create()
+                .loadKeyMaterial(clientStore, keyStorePassword.toCharArray())
+                .loadTrustMaterial(trustStoreInstance, null)
+                .build();
 
-   **Order Matters:**  
-   Make sure the file starts with your own certificate (the one that matches your private key) and then follows with intermediate certificates and finally the root certificate.
+        CloseableHttpClient httpClient = HttpClients.custom()
+                .setSSLContext(sslContext)
+                .setSSLHostnameVerifier(NoopHostnameVerifier.INSTANCE)
+                .build();
 
-2. **Create a PKCS12 File with the Complete Chain**
+        HttpComponentsMessageSender messageSender = new HttpComponentsMessageSender();
+        messageSender.setHttpClient(httpClient);
+        return messageSender;
+    }
+}
 
-   Use OpenSSL to export a PKCS12 file from your combined certificate file and your private key:
+@Service
+class SoapClient {
 
-   ```bash
-   openssl pkcs12 -export -in chain.pem -inkey privateKey.key -out keystore.p12 -name myalias
-   ```
+    private final WebServiceTemplate webServiceTemplate;
 
-   You will be prompted to enter an export password. This password will be needed in the next step.
+    public SoapClient(WebServiceTemplate webServiceTemplate) {
+        this.webServiceTemplate = webServiceTemplate;
+    }
 
-3. **Convert the PKCS12 File into a JKS Keystore**
+    public MyResponse callSoapService(MyRequest request) {
+        return (MyResponse) webServiceTemplate.marshalSendAndReceive(request);
+    }
 
-   If you need the keystore in Java’s JKS format, convert it using keytool:
+    @PostConstruct
+    public void testConnection() {
+        try {
+            webServiceTemplate.afterPropertiesSet(); // Initialize template
+            webServiceTemplate.sendAndReceive(message -> {
+                // You can leave the request empty or just validate connection
+            }, messageContext -> {
+                System.out.println("Connection to SOAP service validated successfully.");
+                return true;
+            });
+        } catch (Exception ex) {
+            System.err.println("SOAP test connection failed: " + ex.getMessage());
+            ex.printStackTrace();
+        }
+    }
+}
 
-   ```bash
-   keytool -importkeystore \
-     -deststorepass changeit \
-     -destkeypass changeit \
-     -destkeystore keystore.jks \
-     -srckeystore keystore.p12 \
-     -srcstoretype PKCS12 \
-     -srcstorepass [PKCS12_password] \
-     -alias myalias
-   ```
-
-   Replace `[PKCS12_password]` with the password you set when exporting the PKCS12 file and adjust the alias and passwords as needed.
-
----
-
-## Summary
-
-- **For a Truststore:**  
-  Import each certificate file separately into the truststore, using unique aliases.
-
-- **For an Identity Keystore with a Private Key and Certificate Chain:**  
-  You must combine (concatenate) your certificate files in the proper order into a single file. Then create a PKCS12 file that includes your private key and the full chain. Finally, if necessary, convert that PKCS12 file into a JKS keystore.
-
-This way, you ensure your keystore or truststore contains all the certificate components you need. If you have further questions or need additional help with the commands, feel free to ask!
-
-
-
-
-
-Below is a step‐by‐step guide on how to generate both a keystore (keystore.jks) and a truststore (truststore.jks) from your PKCS12 file, or directly from your certificate if needed. Although you mentioned “truststore.jks and truststore.jks,” we typically need two different files—a keystore for storing the private key and its certificate chain, and a truststore for storing the trusted certificates. In the instructions below, we assume you want both:
-
----
-
-## 1. Create a Keystore (keystore.jks) from the PKCS12 File
-
-If you already have a PKCS12 file (for example, `keystore.p12`) that contains your certificate and the corresponding private key, you can convert it to a Java keystore (JKS) using the Java `keytool` utility. Run the following command in your terminal:
-
-```bash
-keytool -importkeystore \
-  -deststorepass changeit \
-  -destkeypass changeit \
-  -destkeystore keystore.jks \
-  -srckeystore keystore.p12 \
-  -srcstoretype PKCS12 \
-  -srcstorepass [PKCS12_password] \
-  -alias myalias
-```
-
-**Explanation:**
-
-- **`-destkeystore keystore.jks`**: Specifies that the output file will be named keystore.jks.
-- **`-srckeystore keystore.p12`**: Points to your PKCS12 file that includes both the private key and certificate.
-- **`-srcstorepass [PKCS12_password]`**: Replace `[PKCS12_password]` with the password you used when creating the PKCS12 file.
-- **`-alias myalias`**: The alias name for the key entry (make sure it matches the one you used during export).
-
-This command converts your PKCS12 file into a JKS keystore containing your private key and the certificate chain.
-
----
-
-## 2. Create a Truststore (truststore.jks)
-
-A truststore is used to store certificates that you trust (typically CA certificates or other public certificates), and it does not contain any private keys. You can create a truststore from your certificate in one of two ways:
-
-### Option A: Export the Certificate from the Keystore
-
-1. **Export the certificate from the keystore:**
-
-   ```bash
-   keytool -exportcert -rfc -alias myalias -keystore keystore.jks -file mycert.pem
-   ```
-
-   This command extracts the certificate associated with the alias `myalias` from your keystore, and saves it in PEM format to `mycert.pem`.
-
-2. **Import the certificate into a new truststore:**
-
-   ```bash
-   keytool -import -trustcacerts -alias myalias -file mycert.pem -keystore truststore.jks
-   ```
-
-   During this step, you’ll be prompted with a message like “Trust this certificate?” — type `yes` to confirm. This command creates a new truststore file named `truststore.jks` and imports the certificate.
-
-### Option B: Import the Certificate Directly
-
-If you already have a separate certificate file (for example, `certificate.crt`), you can directly import it into a truststore:
-
-```bash
-keytool -import -trustcacerts -alias myalias -file certificate.crt -keystore truststore.jks
-```
-
-In either option, you’ll be prompted to set a password for the truststore. Use a password that fits your security requirements.
-
----
-
-## Summary
-
-- **Keystore (keystore.jks):**  
-  Use the `keytool -importkeystore` command to convert your existing PKCS12 file (`keystore.p12`) to a Java keystore (JKS) file that contains both your private key and its associated certificate chain.
-
-- **Truststore (truststore.jks):**  
-  You can create a truststore by either:
-  - Exporting the certificate from your keystore and then importing it into a new truststore, or  
-  - Directly importing a certificate file into a truststore using the `keytool -import` command.
-
-Once you complete these steps, you will have two separate files:
-- **keystore.jks:** Contains your private key and certificate chain.
-- **truststore.jks:** Contains the trusted certificate(s) used to verify peers.
 
 If you have any further questions or run into issues along the way, feel free to ask!
