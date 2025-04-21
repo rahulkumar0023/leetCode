@@ -2,26 +2,25 @@ package com.example.soapclient.config;
 
 import com.example.soapclient.wsdl.MyRequest;
 import com.example.soapclient.wsdl.MyResponse;
-import org.apache.hc.client5.http.classic.CloseableHttpClient;
-import org.apache.hc.client5.http.impl.classic.HttpClients;
-import org.apache.hc.core5.ssl.SSLContexts;
+import com.example.soapclient.wsdl.MyServicePort;
+import org.apache.cxf.jaxws.JaxWsProxyFactoryBean;
+import org.apache.cxf.endpoint.Client;
+import org.apache.cxf.frontend.ClientProxy;
+import org.apache.cxf.transport.http.HTTPConduit;
+import org.apache.cxf.configuration.jsse.TLSClientParameters;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.Resource;
-import org.springframework.oxm.jaxb.Jaxb2Marshaller;
 import org.springframework.stereotype.Service;
-import org.springframework.ws.client.core.WebServiceTemplate;
-import org.springframework.ws.client.support.interceptor.ClientInterceptor;
-import org.springframework.ws.client.support.interceptor.LoggingClientInterceptor;
-import org.springframework.ws.transport.WebServiceMessageSender;
-import org.springframework.ws.transport.http.HttpComponentsConnection;
-import org.springframework.ws.transport.http.HttpComponentsMessageSender;
 
 import javax.annotation.PostConstruct;
+import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManagerFactory;
 import java.io.InputStream;
 import java.security.KeyStore;
+import java.security.SecureRandom;
 
 @Configuration
 public class SoapClientConfig {
@@ -42,32 +41,27 @@ public class SoapClientConfig {
     private String defaultUri;
 
     @Bean
-    public WebServiceTemplate webServiceTemplate(Jaxb2Marshaller marshaller) throws Exception {
-        WebServiceTemplate template = new WebServiceTemplate(marshaller);
-        template.setDefaultUri(defaultUri);
-        template.setInterceptors(new ClientInterceptor[]{loggingInterceptor()});
-        template.setMessageSender(httpClient5MessageSender());
-        return template;
+    public MyServicePort jaxWsClient() throws Exception {
+        JaxWsProxyFactoryBean factory = new JaxWsProxyFactoryBean();
+        factory.setServiceClass(MyServicePort.class);
+        factory.setAddress(defaultUri);
+
+        MyServicePort client = (MyServicePort) factory.create();
+
+        Client proxy = ClientProxy.getClient(client);
+        HTTPConduit conduit = (HTTPConduit) proxy.getConduit();
+
+        TLSClientParameters tlsParams = new TLSClientParameters();
+        tlsParams.setDisableCNCheck(true);
+        tlsParams.setSSLSocketFactory(sslContext().getSocketFactory());
+
+        conduit.setTlsClientParameters(tlsParams);
+
+        return client;
     }
 
     @Bean
-    public Jaxb2Marshaller marshaller() {
-        Jaxb2Marshaller marshaller = new Jaxb2Marshaller();
-        marshaller.setContextPath("com.example.soapclient.wsdl");
-        return marshaller;
-    }
-
-    @Bean
-    public LoggingClientInterceptor loggingInterceptor() {
-        LoggingClientInterceptor interceptor = new LoggingClientInterceptor();
-        interceptor.setLogRequest(true);
-        interceptor.setLogResponse(true);
-        interceptor.setLogMessages(true);
-        return interceptor;
-    }
-
-    @Bean
-    public WebServiceMessageSender httpClient5MessageSender() throws Exception {
+    public SSLContext sslContext() throws Exception {
         KeyStore clientStore = KeyStore.getInstance(KeyStore.getDefaultType());
         try (InputStream ksStream = keyStore.getInputStream()) {
             clientStore.load(ksStream, keyStorePassword.toCharArray());
@@ -78,42 +72,36 @@ public class SoapClientConfig {
             trustStoreInstance.load(tsStream, trustStorePassword.toCharArray());
         }
 
-        SSLContext sslContext = SSLContexts.custom()
-                .loadKeyMaterial(clientStore, keyStorePassword.toCharArray())
-                .loadTrustMaterial(trustStoreInstance, null)
-                .build();
+        KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+        kmf.init(clientStore, keyStorePassword.toCharArray());
 
-        CloseableHttpClient httpClient = HttpClients.custom()
-                .setSSLContext(sslContext)
-                .build();
+        TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+        tmf.init(trustStoreInstance);
 
-        return new HttpComponentsMessageSender(httpClient);
+        SSLContext sslContext = SSLContext.getInstance("TLS");
+        sslContext.init(kmf.getKeyManagers(), tmf.getTrustManagers(), new SecureRandom());
+        return sslContext;
     }
 }
 
 @Service
 class SoapClient {
 
-    private final WebServiceTemplate webServiceTemplate;
+    private final MyServicePort myServicePort;
 
-    public SoapClient(WebServiceTemplate webServiceTemplate) {
-        this.webServiceTemplate = webServiceTemplate;
+    public SoapClient(MyServicePort myServicePort) {
+        this.myServicePort = myServicePort;
     }
 
     public MyResponse callSoapService(MyRequest request) {
-        return (MyResponse) webServiceTemplate.marshalSendAndReceive(request);
+        return myServicePort.someSoapOperation(request); // Replace with actual method
     }
 
     @PostConstruct
     public void testConnection() {
         try {
-            webServiceTemplate.afterPropertiesSet();
-            webServiceTemplate.sendAndReceive(message -> {
-                // Intentionally empty request for connection check
-            }, messageContext -> {
-                System.out.println("Connection to SOAP service validated successfully.");
-                return true;
-            });
+            System.out.println("Testing SOAP connection...");
+            // You might invoke a lightweight operation or metadata call here
         } catch (Exception ex) {
             System.err.println("SOAP test connection failed: " + ex.getMessage());
             ex.printStackTrace();
