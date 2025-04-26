@@ -1,54 +1,21 @@
-package com.example.soapclient.config;
+proxy.getOutInterceptors().add(new AbstractPhaseInterceptor<SoapMessage>(Phase.PREPARE_SEND) {
+    @Override
+    public void handleMessage(SoapMessage message) {
+        try {
+            DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
+            DocumentBuilder db = dbf.newDocumentBuilder();
+            Document doc = db.newDocument();
 
-import com.example.soapclient.wsdl.MyServicePort;
-import org.apache.cxf.endpoint.Client;
-import org.apache.cxf.frontend.ClientProxy;
-import org.apache.cxf.interceptor.AbstractPhaseInterceptor;
-import org.apache.cxf.interceptor.LoggingInInterceptor;
-import org.apache.cxf.interceptor.LoggingOutInterceptor;
-import org.apache.cxf.jaxws.JaxWsProxyFactoryBean;
-import org.apache.cxf.phase.Phase;
-import org.apache.cxf.binding.soap.SoapMessage;
-import org.apache.cxf.headers.Header;
-import org.apache.cxf.binding.soap.SoapHeader;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
+            Element headerElement = doc.createElementNS("http://schemas.xmlsoap.org/soap/envelope/", "soapenv:Header");
 
-import javax.xml.namespace.QName;
+            SoapHeader header = new SoapHeader(new QName("http://schemas.xmlsoap.org/soap/envelope/", "Header"), headerElement);
+            message.getHeaders().add(header);
 
-@Configuration
-public class SoapClientConfig {
+            // Set Content-Type manually
+            message.put(org.apache.cxf.message.Message.CONTENT_TYPE, "text/xml; charset=UTF-8");
 
-    @Value("${soap.client.default-uri}")
-    private String defaultUri;
-
-    @Bean
-    public MyServicePort jaxWsClient() {
-        JaxWsProxyFactoryBean factory = new JaxWsProxyFactoryBean();
-        factory.setServiceClass(MyServicePort.class);
-        factory.setAddress(defaultUri);
-
-        MyServicePort client = (MyServicePort) factory.create();
-
-        Client proxy = ClientProxy.getClient(client);
-
-        // Add logging for incoming and outgoing messages
-        proxy.getInInterceptors().add(new LoggingInInterceptor());
-        proxy.getOutInterceptors().add(new LoggingOutInterceptor());
-
-        // Add an empty SOAP Header and set Content-Type
-        proxy.getOutInterceptors().add(new AbstractPhaseInterceptor<SoapMessage>(Phase.PREPARE_SEND) {
-            @Override
-            public void handleMessage(SoapMessage message) {
-                Header emptyHeader = new SoapHeader(new QName("http://schemas.xmlsoap.org/soap/envelope/", "Header"), null);
-                message.getHeaders().add(emptyHeader);
-
-                // Set Content-Type manually
-                message.put(org.apache.cxf.message.Message.CONTENT_TYPE, "text/xml; charset=UTF-8");
-            }
-        });
-
-        return client;
+        } catch (Exception e) {
+            throw new RuntimeException("Error creating SOAP Header", e);
+        }
     }
-}
+});
