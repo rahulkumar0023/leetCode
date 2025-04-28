@@ -1,21 +1,14 @@
-proxy.getOutInterceptors().add(new AbstractPhaseInterceptor<SoapMessage>(Phase.PREPARE_SEND) {
-    @Override
-    public void handleMessage(SoapMessage message) {
-        try {
-            DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
-            DocumentBuilder db = dbf.newDocumentBuilder();
-            Document doc = db.newDocument();
+For the Citrix decommissioning, please find below the updated communication for better clarity:
 
-            Element headerElement = doc.createElementNS("http://schemas.xmlsoap.org/soap/envelope/", "soapenv:Header");
+Accessing DEV API endpoints, MQ, Kafka topics, and Elasticsearch works fine from MAC laptops in BE. No new issues have been reported by developers.
 
-            SoapHeader header = new SoapHeader(new QName("http://schemas.xmlsoap.org/soap/envelope/", "Header"), headerElement);
-            message.getHeaders().add(header);
+For the above points in (1), in CET, access might not work from MAC due to differences in infrastructure.
 
-            // Set Content-Type manually
-            message.put(org.apache.cxf.message.Message.CONTENT_TYPE, "text/xml; charset=UTF-8");
+Issues raised by CET testers for API endpoints (not accessible because of different infrastructure – tracker added here).
 
-        } catch (Exception e) {
-            throw new RuntimeException("Error creating SOAP Header", e);
-        }
-    }
-});
+Another solution is to use HVD profiles for CET developers and testers – Dieter's approval is needed.
+
+All the above points relate to API endpoints, MQ, Kafka topics, Elasticsearch, and similar access requirements for legacy infrastructure.
+
+For FTP/SSH access, it is not allowed directly from the Mac terminal or via WinSCP from a Mac. For this purpose, users need to request a CyberArk connection. It can be arranged for all environments with a valid justification and an INC number (required for higher environments). This solution supports both PuTTY-type and WinSCP-type connections.
+For CyberArk, there is currently one open issue (attached). Developers will need a similar level of access as the Springboot user had.
