@@ -1,55 +1,20 @@
-<build>
-  <plugins>
-    <!-- 1. JAXB code generation -->
-    <plugin>
-      <groupId>org.jvnet.jaxb</groupId>
-      <artifactId>jaxb-maven-plugin</artifactId>
-      <version>4.0.8</version>
-      <executions>
-        <execution>
-          <id>xjc</id>
-          <goals>
-            <goal>generate</goal>
-          </goals>
-          <configuration>
-            <extension>true</extension>
-            <schemaDirectory>src/main/xsd/maindoc</schemaDirectory>
-            <outputDirectory>${project.build.directory}/generated-sources/jaxb</outputDirectory>
-            <generatePackage>com.example.ubl</generatePackage>
-          </configuration>
-        </execution>
-      </executions>
-    </plugin>
+▶️ Method A: Use SDKMAN (recommended)
+Install SDKMAN:
 
-    <!-- 2. Make generated sources visible to Maven/IDE -->
-    <plugin>
-      <groupId>org.codehaus.mojo</groupId>
-      <artifactId>build-helper-maven-plugin</artifactId>
-      <version>3.2.0</version>
-      <executions>
-        <execution>
-          <id>add-source</id>
-          <phase>generate-sources</phase>
-          <goals>
-            <goal>add-source</goal>
-          </goals>
-          <configuration>
-            <sources>
-              <source>${project.build.directory}/generated-sources/jaxb</source>
-            </sources>
-          </configuration>
-        </execution>
-      </executions>
-    </plugin>
+bash
+Copy
+Edit
+curl -s "https://get.sdkman.io" | bash
+source "$HOME/.sdkman/bin/sdkman-init.sh"
+Install JAXB with xjc:
 
-    <!-- 3. Standard Java compilation -->
-    <plugin>
-      <artifactId>maven-compiler-plugin</artifactId>
-      <version>3.11.0</version>
-      <configuration>
-        <source>17</source>
-        <target>17</target>
-      </configuration>
-    </plugin>
-  </plugins>
-</build>
+bash
+Copy
+Edit
+sdk install jaxb
+Now you can run:
+
+bash
+Copy
+Edit
+xjc --help
