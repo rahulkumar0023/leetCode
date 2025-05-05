@@ -1,262 +1,55 @@
-Thought for a couple of seconds
+<build>
+  <plugins>
+    <!-- 1. JAXB code generation -->
+    <plugin>
+      <groupId>org.jvnet.jaxb</groupId>
+      <artifactId>jaxb-maven-plugin</artifactId>
+      <version>4.0.8</version>
+      <executions>
+        <execution>
+          <id>xjc</id>
+          <goals>
+            <goal>generate</goal>
+          </goals>
+          <configuration>
+            <extension>true</extension>
+            <schemaDirectory>src/main/xsd/maindoc</schemaDirectory>
+            <outputDirectory>${project.build.directory}/generated-sources/jaxb</outputDirectory>
+            <generatePackage>com.example.ubl</generatePackage>
+          </configuration>
+        </execution>
+      </executions>
+    </plugin>
 
+    <!-- 2. Make generated sources visible to Maven/IDE -->
+    <plugin>
+      <groupId>org.codehaus.mojo</groupId>
+      <artifactId>build-helper-maven-plugin</artifactId>
+      <version>3.2.0</version>
+      <executions>
+        <execution>
+          <id>add-source</id>
+          <phase>generate-sources</phase>
+          <goals>
+            <goal>add-source</goal>
+          </goals>
+          <configuration>
+            <sources>
+              <source>${project.build.directory}/generated-sources/jaxb</source>
+            </sources>
+          </configuration>
+        </execution>
+      </executions>
+    </plugin>
 
-Here’s a consolidated, step-by-step guide to a Spring Boot (Java 17) project that uses PostgreSQL **only** for Spring Batch’s own metadata tables, reads `Person` items from an XML file, and prints each item to the console **immediately after** it’s read.
-
----
-
-## 1. Initialize the Spring Boot Project
-
-Use Spring Initializr ([https://start.spring.io/](https://start.spring.io/)) with these settings:
-
-* **Project**: Maven
-* **Language**: Java
-* **Spring Boot**: 3.x
-* **Java**: 17
-* **Dependencies**:
-
-  * Spring Batch
-  * Spring Boot Starter
-  * Spring OXM (for XML marshalling)
-  * PostgreSQL Driver
-
-Or add to your `pom.xml`:
-
-```xml
-<dependencies>
-  <!-- Spring Boot & Batch -->
-  <dependency>
-    <groupId>org.springframework.boot</groupId>
-    <artifactId>spring-boot-starter-batch</artifactId>
-  </dependency>
-  <!-- Core Starter (logging, etc.) -->
-  <dependency>
-    <groupId>org.springframework.boot</groupId>
-    <artifactId>spring-boot-starter</artifactId>
-  </dependency>
-  <!-- XML marshalling -->
-  <dependency>
-    <groupId>org.springframework</groupId>
-    <artifactId>spring-oxm</artifactId>
-  </dependency>
-  <!-- PostgreSQL (for Batch metadata only) -->
-  <dependency>
-    <groupId>org.postgresql</groupId>
-    <artifactId>postgresql</artifactId>
-    <scope>runtime</scope>
-  </dependency>
-</dependencies>
-```
-
----
-
-## 2. Configure PostgreSQL for Batch Metadata
-
-Create `src/main/resources/application.yml`:
-
-```yaml
-spring:
-  datasource:
-    url: jdbc:postgresql://localhost:5432/mydb
-    username: batch_user
-    password: secret
-    driver-class-name: org.postgresql.Driver
-
-  batch:
-    initialize-schema: always   # auto-creates BATCH_* tables in Postgres
-    jdbc:
-      table-prefix: BATCH_      # optional prefix
-```
-
-> **Note:** You don’t need any `spring.datasource.*` treatment for your domain data—only Batch’s own tables live here.
-
----
-
-## 3. Define Your Domain Model
-
-Assuming your XML looks like:
-
-```xml
-<persons>
-  <person>
-    <id>1</id>
-    <name>Alice</name>
-  </person>
-  <!-- ... -->
-</persons>
-```
-
-Create `Person.java`:
-
-```java
-package com.example.batch.domain;
-
-public class Person {
-    private Long id;
-    private String name;
-    // getters & setters, toString()
-}
-```
-
----
-
-## 4. Add the XML Reader Bean
-
-```java
-package com.example.batch.config;
-
-import com.example.batch.domain.Person;
-import org.springframework.batch.item.xml.StaxEventItemReader;
-import org.springframework.batch.item.xml.builder.StaxEventItemReaderBuilder;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.core.io.ClassPathResource;
-import org.springframework.oxm.xstream.XStreamMarshaller;
-
-import java.util.Map;
-
-@Configuration
-public class XmlReaderConfig {
-
-    @Bean
-    public StaxEventItemReader<Person> personReader() {
-        XStreamMarshaller marshaller = new XStreamMarshaller();
-        marshaller.setAliases(Map.of("person", Person.class));
-
-        return new StaxEventItemReaderBuilder<Person>()
-                .name("personReader")
-                .resource(new ClassPathResource("persons.xml"))
-                .addFragmentRootElements("person")
-                .unmarshaller(marshaller)
-                .build();
-    }
-}
-```
-
-Place `persons.xml` under `src/main/resources/`.
-
----
-
-## 5. Add an ItemReadListener to Log Immediately After Read
-
-```java
-package com.example.batch.config;
-
-import com.example.batch.domain.Person;
-import org.springframework.batch.item.ItemReadListener;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-
-@Configuration
-public class ListenerConfig {
-
-    @Bean
-    public ItemReadListener<Person> readLogger() {
-        return new ItemReadListener<>() {
-            @Override
-            public void beforeRead() { }
-
-            @Override
-            public void afterRead(Person person) {
-                System.out.println("→ Read: " + person);
-            }
-
-            @Override
-            public void onReadError(Exception ex) {
-                ex.printStackTrace();
-            }
-        };
-    }
-}
-```
-
----
-
-## 6. Define the Batch Job and Step
-
-```java
-package com.example.batch.config;
-
-import com.example.batch.domain.Person;
-import org.springframework.batch.core.Job;
-import org.springframework.batch.core.Step;
-import org.springframework.batch.core.configuration.annotation.EnableBatchProcessing;
-import org.springframework.batch.core.configuration.annotation.JobBuilderFactory;
-import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
-import org.springframework.batch.core.launch.support.RunIdIncrementer;
-import org.springframework.batch.item.xml.StaxEventItemReader;
-import org.springframework.batch.item.ItemReadListener;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-
-@Configuration
-@EnableBatchProcessing
-public class BatchJobConfig {
-
-    @Bean
-    public Step xmlStep(
-            StepBuilderFactory steps,
-            StaxEventItemReader<Person> reader,
-            ItemReadListener<Person> readLogger) {
-
-        return steps.get("xmlStep")
-                .<Person, Person>chunk(10)
-                .reader(reader)
-                .listener(readLogger)    // logs each Person right after read
-                .writer(items -> { /* no-op writer */ })
-                .build();
-    }
-
-    @Bean
-    public Job xmlJob(JobBuilderFactory jobs, Step xmlStep) {
-        return jobs.get("xmlJob")
-                .incrementer(new RunIdIncrementer())
-                .flow(xmlStep)
-                .end()
-                .build();
-    }
-}
-```
-
-> The no-op writer means you don’t persist `Person` at all—reading and logging only.
-
----
-
-## 7. Main Application Class
-
-```java
-package com.example.batch;
-
-import org.springframework.boot.SpringApplication;
-import org.springframework.boot.autoconfigure.SpringBootApplication;
-
-@SpringBootApplication
-public class BatchApplication {
-    public static void main(String[] args) {
-        SpringApplication.run(BatchApplication.class, args);
-    }
-}
-```
-
----
-
-## 8. Run & Verify
-
-```bash
-mvn spring-boot:run
-# or
-java -jar target/your-app.jar --spring.batch.job.names=xmlJob
-```
-
-* Spring Batch will auto-create its metadata tables (`BATCH_JOB_INSTANCE`, etc.) in your PostgreSQL database.
-* Each `<person>` read from `persons.xml` will be printed to the console immediately.
-
----
-
-### 9. (Optional) Tuning & Tips
-
-* **Chunk Size**: adjust `chunk(10)` for performance.
-* **Error Handling**: implement `onReadError`, skip/retry policies if needed.
-* **Processors**: you can still add an `ItemProcessor<Person,Person>` bean if you need to transform or filter before logging.
-
-With this setup, you leverage PostgreSQL for robust Batch metadata management, yet never store any of your domain data (`Person`) in the database—just read and log!
+    <!-- 3. Standard Java compilation -->
+    <plugin>
+      <artifactId>maven-compiler-plugin</artifactId>
+      <version>3.11.0</version>
+      <configuration>
+        <source>17</source>
+        <target>17</target>
+      </configuration>
+    </plugin>
+  </plugins>
+</build>
