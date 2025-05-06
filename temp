@@ -1,20 +1,17 @@
-▶️ Method A: Use SDKMAN (recommended)
-Install SDKMAN:
+<configuration>
+  <extension>true</extension>
+  <verbose>true</verbose>
+  <debug>true</debug>
 
-bash
-Copy
-Edit
-curl -s "https://get.sdkman.io" | bash
-source "$HOME/.sdkman/bin/sdkman-init.sh"
-Install JAXB with xjc:
+  <sources>
+    <source>${basedir}/src/main/xsd/maindoc/UBL-Invoice-2.1.xsd</source>
+  </sources>
 
-bash
-Copy
-Edit
-sdk install jaxb
-Now you can run:
+  <bindingFiles>
+    <bindingFile>${basedir}/src/main/xjb/base-bindings.xjb</bindingFile>
+    <bindingFile>${basedir}/src/main/xjb/ubl-bindings.xjb</bindingFile>
+  </bindingFiles>
 
-bash
-Copy
-Edit
-xjc --help
+  <outputDirectory>${project.build.directory}/generated-sources/jaxb</outputDirectory>
+  <generatePackage>network.oxalis.model.v21</generatePackage>
+</configuration>
