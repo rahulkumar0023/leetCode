@@ -1,17 +1,108 @@
-<configuration>
-  <extension>true</extension>
-  <verbose>true</verbose>
-  <debug>true</debug>
+Absolutely! Here's a clean, minimal **Spring Batch `ItemReader<InvoiceType>`** for reading **a single PEPPOL UBL Invoice** from an XML file using JAXB — no `StaxEventItemReader`, no `Jaxb2Marshaller`.
 
-  <sources>
-    <source>${basedir}/src/main/xsd/maindoc/UBL-Invoice-2.1.xsd</source>
-  </sources>
+---
 
-  <bindingFiles>
-    <bindingFile>${basedir}/src/main/xjb/base-bindings.xjb</bindingFile>
-    <bindingFile>${basedir}/src/main/xjb/ubl-bindings.xjb</bindingFile>
-  </bindingFiles>
+## ✅ 1. Custom Reader Class
 
-  <outputDirectory>${project.build.directory}/generated-sources/jaxb</outputDirectory>
-  <generatePackage>network.oxalis.model.v21</generatePackage>
-</configuration>
+```java
+package com.example.batch.reader;
+
+import jakarta.xml.bind.JAXBContext;
+import jakarta.xml.bind.Unmarshaller;
+import network.oxalis.model.v21.invoice.InvoiceType;
+import org.springframework.batch.item.ItemReader;
+import org.springframework.core.io.Resource;
+
+import java.io.InputStream;
+
+public class SingleInvoiceReader implements ItemReader<InvoiceType> {
+
+    private final Resource xmlResource;
+    private boolean read = false;
+
+    public SingleInvoiceReader(Resource xmlResource) {
+        this.xmlResource = xmlResource;
+    }
+
+    @Override
+    public InvoiceType read() throws Exception {
+        if (read) return null; // return only once
+
+        JAXBContext context = JAXBContext.newInstance(InvoiceType.class);
+        Unmarshaller unmarshaller = context.createUnmarshaller();
+
+        try (InputStream input = xmlResource.getInputStream()) {
+            read = true;
+            return (InvoiceType) unmarshaller.unmarshal(input);
+        }
+    }
+}
+```
+
+---
+
+## ✅ 2. Reader Bean Config
+
+```java
+package com.example.batch.config;
+
+import com.example.batch.reader.SingleInvoiceReader;
+import network.oxalis.model.v21.invoice.InvoiceType;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.io.ClassPathResource;
+
+@Configuration
+public class InvoiceReaderConfig {
+
+    @Bean
+    public SingleInvoiceReader invoiceReader() {
+        return new SingleInvoiceReader(new ClassPathResource("sample-invoice.xml"));
+    }
+}
+```
+
+---
+
+## ✅ 3. Optional: Wire It into a Spring Batch `Step`
+
+```java
+@Bean
+public Step singleInvoiceStep(JobRepository jobRepository,
+                              PlatformTransactionManager transactionManager,
+                              ItemReader<InvoiceType> invoiceReader) {
+    return new StepBuilder("singleInvoiceStep", jobRepository)
+            .<InvoiceType, InvoiceType>chunk(1, transactionManager)
+            .reader(invoiceReader)
+            .writer(items -> items.forEach(i -> System.out.println("Invoice ID: " + i.getID().getValue())))
+            .build();
+}
+```
+
+---
+
+## ✅ 4. Sample XML (`sample-invoice.xml`)
+
+Place this in `src/main/resources`:
+
+```xml
+<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"
+         xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">
+    <cbc:ID>INV-12345</cbc:ID>
+    <cbc:IssueDate>2025-05-06</cbc:IssueDate>
+</Invoice>
+```
+
+---
+
+## 🔁 Summary
+
+| Part                     | What You Did                              |
+| ------------------------ | ----------------------------------------- |
+| Reader                   | Created custom `ItemReader<InvoiceType>`  |
+| Unmarshalling            | Used plain JAXB with Oxalis model         |
+| Spring Batch integration | Optional `Step` to log or process invoice |
+
+---
+
+Would you like this bundled in a working Spring Boot starter project?
