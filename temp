@@ -14,3 +14,40 @@ public MultiResourceItemReader<InvoiceType> multiInvoiceReader() {
     reader.setDelegate(singleInvoiceReader());
     return reader;
 }
+
+
+
+
+public class SingleInvoiceReader implements ResourceAwareItemReaderItemStream<InvoiceType> {
+
+    private Resource resource;
+    private boolean alreadyRead = false;
+
+    @Override
+    public void setResource(Resource resource) {
+        this.resource = resource;
+    }
+
+    @Override
+    public InvoiceType read() throws Exception {
+        if (alreadyRead) return null;
+
+        JAXBContext ctx = JAXBContext.newInstance("network.oxalis.peppol.ubl2.jaxb");
+        Unmarshaller unmarshaller = ctx.createUnmarshaller();
+
+        try (InputStream is = resource.getInputStream()) {
+            JAXBElement<InvoiceType> root = (JAXBElement<InvoiceType>) unmarshaller.unmarshal(is);
+            alreadyRead = true;
+            return root.getValue();
+        }
+    }
+
+    @Override
+    public void open(ExecutionContext executionContext) { alreadyRead = false; }
+
+    @Override
+    public void update(ExecutionContext executionContext) { }
+
+    @Override
+    public void close() { }
+}
