@@ -1,22 +1,81 @@
 Certainly! Here's a full JUnit 5 test suite for your Spring Batch components. These examples use `@SpringBootTest`, `@MockBean`, and some direct `JUnit` assertions. You can adapt the mocks depending on whether you're using Spring Batch test utilities or your own implementations.
 
 ---
-
-## ✅ 1. `BatchConfigurationTest.java`
-
-```java
 @SpringBootTest
-public class BatchConfigurationTest {
+@Import(BatchConfiguration.class)
+class BatchConfigurationTest {
 
     @Autowired
     private Job invoiceProcessingJob;
+
+    @Autowired
+    private Step invoiceStep;
+
+    @Autowired
+    private ItemReader<InvoiceType> invoiceReader;
+
+    @Autowired
+    private ItemProcessor<InvoiceType, InvoiceType> invoiceProcessor;
+
+    @Autowired
+    private ItemWriter<InvoiceType> invoiceWriter;
+
+    @Autowired
+    private JobLauncher jobLauncher;
 
     @Test
     void jobShouldBeLoaded() {
         assertNotNull(invoiceProcessingJob);
         assertEquals("invoiceProcessingJob", invoiceProcessingJob.getName());
     }
+
+    @Test
+    void stepShouldBeLoaded() {
+        assertNotNull(invoiceStep);
+        assertEquals("invoiceStep", invoiceStep.getName());
+    }
+
+    @Test
+    void readerShouldReadInvoiceOnce() throws Exception {
+        InvoiceType invoice = invoiceReader.read();
+        assertNotNull(invoice);
+        assertNotNull(invoice.getID());
+        assertNull(invoiceReader.read()); // should return null after first read
+    }
+
+    @Test
+    void processorShouldReturnSameInvoice() throws Exception {
+        InvoiceType invoice = new InvoiceType();
+        IDType id = new IDType();
+        id.setValue("TEST123");
+        invoice.setID(id);
+
+        InvoiceType processed = invoiceProcessor.process(invoice);
+        assertEquals("TEST123", processed.getID().getValue());
+    }
+
+    @Test
+    void writerShouldLogInvoices() throws Exception {
+        InvoiceType invoice = new InvoiceType();
+        IDType id = new IDType();
+        id.setValue("WR123");
+        invoice.setID(id);
+
+        invoiceWriter.write(List.of(invoice));
+        // Verify with log capture if needed
+    }
+
+    @Test
+    void jobShouldRunSuccessfully() throws Exception {
+        JobParameters params = new JobParametersBuilder()
+                .addLong("timestamp", System.currentTimeMillis())
+                .toJobParameters();
+
+        JobExecution exec = jobLauncher.run(invoiceProcessingJob, params);
+        assertEquals(BatchStatus.COMPLETED, exec.getStatus());
+    }
 }
+
 ```
 
 ---
