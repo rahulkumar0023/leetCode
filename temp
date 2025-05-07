@@ -1,108 +1,131 @@
-Absolutely! Here's a clean, minimal **Spring Batch `ItemReader<InvoiceType>`** for reading **a single PEPPOL UBL Invoice** from an XML file using JAXB — no `StaxEventItemReader`, no `Jaxb2Marshaller`.
+Certainly! Here's a full JUnit 5 test suite for your Spring Batch components. These examples use `@SpringBootTest`, `@MockBean`, and some direct `JUnit` assertions. You can adapt the mocks depending on whether you're using Spring Batch test utilities or your own implementations.
 
 ---
 
-## ✅ 1. Custom Reader Class
+## ✅ 1. `BatchConfigurationTest.java`
 
 ```java
-package com.example.batch.reader;
+@SpringBootTest
+public class BatchConfigurationTest {
 
-import jakarta.xml.bind.JAXBContext;
-import jakarta.xml.bind.Unmarshaller;
-import network.oxalis.model.v21.invoice.InvoiceType;
-import org.springframework.batch.item.ItemReader;
-import org.springframework.core.io.Resource;
+    @Autowired
+    private Job invoiceProcessingJob;
 
-import java.io.InputStream;
-
-public class SingleInvoiceReader implements ItemReader<InvoiceType> {
-
-    private final Resource xmlResource;
-    private boolean read = false;
-
-    public SingleInvoiceReader(Resource xmlResource) {
-        this.xmlResource = xmlResource;
-    }
-
-    @Override
-    public InvoiceType read() throws Exception {
-        if (read) return null; // return only once
-
-        JAXBContext context = JAXBContext.newInstance(InvoiceType.class);
-        Unmarshaller unmarshaller = context.createUnmarshaller();
-
-        try (InputStream input = xmlResource.getInputStream()) {
-            read = true;
-            return (InvoiceType) unmarshaller.unmarshal(input);
-        }
+    @Test
+    void jobShouldBeLoaded() {
+        assertNotNull(invoiceProcessingJob);
+        assertEquals("invoiceProcessingJob", invoiceProcessingJob.getName());
     }
 }
 ```
 
 ---
 
-## ✅ 2. Reader Bean Config
+## ✅ 2. `JobSchedulerTest.java`
 
 ```java
-package com.example.batch.config;
+@SpringBootTest
+public class JobSchedulerTest {
 
-import com.example.batch.reader.SingleInvoiceReader;
-import network.oxalis.model.v21.invoice.InvoiceType;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.core.io.ClassPathResource;
+    @Autowired
+    private JobLauncher jobLauncher;
 
-@Configuration
-public class InvoiceReaderConfig {
+    @Autowired
+    private Job invoiceProcessingJob;
 
-    @Bean
-    public SingleInvoiceReader invoiceReader() {
-        return new SingleInvoiceReader(new ClassPathResource("sample-invoice.xml"));
+    @Test
+    void jobShouldLaunchSuccessfully() throws Exception {
+        JobParameters jobParameters = new JobParametersBuilder()
+                .addLong("timestamp", System.currentTimeMillis())
+                .toJobParameters();
+
+        JobExecution execution = jobLauncher.run(invoiceProcessingJob, jobParameters);
+        assertEquals(BatchStatus.COMPLETED, execution.getStatus());
     }
 }
 ```
 
 ---
 
-## ✅ 3. Optional: Wire It into a Spring Batch `Step`
+## ✅ 3. `InvoiceReaderTest.java`
 
 ```java
-@Bean
-public Step singleInvoiceStep(JobRepository jobRepository,
-                              PlatformTransactionManager transactionManager,
-                              ItemReader<InvoiceType> invoiceReader) {
-    return new StepBuilder("singleInvoiceStep", jobRepository)
-            .<InvoiceType, InvoiceType>chunk(1, transactionManager)
-            .reader(invoiceReader)
-            .writer(items -> items.forEach(i -> System.out.println("Invoice ID: " + i.getID().getValue())))
-            .build();
+@SpringBootTest
+public class InvoiceReaderTest {
+
+    @Autowired
+    private ItemReader<InvoiceType> invoiceReader;
+
+    @Test
+    void shouldReadSingleInvoice() throws Exception {
+        InvoiceType invoice = invoiceReader.read();
+        assertNotNull(invoice);
+        assertNotNull(invoice.getID());
+        assertNull(invoiceReader.read()); // Should only return one item
+    }
 }
 ```
 
 ---
 
-## ✅ 4. Sample XML (`sample-invoice.xml`)
+## ✅ 4. `InvoiceWriterTest.java`
 
-Place this in `src/main/resources`:
+Assuming you’ve implemented a basic writer that just logs or processes the invoice:
 
-```xml
-<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"
-         xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">
-    <cbc:ID>INV-12345</cbc:ID>
-    <cbc:IssueDate>2025-05-06</cbc:IssueDate>
-</Invoice>
+```java
+@SpringBootTest
+public class InvoiceWriterTest {
+
+    @Autowired
+    private ItemWriter<InvoiceType> invoiceWriter;
+
+    @Test
+    void shouldWriteInvoice() throws Exception {
+        InvoiceType invoice = new InvoiceType();
+        invoice.setID(new IDType());
+        invoice.getID().setValue("INV-123");
+
+        invoiceWriter.write(List.of(invoice));
+        // You can use log capture or mock service assertions if writing elsewhere
+    }
+}
 ```
 
 ---
 
-## 🔁 Summary
+## ✅ 5. `InvoiceProcessorTest.java`
 
-| Part                     | What You Did                              |
-| ------------------------ | ----------------------------------------- |
-| Reader                   | Created custom `ItemReader<InvoiceType>`  |
-| Unmarshalling            | Used plain JAXB with Oxalis model         |
-| Spring Batch integration | Optional `Step` to log or process invoice |
+Assuming a processor that maybe enriches or logs the invoice:
+
+```java
+@SpringBootTest
+public class InvoiceProcessorTest {
+
+    @Autowired
+    private ItemProcessor<InvoiceType, InvoiceType> invoiceProcessor;
+
+    @Test
+    void shouldProcessInvoice() throws Exception {
+        InvoiceType input = new InvoiceType();
+        input.setID(new IDType());
+        input.getID().setValue("INV-456");
+
+        InvoiceType output = invoiceProcessor.process(input);
+
+        assertNotNull(output);
+        assertEquals("INV-456", output.getID().getValue());
+    }
+}
+```
 
 ---
 
-Would you like this bundled in a working Spring Boot starter project?
+## 🔧 Notes
+
+* These tests assume the beans are defined in Spring context (via `@Configuration` or `@Bean`)
+* You can enhance assertions using `Mockito.verify(...)` if any services are mocked
+* You may optionally add `@TestPropertySource` for H2, logging configs, or XML file overrides
+
+---
+
+Would you like these packed into a Git-style directory structure for easy copy-paste or import?
