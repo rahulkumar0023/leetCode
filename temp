@@ -1,190 +1,28 @@
-Certainly! Here's a full JUnit 5 test suite for your Spring Batch components. These examples use `@SpringBootTest`, `@MockBean`, and some direct `JUnit` assertions. You can adapt the mocks depending on whether you're using Spring Batch test utilities or your own implementations.
+@ExtendWith(MockitoExtension.class)
+class JobSchedulerTest {
 
----
-@SpringBootTest
-@Import(BatchConfiguration.class)
-class BatchConfigurationTest {
-
-    @Autowired
-    private Job invoiceProcessingJob;
-
-    @Autowired
-    private Step invoiceStep;
-
-    @Autowired
-    private ItemReader<InvoiceType> invoiceReader;
-
-    @Autowired
-    private ItemProcessor<InvoiceType, InvoiceType> invoiceProcessor;
-
-    @Autowired
-    private ItemWriter<InvoiceType> invoiceWriter;
-
-    @Autowired
+    @Mock
     private JobLauncher jobLauncher;
 
+    @Mock
+    private Job invoiceJob;
+
+    @InjectMocks
+    private JobScheduler scheduler;
+
     @Test
-    void jobShouldBeLoaded() {
-        assertNotNull(invoiceProcessingJob);
-        assertEquals("invoiceProcessingJob", invoiceProcessingJob.getName());
+    void shouldRunInvoiceJob() throws Exception {
+        when(jobLauncher.run(eq(invoiceJob), any())).thenReturn(mock(JobExecution.class));
+
+        scheduler.runJob();
+
+        verify(jobLauncher, times(1)).run(eq(invoiceJob), any(JobParameters.class));
     }
 
     @Test
-    void stepShouldBeLoaded() {
-        assertNotNull(invoiceStep);
-        assertEquals("invoiceStep", invoiceStep.getName());
-    }
+    void shouldThrowExceptionIfJobFails() throws Exception {
+        when(jobLauncher.run(any(), any())).thenThrow(new JobExecutionException("Fail"));
 
-    @Test
-    void readerShouldReadInvoiceOnce() throws Exception {
-        InvoiceType invoice = invoiceReader.read();
-        assertNotNull(invoice);
-        assertNotNull(invoice.getID());
-        assertNull(invoiceReader.read()); // should return null after first read
-    }
-
-    @Test
-    void processorShouldReturnSameInvoice() throws Exception {
-        InvoiceType invoice = new InvoiceType();
-        IDType id = new IDType();
-        id.setValue("TEST123");
-        invoice.setID(id);
-
-        InvoiceType processed = invoiceProcessor.process(invoice);
-        assertEquals("TEST123", processed.getID().getValue());
-    }
-
-    @Test
-    void writerShouldLogInvoices() throws Exception {
-        InvoiceType invoice = new InvoiceType();
-        IDType id = new IDType();
-        id.setValue("WR123");
-        invoice.setID(id);
-
-        invoiceWriter.write(List.of(invoice));
-        // Verify with log capture if needed
-    }
-
-    @Test
-    void jobShouldRunSuccessfully() throws Exception {
-        JobParameters params = new JobParametersBuilder()
-                .addLong("timestamp", System.currentTimeMillis())
-                .toJobParameters();
-
-        JobExecution exec = jobLauncher.run(invoiceProcessingJob, params);
-        assertEquals(BatchStatus.COMPLETED, exec.getStatus());
+        assertThrows(RuntimeException.class, () -> scheduler.runJob());
     }
 }
-
-```
-
----
-
-## ✅ 2. `JobSchedulerTest.java`
-
-```java
-@SpringBootTest
-public class JobSchedulerTest {
-
-    @Autowired
-    private JobLauncher jobLauncher;
-
-    @Autowired
-    private Job invoiceProcessingJob;
-
-    @Test
-    void jobShouldLaunchSuccessfully() throws Exception {
-        JobParameters jobParameters = new JobParametersBuilder()
-                .addLong("timestamp", System.currentTimeMillis())
-                .toJobParameters();
-
-        JobExecution execution = jobLauncher.run(invoiceProcessingJob, jobParameters);
-        assertEquals(BatchStatus.COMPLETED, execution.getStatus());
-    }
-}
-```
-
----
-
-## ✅ 3. `InvoiceReaderTest.java`
-
-```java
-@SpringBootTest
-public class InvoiceReaderTest {
-
-    @Autowired
-    private ItemReader<InvoiceType> invoiceReader;
-
-    @Test
-    void shouldReadSingleInvoice() throws Exception {
-        InvoiceType invoice = invoiceReader.read();
-        assertNotNull(invoice);
-        assertNotNull(invoice.getID());
-        assertNull(invoiceReader.read()); // Should only return one item
-    }
-}
-```
-
----
-
-## ✅ 4. `InvoiceWriterTest.java`
-
-Assuming you’ve implemented a basic writer that just logs or processes the invoice:
-
-```java
-@SpringBootTest
-public class InvoiceWriterTest {
-
-    @Autowired
-    private ItemWriter<InvoiceType> invoiceWriter;
-
-    @Test
-    void shouldWriteInvoice() throws Exception {
-        InvoiceType invoice = new InvoiceType();
-        invoice.setID(new IDType());
-        invoice.getID().setValue("INV-123");
-
-        invoiceWriter.write(List.of(invoice));
-        // You can use log capture or mock service assertions if writing elsewhere
-    }
-}
-```
-
----
-
-## ✅ 5. `InvoiceProcessorTest.java`
-
-Assuming a processor that maybe enriches or logs the invoice:
-
-```java
-@SpringBootTest
-public class InvoiceProcessorTest {
-
-    @Autowired
-    private ItemProcessor<InvoiceType, InvoiceType> invoiceProcessor;
-
-    @Test
-    void shouldProcessInvoice() throws Exception {
-        InvoiceType input = new InvoiceType();
-        input.setID(new IDType());
-        input.getID().setValue("INV-456");
-
-        InvoiceType output = invoiceProcessor.process(input);
-
-        assertNotNull(output);
-        assertEquals("INV-456", output.getID().getValue());
-    }
-}
-```
-
----
-
-## 🔧 Notes
-
-* These tests assume the beans are defined in Spring context (via `@Configuration` or `@Bean`)
-* You can enhance assertions using `Mockito.verify(...)` if any services are mocked
-* You may optionally add `@TestPropertySource` for H2, logging configs, or XML file overrides
-
----
-
-Would you like these packed into a Git-style directory structure for easy copy-paste or import?
