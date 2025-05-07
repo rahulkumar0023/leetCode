@@ -1,28 +1,16 @@
-@ExtendWith(MockitoExtension.class)
-class JobSchedulerTest {
+@Bean
+public MultiResourceItemReader<InvoiceType> multiInvoiceReader() {
+    MultiResourceItemReader<InvoiceType> reader = new MultiResourceItemReader<>();
+    ResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
+    Resource[] resources;
 
-    @Mock
-    private JobLauncher jobLauncher;
-
-    @Mock
-    private Job invoiceJob;
-
-    @InjectMocks
-    private JobScheduler scheduler;
-
-    @Test
-    void shouldRunInvoiceJob() throws Exception {
-        when(jobLauncher.run(eq(invoiceJob), any())).thenReturn(mock(JobExecution.class));
-
-        scheduler.runJob();
-
-        verify(jobLauncher, times(1)).run(eq(invoiceJob), any(JobParameters.class));
+    try {
+        resources = resolver.getResources("classpath:input/*.xml");
+    } catch (IOException e) {
+        throw new RuntimeException("Failed to load input XML files", e);
     }
 
-    @Test
-    void shouldThrowExceptionIfJobFails() throws Exception {
-        when(jobLauncher.run(any(), any())).thenThrow(new JobExecutionException("Fail"));
-
-        assertThrows(RuntimeException.class, () -> scheduler.runJob());
-    }
+    reader.setResources(resources);
+    reader.setDelegate(singleInvoiceReader());
+    return reader;
 }
