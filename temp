@@ -35,3 +35,144 @@ public class InvoiceWriter implements ItemWriter<InvoiceType>, StepExecutionList
         }
     }
 }
+
+
+Absolutely — here’s the complete, working code for your use case: reading XML invoices from a directory, tracking the current file, and writing (or moving) it to a processed/ folder using Spring Batch.
+
+⸻
+
+✅ 1. SingleInvoiceReader.java
+
+public class SingleInvoiceReader implements
+        ResourceAwareItemReaderItemStream<InvoiceType>,
+        StepExecutionListener {
+
+    private Resource resource;
+    private ExecutionContext stepContext;
+    private boolean alreadyRead = false;
+
+    @Override
+    public void setResource(Resource resource) {
+        this.resource = resource;
+    }
+
+    @Override
+    public void open(ExecutionContext executionContext) {
+        alreadyRead = false;
+    }
+
+    @Override
+    public InvoiceType read() throws Exception {
+        if (alreadyRead) return null;
+
+        JAXBContext context = JAXBContext.newInstance("network.oxalis.peppol.ubl2.jaxb");
+        Unmarshaller unmarshaller = context.createUnmarshaller();
+
+        try (InputStream is = resource.getInputStream()) {
+            JAXBElement<InvoiceType> root = (JAXBElement<InvoiceType>) unmarshaller.unmarshal(is);
+            alreadyRead = true;
+            return root.getValue();
+        }
+    }
+
+    @Override
+    public void update(ExecutionContext executionContext) {}
+
+    @Override
+    public void close() {}
+
+    @Override
+    public void beforeStep(StepExecution stepExecution) {
+        this.stepContext = stepExecution.getExecutionContext();
+        try {
+            if (resource != null && resource.exists()) {
+                String path = resource.getFile().getAbsolutePath();
+                stepContext.putString("current.file", path);
+            }
+        } catch (IOException e) {
+            throw new RuntimeException("Error accessing input file", e);
+        }
+    }
+
+    @Override
+    public ExitStatus afterStep(StepExecution stepExecution) {
+        return ExitStatus.COMPLETED;
+    }
+}
+
+
+⸻
+
+✅ 2. InvoiceWriter.java
+
+@Component
+public class InvoiceWriter implements ItemWriter<InvoiceType>, StepExecutionListener {
+
+    private ExecutionContext context;
+
+    @Override
+    public void beforeStep(StepExecution stepExecution) {
+        this.context = stepExecution.getExecutionContext();
+    }
+
+    @Override
+    public void write(Chunk<? extends InvoiceType> items) {
+        String sourcePath = context.getString("current.file", null);
+
+        if (sourcePath != null) {
+            Path source = Paths.get(sourcePath);
+            Path target = Paths.get("src/main/resources/processed", source.getFileName().toString());
+
+            try {
+                Files.createDirectories(target.getParent());
+                Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
+                System.out.println("Copied to: " + target);
+            } catch (IOException e) {
+                System.err.println("Failed to move file: " + e.getMessage());
+            }
+        }
+
+        for (InvoiceType invoice : items) {
+            System.out.println("Processed invoice ID: " + invoice.getID().getValue());
+        }
+    }
+
+    @Override
+    public ExitStatus afterStep(StepExecution stepExecution) {
+        return ExitStatus.COMPLETED;
+    }
+}
+
+
+⸻
+
+✅ 3. Spring Configuration Snippet (Reader Bean)
+
+@Bean
+public MultiResourceItemReader<InvoiceType> multiInvoiceReader() throws IOException {
+    MultiResourceItemReader<InvoiceType> reader = new MultiResourceItemReader<>();
+
+    Resource[] resources = new PathMatchingResourcePatternResolver()
+            .getResources("classpath:input/*.xml");
+
+    reader.setResources(resources);
+    reader.setDelegate(singleInvoiceReader());
+    return reader;
+}
+
+@Bean
+public SingleInvoiceReader singleInvoiceReader() {
+    return new SingleInvoiceReader();
+}
+
+
+⸻
+
+Important Notes:
+	•	The files are copied to src/main/resources/processed/ for dev/test only.
+	•	Replace copy with move in Files.copy(...) if you want to actually move them.
+	•	Later, swap the file path with a COS uploader to integrate with cloud storage.
+
+⸻
+
+Would you like me to generate unit tests for this updated version too?
