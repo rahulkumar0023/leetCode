@@ -1,53 +1,37 @@
-@Bean
-public MultiResourceItemReader<InvoiceType> multiInvoiceReader() {
-    MultiResourceItemReader<InvoiceType> reader = new MultiResourceItemReader<>();
-    ResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
-    Resource[] resources;
+@Component
+public class InvoiceWriter implements ItemWriter<InvoiceType>, StepExecutionListener {
 
-    try {
-        resources = resolver.getResources("classpath:input/*.xml");
-    } catch (IOException e) {
-        throw new RuntimeException("Failed to load input XML files", e);
-    }
-
-    reader.setResources(resources);
-    reader.setDelegate(singleInvoiceReader());
-    return reader;
-}
-
-
-
-
-public class SingleInvoiceReader implements ResourceAwareItemReaderItemStream<InvoiceType> {
-
-    private Resource resource;
-    private boolean alreadyRead = false;
+    private final Logger log = LoggerFactory.getLogger(getClass());
+    private ExecutionContext context;
 
     @Override
-    public void setResource(Resource resource) {
-        this.resource = resource;
+    public void beforeStep(StepExecution stepExecution) {
+        this.context = stepExecution.getExecutionContext();
     }
 
     @Override
-    public InvoiceType read() throws Exception {
-        if (alreadyRead) return null;
+    public ExitStatus afterStep(StepExecution stepExecution) {
+        return ExitStatus.COMPLETED;
+    }
 
-        JAXBContext ctx = JAXBContext.newInstance("network.oxalis.peppol.ubl2.jaxb");
-        Unmarshaller unmarshaller = ctx.createUnmarshaller();
+    @Override
+    public void write(Chunk<? extends InvoiceType> items) {
+        for (InvoiceType invoice : items) {
+            String sourcePath = (String) context.get("current.file");
+            if (sourcePath != null) {
+                Path source = Paths.get(sourcePath);
+                Path target = Paths.get("processed", source.getFileName().toString());
 
-        try (InputStream is = resource.getInputStream()) {
-            JAXBElement<InvoiceType> root = (JAXBElement<InvoiceType>) unmarshaller.unmarshal(is);
-            alreadyRead = true;
-            return root.getValue();
+                try {
+                    Files.createDirectories(target.getParent());
+                    Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
+                    log.info("Moved file {} to {}", source, target);
+                } catch (IOException e) {
+                    log.error("Failed to move file", e);
+                }
+            }
+
+            log.info("Processed invoice ID: {}", invoice.getID().getValue());
         }
     }
-
-    @Override
-    public void open(ExecutionContext executionContext) { alreadyRead = false; }
-
-    @Override
-    public void update(ExecutionContext executionContext) { }
-
-    @Override
-    public void close() { }
 }
