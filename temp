@@ -353,3 +353,19 @@ This ensures all temporary files are removed **after successful invoice processi
 Would you like this step to run conditionally (e.g., only if previous steps succeed)?
 
 
+
+
+File dir = new File("/tmp/unzipped");
+File[] xmlFiles = dir.listFiles((d, name) -> name.endsWith(".xml"));
+
+if (xmlFiles == null || xmlFiles.length == 0) {
+    throw new IllegalStateException("No XML files found in /tmp/unzipped.");
+}
+
+Resource[] resources = Arrays.stream(xmlFiles)
+        .map(FileSystemResource::new)
+        .toArray(Resource[]::new);
+
+MultiResourceItemReader<InvoiceType> reader = new MultiResourceItemReader<>();
+reader.setResources(resources);
+reader.setDelegate(new SingleInvoiceReader());
