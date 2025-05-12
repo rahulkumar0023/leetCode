@@ -113,3 +113,152 @@ Your batch job now:
 ---
 
 Would you like a test tasklet runner or unit tests for this setup?
+
+
+
+
+Yes — splitting into **three dedicated steps** is an excellent design. It provides:
+
+* ✅ Clear separation of concerns
+* ✅ Easier debugging
+* ✅ Independent retries
+* ✅ Cleaner logging and exception handling
+
+---
+
+## ✅ Recommended 3-Step Spring Batch Job
+
+### 🔹 **Step 1: `fetchEncryptedStep`**
+
+* Fetch `.zip.pgp` files from COS (download to `/tmp/encrypted`)
+* Store downloaded `File` paths in `ExecutionContext` or local directory
+
+### 🔹 **Step 2: `decryptAndUnzipStep`**
+
+* Read the encrypted files from `/tmp/encrypted`
+* Decrypt `.pgp` → `.zip`
+* Unzip `.zip` → `.xml` into `/tmp/unzipped`
+
+### 🔹 **Step 3: `invoiceStep`**
+
+* Multi-resource XML reader reads from `/tmp/unzipped`
+* Your existing processor & writer
+* Upload processed files back to COS or move to archive
+
+---
+
+## ✅ Technical Breakdown
+
+### 1. `fetchEncryptedTasklet`
+
+```java
+@Component
+public class FetchEncryptedTasklet implements Tasklet {
+
+    private final CosStorageService cosService;
+
+    public FetchEncryptedTasklet(CosStorageService cosService) {
+        this.cosService = cosService;
+    }
+
+    @Override
+    public RepeatStatus execute(StepContribution contribution, ChunkContext context) throws Exception {
+        List<String> cosKeys = List.of("invoices-batch1.zip.pgp", "invoices-batch2.zip.pgp");
+
+        for (String key : cosKeys) {
+            File localFile = cosService.downloadToLocal(key); // saves to /tmp/encrypted
+            System.out.println("Fetched: " + localFile.getAbsolutePath());
+        }
+
+        return RepeatStatus.FINISHED;
+    }
+}
+```
+
+---
+
+### 2. `decryptAndUnzipTasklet`
+
+```java
+@Component
+public class DecryptAndUnzipTasklet implements Tasklet {
+
+    @Override
+    public RepeatStatus execute(StepContribution contribution, ChunkContext context) throws Exception {
+        File[] encryptedFiles = new File("/tmp/encrypted").listFiles((dir, name) -> name.endsWith(".pgp"));
+        if (encryptedFiles == null) return RepeatStatus.FINISHED;
+
+        for (File pgpFile : encryptedFiles) {
+            File zipFile = decrypt(pgpFile); // simulate decryption
+            unzip(zipFile, new File("/tmp/unzipped"));
+        }
+
+        return RepeatStatus.FINISHED;
+    }
+
+    private File decrypt(File pgp) throws IOException {
+        File zip = new File(pgp.getAbsolutePath().replace(".pgp", ""));
+        Files.copy(pgp.toPath(), zip.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        return zip;
+    }
+
+    private void unzip(File zipFile, File destDir) throws IOException {
+        destDir.mkdirs();
+        try (ZipInputStream zis = new ZipInputStream(new FileInputStream(zipFile))) {
+            ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                File newFile = new File(destDir, entry.getName());
+                try (FileOutputStream fos = new FileOutputStream(newFile)) {
+                    zis.transferTo(fos);
+                }
+            }
+        }
+    }
+}
+```
+
+---
+
+### 3. `invoiceStep` (already implemented)
+
+```java
+@Bean
+public Step invoiceStep(JobRepository repo, PlatformTransactionManager tx,
+                        InvoiceProcessor proc, InvoiceWriter writer) throws IOException {
+    MultiResourceItemReader<InvoiceType> reader = new MultiResourceItemReader<>();
+    reader.setResources(new PathMatchingResourcePatternResolver()
+        .getResources("file:/tmp/unzipped/*.xml"));
+    reader.setDelegate(new SingleInvoiceReader());
+
+    return new StepBuilder("invoiceStep", repo)
+            .<InvoiceType, InvoiceType>chunk(1, tx)
+            .reader(reader)
+            .processor(proc)
+            .writer(writer)
+            .build();
+}
+```
+
+---
+
+## ✅ Final Job Configuration
+
+```java
+@Bean
+public Job invoiceJob(JobRepository repo,
+                      Step fetchEncryptedStep,
+                      Step decryptAndUnzipStep,
+                      Step invoiceStep) {
+
+    return new JobBuilder("invoiceJob", repo)
+            .start(fetchEncryptedStep)
+            .next(decryptAndUnzipStep)
+            .next(invoiceStep)
+            .build();
+}
+```
+
+---
+
+Would you like me to generate all the actual Spring bean definitions for these three steps now?
+
