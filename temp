@@ -1,192 +1,12 @@
-@Component
-public class InvoiceWriter implements ItemWriter<InvoiceType>, StepExecutionListener {
+Absolutely — here’s the **complete code setup** for your two-step Spring Batch job:
 
-    private final Logger log = LoggerFactory.getLogger(getClass());
-    private ExecutionContext context;
+---
 
-    @Override
-    public void beforeStep(StepExecution stepExecution) {
-        this.context = stepExecution.getExecutionContext();
-    }
+## ✅ Step 1: COS Decrypt & Unzip
 
-    @Override
-    public ExitStatus afterStep(StepExecution stepExecution) {
-        return ExitStatus.COMPLETED;
-    }
+### `CosStorageService.java` (placeholder for COS access)
 
-    @Override
-    public void write(Chunk<? extends InvoiceType> items) {
-        for (InvoiceType invoice : items) {
-            String sourcePath = (String) context.get("current.file");
-            if (sourcePath != null) {
-                Path source = Paths.get(sourcePath);
-                Path target = Paths.get("processed", source.getFileName().toString());
-
-                try {
-                    Files.createDirectories(target.getParent());
-                    Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
-                    log.info("Moved file {} to {}", source, target);
-                } catch (IOException e) {
-                    log.error("Failed to move file", e);
-                }
-            }
-
-            log.info("Processed invoice ID: {}", invoice.getID().getValue());
-        }
-    }
-}
-
-
-Absolutely — here’s the complete, working code for your use case: reading XML invoices from a directory, tracking the current file, and writing (or moving) it to a processed/ folder using Spring Batch.
-
-⸻
-
-✅ 1. SingleInvoiceReader.java
-
-public class SingleInvoiceReader implements
-        ResourceAwareItemReaderItemStream<InvoiceType>,
-        StepExecutionListener {
-
-    private Resource resource;
-    private ExecutionContext stepContext;
-    private boolean alreadyRead = false;
-
-    @Override
-    public void setResource(Resource resource) {
-        this.resource = resource;
-    }
-
-    @Override
-    public void open(ExecutionContext executionContext) {
-        alreadyRead = false;
-    }
-
-    @Override
-    public InvoiceType read() throws Exception {
-        if (alreadyRead) return null;
-
-        JAXBContext context = JAXBContext.newInstance("network.oxalis.peppol.ubl2.jaxb");
-        Unmarshaller unmarshaller = context.createUnmarshaller();
-
-        try (InputStream is = resource.getInputStream()) {
-            JAXBElement<InvoiceType> root = (JAXBElement<InvoiceType>) unmarshaller.unmarshal(is);
-            alreadyRead = true;
-            return root.getValue();
-        }
-    }
-
-    @Override
-    public void update(ExecutionContext executionContext) {}
-
-    @Override
-    public void close() {}
-
-    @Override
-    public void beforeStep(StepExecution stepExecution) {
-        this.stepContext = stepExecution.getExecutionContext();
-        try {
-            if (resource != null && resource.exists()) {
-                String path = resource.getFile().getAbsolutePath();
-                stepContext.putString("current.file", path);
-            }
-        } catch (IOException e) {
-            throw new RuntimeException("Error accessing input file", e);
-        }
-    }
-
-    @Override
-    public ExitStatus afterStep(StepExecution stepExecution) {
-        return ExitStatus.COMPLETED;
-    }
-}
-
-
-⸻
-
-✅ 2. InvoiceWriter.java
-
-@Component
-public class InvoiceWriter implements ItemWriter<InvoiceType>, StepExecutionListener {
-
-    private ExecutionContext context;
-
-    @Override
-    public void beforeStep(StepExecution stepExecution) {
-        this.context = stepExecution.getExecutionContext();
-    }
-
-    @Override
-    public void write(Chunk<? extends InvoiceType> items) {
-        String sourcePath = context.getString("current.file", null);
-
-        if (sourcePath != null) {
-            Path source = Paths.get(sourcePath);
-            Path target = Paths.get("src/main/resources/processed", source.getFileName().toString());
-
-            try {
-                Files.createDirectories(target.getParent());
-                Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
-                System.out.println("Copied to: " + target);
-            } catch (IOException e) {
-                System.err.println("Failed to move file: " + e.getMessage());
-            }
-        }
-
-        for (InvoiceType invoice : items) {
-            System.out.println("Processed invoice ID: " + invoice.getID().getValue());
-        }
-    }
-
-    @Override
-    public ExitStatus afterStep(StepExecution stepExecution) {
-        return ExitStatus.COMPLETED;
-    }
-}
-
-
-⸻
-
-✅ 3. Spring Configuration Snippet (Reader Bean)
-
-@Bean
-public MultiResourceItemReader<InvoiceType> multiInvoiceReader() throws IOException {
-    MultiResourceItemReader<InvoiceType> reader = new MultiResourceItemReader<>();
-
-    Resource[] resources = new PathMatchingResourcePatternResolver()
-            .getResources("classpath:input/*.xml");
-
-    reader.setResources(resources);
-    reader.setDelegate(singleInvoiceReader());
-    return reader;
-}
-
-@Bean
-public SingleInvoiceReader singleInvoiceReader() {
-    return new SingleInvoiceReader();
-}
-
-
-⸻
-
-Important Notes:
-	•	The files are copied to src/main/resources/processed/ for dev/test only.
-	•	Replace copy with move in Files.copy(...) if you want to actually move them.
-	•	Later, swap the file path with a COS uploader to integrate with cloud storage.
-
-⸻
-
-Would you like me to generate unit tests for this updated version too?
-
-
-
-Absolutely — here’s the complete code setup for your two-step Spring Batch job:
-
-⸻
-
-✅ Step 1: COS Decrypt & Unzip
-
-CosStorageService.java (placeholder for COS access)
-
+```java
 @Component
 public class CosStorageService {
 
@@ -203,12 +23,13 @@ public class CosStorageService {
         System.out.println("Uploading " + file.getName() + " to COS key: " + targetKey);
     }
 }
+```
 
+---
 
-⸻
+### `CosFileReader.java`
 
-CosFileReader.java
-
+```java
 public class CosFileReader implements ItemReader<File> {
 
     private final Iterator<String> cosKeys;
@@ -224,12 +45,13 @@ public class CosFileReader implements ItemReader<File> {
         return cosKeys.hasNext() ? cosStorageService.download(cosKeys.next()) : null;
     }
 }
+```
 
+---
 
-⸻
+### `DecryptAndUnzipProcessor.java`
 
-DecryptAndUnzipProcessor.java
-
+```java
 public class DecryptAndUnzipProcessor implements ItemProcessor<File, List<File>> {
 
     @Override
@@ -244,12 +66,13 @@ public class DecryptAndUnzipProcessor implements ItemProcessor<File, List<File>>
         return List.of(new File(targetDir, "invoice1.xml")); // Simulated result
     }
 }
+```
 
+---
 
-⸻
+### `XmlFileWriter.java`
 
-XmlFileWriter.java
-
+```java
 public class XmlFileWriter implements ItemWriter<List<File>> {
     @Override
     public void write(Chunk<? extends List<File>> items) {
@@ -258,23 +81,26 @@ public class XmlFileWriter implements ItemWriter<List<File>> {
         }
     }
 }
+```
 
+---
 
-⸻
+## ✅ Step 2: XML Processing
 
-✅ Step 2: XML Processing
+### `InvoiceReader.java`
 
-InvoiceReader.java
-
+```java
 public class InvoiceReader extends MultiResourceItemReader<InvoiceType> {
     public InvoiceReader(SingleInvoiceReader delegate) throws IOException {
         setResources(new PathMatchingResourcePatternResolver().getResources("file:/tmp/unzipped/*.xml"));
         setDelegate(delegate);
     }
 }
+```
 
-SingleInvoiceReader.java
+### `SingleInvoiceReader.java`
 
+```java
 public class SingleInvoiceReader implements ResourceAwareItemReaderItemStream<InvoiceType> {
 
     private Resource resource;
@@ -299,12 +125,13 @@ public class SingleInvoiceReader implements ResourceAwareItemReaderItemStream<In
     @Override public void update(ExecutionContext ctx) {}
     @Override public void close() {}
 }
+```
 
+---
 
-⸻
+### `InvoiceProcessor.java`
 
-InvoiceProcessor.java
-
+```java
 @Component
 public class InvoiceProcessor implements ItemProcessor<InvoiceType, InvoiceType> {
     @Override
@@ -313,12 +140,13 @@ public class InvoiceProcessor implements ItemProcessor<InvoiceType, InvoiceType>
         return item;
     }
 }
+```
 
+---
 
-⸻
+### `InvoiceWriter.java`
 
-InvoiceWriter.java
-
+```java
 @Component
 public class InvoiceWriter implements ItemWriter<InvoiceType> {
 
@@ -336,12 +164,13 @@ public class InvoiceWriter implements ItemWriter<InvoiceType> {
         }
     }
 }
+```
 
+---
 
-⸻
+## ✅ BatchConfig.java
 
-✅ BatchConfig.java
-
+```java
 @Configuration
 @EnableBatchProcessing
 public class BatchConfig {
@@ -376,8 +205,8 @@ public class BatchConfig {
                 .build();
     }
 }
+```
 
-
-⸻
+---
 
 Would you like to simulate PGP decryption and unzip with test files for local testing too?
