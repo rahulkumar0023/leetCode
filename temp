@@ -262,3 +262,94 @@ public Job invoiceJob(JobRepository repo,
 
 Would you like me to generate all the actual Spring bean definitions for these three steps now?
 
+
+
+Perfect — to clean up **all temp files** (ZIPs, PGPs, XMLs, and the unzipped folder), you can add a final **cleanup Tasklet** as **Step 4** in your job.
+
+---
+
+## ✅ Cleanup Tasklet
+
+### 🔹 `TempFileCleanupTasklet.java`
+
+```java
+@Component
+public class TempFileCleanupTasklet implements Tasklet {
+
+    private static final Path TMP_DIR = Paths.get("/tmp");
+    private static final Path UNZIPPED_DIR = TMP_DIR.resolve("unzipped");
+
+    @Override
+    public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext) throws Exception {
+        // Delete *.zip, *.pgp, *.xml from /tmp
+        try (Stream<Path> files = Files.list(TMP_DIR)) {
+            files.filter(path -> {
+                String name = path.getFileName().toString().toLowerCase();
+                return name.endsWith(".zip") || name.endsWith(".pgp") || name.endsWith(".xml");
+            }).forEach(path -> {
+                try {
+                    Files.deleteIfExists(path);
+                    System.out.println("Deleted: " + path);
+                } catch (IOException e) {
+                    System.err.println("Failed to delete: " + path + " — " + e.getMessage());
+                }
+            });
+        }
+
+        // Delete all files inside /tmp/unzipped
+        if (Files.exists(UNZIPPED_DIR)) {
+            Files.walk(UNZIPPED_DIR)
+                .sorted(Comparator.reverseOrder()) // delete children before parent
+                .map(Path::toFile)
+                .forEach(File::delete);
+            System.out.println("Cleaned up /tmp/unzipped");
+        }
+
+        return RepeatStatus.FINISHED;
+    }
+}
+```
+
+---
+
+## ✅ Register Cleanup Step
+
+### In `BatchConfig.java`:
+
+```java
+@Bean
+public Step cleanupStep(JobRepository repo, PlatformTransactionManager tx, TempFileCleanupTasklet tasklet) {
+    return new StepBuilder("cleanupStep", repo)
+            .tasklet(tasklet, tx)
+            .build();
+}
+```
+
+---
+
+## ✅ Update the Job
+
+```java
+@Bean
+public Job invoiceJob(JobRepository repo,
+                      Step fetchEncryptedStep,
+                      Step decryptAndUnzipStep,
+                      Step invoiceStep,
+                      Step cleanupStep) {
+
+    return new JobBuilder("invoiceJob", repo)
+            .start(fetchEncryptedStep)
+            .next(decryptAndUnzipStep)
+            .next(invoiceStep)
+            .next(cleanupStep) // ✅ Final cleanup
+            .build();
+}
+```
+
+---
+
+This ensures all temporary files are removed **after successful invoice processing**, keeping your system clean and ready for the next run.
+
+Would you like this step to run conditionally (e.g., only if previous steps succeed)?
+
+
