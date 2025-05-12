@@ -1,166 +1,73 @@
-Absolutely — here’s the **complete code setup** for your two-step Spring Batch job:
+Great — a `Tasklet` is the perfect fit when you want to perform **imperative, single-purpose logic**, like fetching, decrypting, and unzipping files in sequence. Here's how you can structure it:
 
 ---
 
-## ✅ Step 1: COS Decrypt & Unzip
+## ✅ Plan
 
-### `CosStorageService.java` (placeholder for COS access)
+Create a `DecryptAndUnzipTasklet` that:
+
+1. Calls `cosService.fetchEncryptedFiles()` → returns `List<File>`
+2. Decrypts each `.zip.pgp` file → returns decrypted `.zip` files
+3. Unzips each `.zip` file into `/tmp/unzipped/` or another working directory
+
+---
+
+## ✅ 1. `CosStorageService.java` (simplified)
 
 ```java
 @Component
 public class CosStorageService {
 
-    public File download(String cosKey) throws IOException {
-        // Simulate download to /tmp
-        File file = new File("/tmp/" + Paths.get(cosKey).getFileName());
-        // TODO: Replace with actual COS SDK download
-        System.out.println("Downloaded: " + file.getAbsolutePath());
-        return file;
-    }
-
-    public void upload(File file, String targetKey) {
-        // TODO: Implement upload to COS
-        System.out.println("Uploading " + file.getName() + " to COS key: " + targetKey);
+    public List<File> fetchEncryptedFiles() {
+        // Simulate fetching encrypted files from COS to /tmp
+        return List.of(new File("/tmp/invoice-batch-1.zip.pgp"));
     }
 }
 ```
 
 ---
 
-### `CosFileReader.java`
-
-```java
-public class CosFileReader implements ItemReader<File> {
-
-    private final Iterator<String> cosKeys;
-    private final CosStorageService cosStorageService;
-
-    public CosFileReader(List<String> keys, CosStorageService service) {
-        this.cosKeys = keys.iterator();
-        this.cosStorageService = service;
-    }
-
-    @Override
-    public File read() throws Exception {
-        return cosKeys.hasNext() ? cosStorageService.download(cosKeys.next()) : null;
-    }
-}
-```
-
----
-
-### `DecryptAndUnzipProcessor.java`
-
-```java
-public class DecryptAndUnzipProcessor implements ItemProcessor<File, List<File>> {
-
-    @Override
-    public List<File> process(File encryptedFile) throws Exception {
-        // Simulated decrypt
-        File decryptedZip = new File(encryptedFile.getAbsolutePath().replace(".pgp", ""));
-        // Simulated unzip
-        File targetDir = new File("/tmp/unzipped");
-        targetDir.mkdirs();
-        // TODO: Use real PGP decryptor and unzip logic
-        System.out.println("Decrypted & unzipped: " + decryptedZip.getName());
-        return List.of(new File(targetDir, "invoice1.xml")); // Simulated result
-    }
-}
-```
-
----
-
-### `XmlFileWriter.java`
-
-```java
-public class XmlFileWriter implements ItemWriter<List<File>> {
-    @Override
-    public void write(Chunk<? extends List<File>> items) {
-        for (List<File> fileList : items) {
-            fileList.forEach(f -> System.out.println("Ready to process XML: " + f.getAbsolutePath()));
-        }
-    }
-}
-```
-
----
-
-## ✅ Step 2: XML Processing
-
-### `InvoiceReader.java`
-
-```java
-public class InvoiceReader extends MultiResourceItemReader<InvoiceType> {
-    public InvoiceReader(SingleInvoiceReader delegate) throws IOException {
-        setResources(new PathMatchingResourcePatternResolver().getResources("file:/tmp/unzipped/*.xml"));
-        setDelegate(delegate);
-    }
-}
-```
-
-### `SingleInvoiceReader.java`
-
-```java
-public class SingleInvoiceReader implements ResourceAwareItemReaderItemStream<InvoiceType> {
-
-    private Resource resource;
-    private boolean read = false;
-
-    @Override
-    public void setResource(Resource resource) {
-        this.resource = resource;
-    }
-
-    @Override
-    public InvoiceType read() throws Exception {
-        if (read) return null;
-        JAXBContext ctx = JAXBContext.newInstance("network.oxalis.peppol.ubl2.jaxb");
-        Unmarshaller unmarshaller = ctx.createUnmarshaller();
-        InvoiceType invoice = (InvoiceType) ((JAXBElement<?>) unmarshaller.unmarshal(resource.getInputStream())).getValue();
-        read = true;
-        return invoice;
-    }
-
-    @Override public void open(ExecutionContext ctx) { read = false; }
-    @Override public void update(ExecutionContext ctx) {}
-    @Override public void close() {}
-}
-```
-
----
-
-### `InvoiceProcessor.java`
+## ✅ 2. `DecryptAndUnzipTasklet.java`
 
 ```java
 @Component
-public class InvoiceProcessor implements ItemProcessor<InvoiceType, InvoiceType> {
-    @Override
-    public InvoiceType process(InvoiceType item) {
-        System.out.println("Processing invoice: " + item.getID().getValue());
-        return item;
-    }
-}
-```
-
----
-
-### `InvoiceWriter.java`
-
-```java
-@Component
-public class InvoiceWriter implements ItemWriter<InvoiceType> {
+public class DecryptAndUnzipTasklet implements Tasklet {
 
     private final CosStorageService cosService;
 
-    public InvoiceWriter(CosStorageService service) {
-        this.cosService = service;
+    public DecryptAndUnzipTasklet(CosStorageService cosService) {
+        this.cosService = cosService;
     }
 
     @Override
-    public void write(Chunk<? extends InvoiceType> items) {
-        for (InvoiceType invoice : items) {
-            File file = new File("/tmp/unzipped/" + invoice.getID().getValue() + ".xml");
-            cosService.upload(file, "processed/" + file.getName());
+    public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext) throws Exception {
+        List<File> encryptedFiles = cosService.fetchEncryptedFiles();
+        for (File encrypted : encryptedFiles) {
+            File decryptedZip = decryptFile(encrypted);
+            unzipFile(decryptedZip, Paths.get("/tmp/unzipped"));
+        }
+        return RepeatStatus.FINISHED;
+    }
+
+    private File decryptFile(File encryptedFile) throws IOException {
+        // Simulated decryption: just rename file (in real life, use BouncyCastle, etc.)
+        File decrypted = new File(encryptedFile.getAbsolutePath().replace(".pgp", ""));
+        Files.copy(encryptedFile.toPath(), decrypted.toPath(), StandardCopyOption.REPLACE_EXISTING);
+        System.out.println("Decrypted: " + decrypted.getName());
+        return decrypted;
+    }
+
+    private void unzipFile(File zipFile, Path targetDir) throws IOException {
+        targetDir.toFile().mkdirs();
+        try (ZipInputStream zis = new ZipInputStream(new FileInputStream(zipFile))) {
+            ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                File outFile = targetDir.resolve(entry.getName()).toFile();
+                try (FileOutputStream fos = new FileOutputStream(outFile)) {
+                    zis.transferTo(fos);
+                }
+                System.out.println("Extracted: " + outFile.getName());
+            }
         }
     }
 }
@@ -168,45 +75,41 @@ public class InvoiceWriter implements ItemWriter<InvoiceType> {
 
 ---
 
-## ✅ BatchConfig.java
+## ✅ 3. Add to Your Batch Config
 
 ```java
-@Configuration
-@EnableBatchProcessing
-public class BatchConfig {
+@Bean
+public Step decryptUnzipStep(JobRepository repo, PlatformTransactionManager tx,
+                              DecryptAndUnzipTasklet tasklet) {
+    return new StepBuilder("decryptUnzipStep", repo)
+            .tasklet(tasklet, tx)
+            .build();
+}
+```
 
-    @Bean
-    public Step cosStep(JobRepository repo, PlatformTransactionManager tx, CosStorageService cosService) {
-        return new StepBuilder("cosStep", repo)
-                .<File, List<File>>chunk(1, tx)
-                .reader(new CosFileReader(List.of("file1.zip.pgp"), cosService))
-                .processor(new DecryptAndUnzipProcessor())
-                .writer(new XmlFileWriter())
-                .build();
-    }
+Then chain it before your invoice step in the job:
 
-    @Bean
-    public Step invoiceStep(JobRepository repo, PlatformTransactionManager tx,
-                            InvoiceProcessor proc, InvoiceWriter writer) throws IOException {
-        SingleInvoiceReader delegate = new SingleInvoiceReader();
-        return new StepBuilder("invoiceStep", repo)
-                .<InvoiceType, InvoiceType>chunk(1, tx)
-                .reader(new InvoiceReader(delegate))
-                .processor(proc)
-                .writer(writer)
-                .build();
-    }
-
-    @Bean
-    public Job job(JobRepository repo, Step cosStep, Step invoiceStep) {
-        return new JobBuilder("cosInvoiceJob", repo)
-                .start(cosStep)
-                .next(invoiceStep)
-                .build();
-    }
+```java
+@Bean
+public Job invoiceJob(JobRepository repo, Step decryptUnzipStep, Step invoiceStep) {
+    return new JobBuilder("invoiceJob", repo)
+            .start(decryptUnzipStep)
+            .next(invoiceStep)
+            .build();
 }
 ```
 
 ---
 
-Would you like to simulate PGP decryption and unzip with test files for local testing too?
+## ✅ Result
+
+Your batch job now:
+
+1. **Fetches** `.zip.pgp` files from COS
+2. **Decrypts** them to `.zip`
+3. **Unzips** them into `/tmp/unzipped`
+4. **Then Step 2** reads & processes each XML invoice
+
+---
+
+Would you like a test tasklet runner or unit tests for this setup?
