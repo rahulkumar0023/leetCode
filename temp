@@ -355,17 +355,36 @@ Would you like this step to run conditionally (e.g., only if previous steps succ
 
 
 
-File dir = new File("/tmp/unzipped");
-File[] xmlFiles = dir.listFiles((d, name) -> name.endsWith(".xml"));
+private void unzipFile(File zipFile, Path targetDir) throws IOException {
+    // Ensure /tmp/unzipped directory exists
+    Files.createDirectories(targetDir);
 
-if (xmlFiles == null || xmlFiles.length == 0) {
-    throw new IllegalStateException("No XML files found in /tmp/unzipped.");
+    System.out.println("Unzipping: " + zipFile.getAbsolutePath());
+    System.out.println("Target directory: " + targetDir.toAbsolutePath());
+
+    try (ZipInputStream zis = new ZipInputStream(new FileInputStream(zipFile))) {
+        ZipEntry entry;
+        while ((entry = zis.getNextEntry()) != null) {
+            Path resolvedPath = targetDir.resolve(entry.getName()).normalize();
+
+            // Ensure path is not malicious (zip-slip attack)
+            if (!resolvedPath.startsWith(targetDir)) {
+                throw new IOException("Entry is outside target dir: " + entry.getName());
+            }
+
+            if (entry.isDirectory()) {
+                Files.createDirectories(resolvedPath);
+            } else {
+                Files.createDirectories(resolvedPath.getParent()); // ensure parent dir exists
+                try (OutputStream out = Files.newOutputStream(resolvedPath)) {
+                    zis.transferTo(out);
+                }
+                System.out.println("Extracted: " + resolvedPath.toAbsolutePath());
+            }
+        }
+    }
+
+    // Confirm directory exists after unzip
+    System.out.println("Final check: " + targetDir + " exists? " + Files.exists(targetDir));
 }
 
-Resource[] resources = Arrays.stream(xmlFiles)
-        .map(FileSystemResource::new)
-        .toArray(Resource[]::new);
-
-MultiResourceItemReader<InvoiceType> reader = new MultiResourceItemReader<>();
-reader.setResources(resources);
-reader.setDelegate(new SingleInvoiceReader());
