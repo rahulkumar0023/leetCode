@@ -388,3 +388,170 @@ private void unzipFile(File zipFile, Path targetDir) throws IOException {
     System.out.println("Final check: " + targetDir + " exists? " + Files.exists(targetDir));
 }
 
+
+Perfect — let’s implement **robust, clean exception handling** across your batch job in **4 total steps**.
+
+---
+
+## ✅ Step 1: Create Domain-Specific Exception Classes
+
+You’ve done this ✅. For reference:
+
+```java
+public class CosDownloadException extends RuntimeException {
+    public CosDownloadException(String message, Throwable cause) {
+        super(message, cause);
+    }
+}
+
+public class DecryptionException extends RuntimeException {
+    public DecryptionException(String message, Throwable cause) {
+        super(message, cause);
+    }
+}
+
+public class UnzipException extends RuntimeException {
+    public UnzipException(String message, Throwable cause) {
+        super(message, cause);
+    }
+}
+```
+
+---
+
+## ✅ Step 2: Update `FetchAndUnzipTasklet` to Use These
+
+Update your tasklet like this:
+
+```java
+@Slf4j
+@Component
+public class FetchAndUnzipTasklet implements Tasklet {
+
+    @Override
+    public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext) {
+        log.info("▶️ Fetch and Unzip step started");
+
+        try {
+            fetchEncryptedFiles();
+        } catch (Exception e) {
+            throw new CosDownloadException("Failed to download files from COS", e);
+        }
+
+        try {
+            decryptAndUnzip();
+        } catch (IOException e) {
+            throw new UnzipException("Failed during unzip", e);
+        } catch (Exception e) {
+            throw new DecryptionException("PGP decryption failed", e);
+        }
+
+        log.info("✅ Fetch and Unzip step completed");
+        return RepeatStatus.FINISHED;
+    }
+
+    private void fetchEncryptedFiles() {
+        // implement download from COS
+    }
+
+    private void decryptAndUnzip() {
+        // implement decryption and extraction
+    }
+}
+```
+
+This ensures each stage has clear error classification.
+
+---
+
+## ✅ Step 3: Add a `SkipPolicy` (For Fault Tolerance)
+
+Add this in your `BatchConfiguration.java`:
+
+```java
+@Bean
+public SkipPolicy customSkipPolicy() {
+    return (Throwable t, int skipCount) -> {
+        if (t instanceof DecryptionException || t instanceof CosDownloadException) {
+            log.error("❌ Critical failure (not skippable): {}", t.getMessage());
+            return false;
+        }
+
+        if (t instanceof UnzipException) {
+            log.warn("⚠️ Skipping bad zip file ({}): {}", skipCount, t.getMessage());
+            return skipCount < 3;
+        }
+
+        log.warn("⚠️ Skipping generic failure ({}): {}", skipCount, t.getMessage());
+        return skipCount < 5;
+    };
+}
+```
+
+Then apply it in your step:
+
+```java
+@Bean
+public Step invoiceStep(...) {
+    return new StepBuilder("invoiceStep", jobRepository)
+            .<InvoiceType, InvoiceType>chunk(5, transactionManager)
+            .reader(invoiceReader)
+            .writer(invoiceWriter)
+            .faultTolerant()
+            .skipPolicy(customSkipPolicy())
+            .build();
+}
+```
+
+---
+
+## ✅ Step 4: Add a `JobExecutionListener` for Logging Failures
+
+Also in `BatchConfiguration.java`:
+
+```java
+@Bean
+public JobExecutionListener jobExecutionListener() {
+    return new JobExecutionListenerSupport() {
+        @Override
+        public void afterJob(JobExecution jobExecution) {
+            if (jobExecution.getStatus() == BatchStatus.FAILED) {
+                log.error("❌ Job failed with the following exceptions:");
+                jobExecution.getAllFailureExceptions()
+                        .forEach(ex -> log.error(" - {}", ex.toString()));
+            } else {
+                log.info("✅ Job completed successfully.");
+            }
+        }
+    };
+}
+```
+
+Add this to your job definition:
+
+```java
+@Bean
+public Job invoiceJob(...) {
+    return new JobBuilder("invoiceJob", jobRepository)
+            .start(fetchAndUnzipStep())
+            .next(invoiceStep())
+            .next(cleanupStep())
+            .listener(jobExecutionListener())
+            .build();
+}
+```
+
+---
+
+## ✅ Done!
+
+Now your job has:
+
+* ✨ Clear exception types
+* 🔥 Graceful skipping or stopping
+* 📜 Log-traceable failure paths
+* 🛡️ Better resilience for partial failures
+
+Would you like to also include retry logic with backoff (`@Retryable`) for COS downloads next?
+
+
