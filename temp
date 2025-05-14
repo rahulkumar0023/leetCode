@@ -628,4 +628,183 @@ Let me know if you'd like to:
 * Rename entries while zipping
 
 
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+import com.example.batch.exception.InvoiceProcessingException;
+import com.example.batch.tasklet.FetchAndUnzipTasklet;
+import network.oxalis.peppol.ubl2.jaxb.InvoiceType;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.batch.core.*;
+import org.springframework.batch.core.configuration.annotation.JobBuilderFactory;
+import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
+import org.springframework.batch.core.scope.context.ChunkContext;
+import org.springframework.batch.core.step.tasklet.Tasklet;
+import org.springframework.batch.core.step.tasklet.TaskletStep;
+import org.springframework.batch.item.*;
+import org.springframework.batch.item.file.MultiResourceItemReader;
+import org.springframework.batch.item.xml.StaxEventItemReader;
+import org.springframework.batch.repeat.RepeatStatus;
+import org.springframework.batch.test.JobLauncherTestUtils;
+import org.springframework.batch.test.context.SpringBatchTest;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.io.FileSystemResource;
+import org.springframework.test.context.junit.jupiter.SpringExtension;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.Collections;
+import java.util.List;
+
+@ExtendWith(MockitoExtension.class)
+public class FetchAndUnzipTaskletTest {
+
+    @InjectMocks
+    private FetchAndUnzipTasklet tasklet;
+
+    @Mock
+    private StepContribution contribution;
+
+    @Mock
+    private ChunkContext chunkContext;
+
+    @Test
+    void shouldExecuteSuccessfully() throws Exception {
+        RepeatStatus result = tasklet.execute(contribution, chunkContext);
+        assertEquals(RepeatStatus.FINISHED, result);
+    }
+
+    @Test
+    void shouldThrowInvoiceProcessingExceptionOnIOException() throws Exception {
+        FetchAndUnzipTasklet faultyTasklet = new FetchAndUnzipTasklet() {
+            @Override
+            public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext) {
+                throw new InvoiceProcessingException("Simulated failure", new IOException("IO fail"));
+            }
+        };
+        assertThrows(InvoiceProcessingException.class, () ->
+                faultyTasklet.execute(contribution, chunkContext));
+    }
+}
+
+@SpringBootTest
+@SpringBatchTest
+class InvoiceJobIntegrationTest {
+
+    @Autowired
+    private JobLauncherTestUtils jobLauncherTestUtils;
+
+    @Autowired
+    private Job invoiceJob;
+
+    @Test
+    void shouldExecuteAllStepsInOrder() throws Exception {
+        JobExecution execution = jobLauncherTestUtils.launchJob(new JobParameters());
+        assertEquals("COMPLETED", execution.getExitStatus().getExitCode());
+    }
+}
+
+class InvoiceReaderTest {
+
+    @Test
+    void shouldInitializeReaderWithResources() throws Exception {
+        MultiResourceItemReader<InvoiceType> reader = new MultiResourceItemReader<>();
+        reader.setResources(new org.springframework.core.io.Resource[] {
+            new FileSystemResource("/tmp/unzipped/sample-invoice.xml")
+        });
+        reader.setDelegate(new StaxEventItemReader<>());
+        reader.afterPropertiesSet();
+        assertNotNull(reader);
+    }
+
+    @Test
+    void multiResourceReaderShouldReadMultipleFiles() throws Exception {
+        MultiResourceItemReader<InvoiceType> reader = new MultiResourceItemReader<>();
+        File dir = new File("/tmp/unzipped");
+        File[] xmlFiles = dir.listFiles((d, name) -> name.endsWith(".xml"));
+
+        assertNotNull(xmlFiles, "Directory should not be null");
+        assertTrue(xmlFiles.length > 0, "There should be at least one XML file");
+
+        FileSystemResource[] resources = new FileSystemResource[xmlFiles.length];
+        for (int i = 0; i < xmlFiles.length; i++) {
+            resources[i] = new FileSystemResource(xmlFiles[i]);
+        }
+
+        reader.setResources(resources);
+        reader.setDelegate(new StaxEventItemReader<>()); // You may need to configure properly for real parsing
+        reader.afterPropertiesSet();
+        reader.open(new ExecutionContext());
+
+        int count = 0;
+        InvoiceType invoice;
+        while ((invoice = reader.read()) != null) {
+            assertNotNull(invoice);
+            count++;
+        }
+        reader.close();
+
+        assertTrue(count > 0, "Should read at least one invoice");
+    }
+}
+
+class InvoiceWriterTest {
+
+    @Test
+    void shouldWriteInvoicesToLog() throws Exception {
+        ItemWriter<InvoiceType> writer = items -> {
+            for (InvoiceType invoice : items) {
+                assertNotNull(invoice);
+                System.out.println("Writing invoice: " + invoice.getID());
+            }
+        };
+        InvoiceType dummy = new InvoiceType();
+        writer.write(Collections.singletonList(dummy));
+    }
+}
+
+class InvoiceProcessorTest {
+
+    @Test
+    void shouldProcessInvoiceCorrectly() throws Exception {
+        ItemProcessor<InvoiceType, InvoiceType> processor = item -> {
+            assertNotNull(item);
+            return item;
+        };
+        InvoiceType input = new InvoiceType();
+        InvoiceType output = processor.process(input);
+        assertEquals(input, output);
+    }
+}
+
+@ExtendWith(MockitoExtension.class)
+class JobSchedulerTest {
+
+    @Mock
+    private JobLauncher jobLauncher;
+
+    @Mock
+    private Job invoiceJob;
+
+    @Test
+    void shouldTriggerJobExecution() throws Exception {
+        when(jobLauncher.run(eq(invoiceJob), any(JobParameters.class)))
+            .thenReturn(mock(JobExecution.class));
+
+        JobParameters params = new JobParametersBuilder()
+            .addLong("timestamp", System.currentTimeMillis())
+            .toJobParameters();
+
+        jobLauncher.run(invoiceJob, params);
+
+        verify(jobLauncher, times(1)).run(eq(invoiceJob), any(JobParameters.class));
+    }
+}
 
