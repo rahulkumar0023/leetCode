@@ -808,3 +808,71 @@ class JobSchedulerTest {
     }
 }
 
+
+package com.example.batch.config;
+
+import network.oxalis.peppol.ubl2.jaxb.InvoiceType;
+import org.junit.jupiter.api.Test;
+import org.springframework.batch.core.Job;
+import org.springframework.batch.core.Step;
+import org.springframework.batch.item.ItemProcessor;
+import org.springframework.batch.item.ItemReader;
+import org.springframework.batch.item.ItemWriter;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+@SpringBootTest
+class XMLInvoiceBatchConfigurationTest {
+
+    @Autowired
+    private Job invoiceJob;
+
+    @Autowired
+    private Step invoiceStep;
+
+    @Autowired
+    private ItemReader<InvoiceType> invoiceReader;
+
+    @Autowired
+    private ItemProcessor<InvoiceType, InvoiceType> invoiceProcessor;
+
+    @Autowired
+    private ItemWriter<InvoiceType> invoiceWriter;
+
+    @Test
+    void jobShouldBeConfiguredCorrectly() {
+        assertNotNull(invoiceJob);
+        assertEquals("invoiceJob", invoiceJob.getName());
+    }
+
+    @Test
+    void stepShouldBeConfiguredCorrectly() {
+        assertNotNull(invoiceStep);
+        assertEquals("invoiceStep", invoiceStep.getName());
+    }
+
+    @Test
+    void readerShouldBeAvailable() throws Exception {
+        assertNotNull(invoiceReader);
+        InvoiceType result = invoiceReader.read(); // null if empty
+        assertTrue(result == null || result instanceof InvoiceType);
+    }
+
+    @Test
+    void processorShouldReturnSameInvoice() throws Exception {
+        InvoiceType invoice = new InvoiceType();
+        InvoiceType result = invoiceProcessor.process(invoice);
+        assertEquals(invoice, result);
+    }
+
+    @Test
+    void writerShouldHandleSingleInvoice() throws Exception {
+        InvoiceType invoice = new InvoiceType();
+        assertDoesNotThrow(() -> invoiceWriter.write(List.of(invoice)));
+    }
+}
+
