@@ -555,3 +555,77 @@ Now your job has:
 Would you like to also include retry logic with backoff (`@Retryable`) for COS downloads next?
 
 
+Perfect — if you already have 5–6 invoice `.xml` files and just want to **zip them together** into one `.zip` file, here's a clean Java method to do that.
+
+---
+
+## ✅ Java Method to Zip Existing XML Files
+
+```java
+import java.io.*;
+import java.nio.file.*;
+import java.util.zip.*;
+
+public class ZipUtility {
+
+    public static void zipXmlFiles(Path inputDir, Path outputZipFile) throws IOException {
+        if (!Files.exists(inputDir) || !Files.isDirectory(inputDir)) {
+            throw new IllegalArgumentException("Input directory does not exist: " + inputDir);
+        }
+
+        try (FileOutputStream fos = new FileOutputStream(outputZipFile.toFile());
+             ZipOutputStream zipOut = new ZipOutputStream(fos)) {
+
+            Files.list(inputDir)
+                 .filter(file -> file.toString().endsWith(".xml"))
+                 .forEach(file -> {
+                     try (FileInputStream fis = new FileInputStream(file.toFile())) {
+                         ZipEntry zipEntry = new ZipEntry(file.getFileName().toString());
+                         zipOut.putNextEntry(zipEntry);
+                         fis.transferTo(zipOut);
+                         zipOut.closeEntry();
+                         System.out.println("✔️ Added: " + file.getFileName());
+                     } catch (IOException e) {
+                         throw new UncheckedIOException("Failed to zip: " + file, e);
+                     }
+                 });
+        }
+
+        System.out.println("✅ ZIP created at: " + outputZipFile);
+    }
+}
+```
+
+---
+
+## ✅ Example Usage:
+
+```java
+public class TestZipper {
+    public static void main(String[] args) throws IOException {
+        Path sourceDir = Paths.get("/your/path/to/xmls");
+        Path zipOutput = Paths.get("/your/output/path/invoices.zip");
+
+        ZipUtility.zipXmlFiles(sourceDir, zipOutput);
+    }
+}
+```
+
+---
+
+## 📝 Notes:
+
+* Replace `/your/path/to/xmls` with the actual directory where your XMLs are
+* All `.xml` files in that folder will be zipped
+* Files are zipped at the **root** level of the ZIP file
+
+---
+
+Let me know if you'd like to:
+
+* Encrypt the ZIP afterward (.pgp)
+* Add subfolders inside the ZIP
+* Rename entries while zipping
+
+
+
