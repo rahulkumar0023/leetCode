@@ -1204,37 +1204,54 @@ public class InvoiceWriter implements ItemWriter<InvoiceType> {
         }
     }
 }
-```
 
----
 
-### ✅ `UBLNamespacePrefixMapper.java`
+package com.example.batch.tasklet;
 
-```java
-package com.example.batch.util;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.batch.core.StepContribution;
+import org.springframework.batch.core.scope.context.ChunkContext;
+import org.springframework.batch.core.step.tasklet.Tasklet;
+import org.springframework.batch.repeat.RepeatStatus;
+import org.springframework.stereotype.Component;
 
-import com.sun.xml.bind.marshaller.NamespacePrefixMapper;
+import java.io.IOException;
+import java.nio.file.*;
 
-public class UBLNamespacePrefixMapper extends NamespacePrefixMapper {
+@Slf4j
+@Component
+public class CleanupTasklet implements Tasklet {
+
+    private static final Path[] PATHS_TO_CLEAN = {
+        Path.of("/tmp/unzipped"),
+        Path.of("/tmp/processed/xml"),
+        Path.of("/tmp/processed/pdf"),
+        Path.of("/tmp/output")
+    };
 
     @Override
-    public String getPreferredPrefix(String namespaceUri, String suggestion, boolean requirePrefix) {
-        return switch (namespaceUri) {
-            case "urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" -> "cac";
-            case "urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2" -> "cbc";
-            case "urn:oasis:names:specification:ubl:schema:xsd:Invoice-2" -> ""; // Default
-            default -> suggestion;
-        };
+    public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext) {
+        for (Path dir : PATHS_TO_CLEAN) {
+            try {
+                if (Files.exists(dir)) {
+                    Files.walk(dir)
+                        .sorted(Comparator.reverseOrder())
+                        .map(Path::toFile)
+                        .forEach(file -> {
+                            if (!file.delete()) {
+                                log.warn("⚠️ Failed to delete: {}", file.getAbsolutePath());
+                            }
+                        });
+                    log.info("🧹 Cleaned directory: {}", dir);
+                } else {
+                    log.info("✅ Skipped missing directory: {}", dir);
+                }
+            } catch (IOException e) {
+                log.error("❌ Error cleaning directory: {}", dir, e);
+            }
+        }
+        return RepeatStatus.FINISHED;
     }
 }
-```
-
----
-
-Let me know if you'd like:
-
-* Help writing a unit test for this writer
-* To generate multiple invoice examples for validation
-* Help with ZIP + PGP + COS tests
 
 
