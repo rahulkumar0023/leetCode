@@ -1101,15 +1101,140 @@ public void uploadFileToBucket(String key, File file) {
 }
 ```
 
+Here's the ✅ full and updated version of your `InvoiceWriter` using:
+
+* `JAXBContext.newInstance("...")`
+* A custom `NamespacePrefixMapper` (`UBLNamespacePrefixMapper`)
+* Correct `org.glassfish.jaxb.namespacePrefixMapper` property key (for JAXB 4+)
+* Apache PDFBox for generating real PDFs
+
 ---
 
-## ✅ Next Steps
+### ✅ `InvoiceWriter.java`
 
-Would you like the code for:
+```java
+package com.example.batch.writer;
 
-* PGP encryption (with real public key file)?
-* Unit test for this tasklet?
+import com.example.batch.util.UBLNamespacePrefixMapper;
+import lombok.extern.slf4j.Slf4j;
+import network.oxalis.peppol.ubl2.jaxb.InvoiceType;
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.PDPage;
+import org.apache.pdfbox.pdmodel.PDPageContentStream;
+import org.apache.pdfbox.pdmodel.font.PDType1Font;
+import org.springframework.batch.item.Chunk;
+import org.springframework.batch.item.ItemWriter;
+import org.springframework.stereotype.Component;
 
-Let me know!
+import javax.xml.bind.JAXBContext;
+import javax.xml.bind.JAXBElement;
+import javax.xml.bind.Marshaller;
+import javax.xml.namespace.QName;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.UUID;
+
+@Slf4j
+@Component
+public class InvoiceWriter implements ItemWriter<InvoiceType> {
+
+    private final JAXBContext jaxbContext;
+
+    public InvoiceWriter() {
+        try {
+            this.jaxbContext = JAXBContext.newInstance("network.oxalis.peppol.ubl2.jaxb");
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to initialize JAXBContext", e);
+        }
+    }
+
+    @Override
+    public void write(Chunk<? extends InvoiceType> invoices) throws Exception {
+        Path xmlDir = Path.of("/tmp/processed/xml");
+        Path pdfDir = Path.of("/tmp/processed/pdf");
+        Files.createDirectories(xmlDir);
+        Files.createDirectories(pdfDir);
+
+        Marshaller marshaller = jaxbContext.createMarshaller();
+        marshaller.setProperty(Marshaller.JAXB_FORMATTED_OUTPUT, true);
+        marshaller.setProperty("org.glassfish.jaxb.namespacePrefixMapper", new UBLNamespacePrefixMapper());
+
+        for (InvoiceType invoice : invoices) {
+            String id = (invoice.getID() != null && invoice.getID().getValue() != null)
+                    ? invoice.getID().getValue()
+                    : UUID.randomUUID().toString();
+
+            // Write XML
+            File xmlOut = xmlDir.resolve("invoice-" + id + ".xml").toFile();
+            try (FileOutputStream fos = new FileOutputStream(xmlOut)) {
+                QName qName = new QName("urn:oasis:names:specification:ubl:schema:xsd:Invoice-2", "Invoice");
+                JAXBElement<InvoiceType> jaxbElement = new JAXBElement<>(qName, InvoiceType.class, invoice);
+                marshaller.marshal(jaxbElement, fos);
+                log.info("✅ Processed XML written: {}", xmlOut.getAbsolutePath());
+            } catch (Exception e) {
+                log.error("❌ Failed to write XML for invoice ID {}", id, e);
+            }
+
+            // Write PDF
+            File pdfOut = pdfDir.resolve("invoice-" + id + ".pdf").toFile();
+            try (PDDocument doc = new PDDocument()) {
+                PDPage page = new PDPage();
+                doc.addPage(page);
+
+                try (PDPageContentStream content = new PDPageContentStream(doc, page)) {
+                    content.beginText();
+                    content.setFont(PDType1Font.HELVETICA_BOLD, 14);
+                    content.setLeading(16f);
+                    content.newLineAtOffset(50, 700);
+
+                    content.showText("Invoice ID: " + id);
+                    content.newLine();
+                    content.showText("Generated on: " + java.time.LocalDate.now());
+                    content.endText();
+                }
+
+                doc.save(pdfOut);
+                log.info("📄 PDF generated: {}", pdfOut.getAbsolutePath());
+            } catch (IOException e) {
+                log.error("❌ Failed to generate PDF for invoice ID {}", id, e);
+            }
+        }
+    }
+}
+```
+
+---
+
+### ✅ `UBLNamespacePrefixMapper.java`
+
+```java
+package com.example.batch.util;
+
+import com.sun.xml.bind.marshaller.NamespacePrefixMapper;
+
+public class UBLNamespacePrefixMapper extends NamespacePrefixMapper {
+
+    @Override
+    public String getPreferredPrefix(String namespaceUri, String suggestion, boolean requirePrefix) {
+        return switch (namespaceUri) {
+            case "urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" -> "cac";
+            case "urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2" -> "cbc";
+            case "urn:oasis:names:specification:ubl:schema:xsd:Invoice-2" -> ""; // Default
+            default -> suggestion;
+        };
+    }
+}
+```
+
+---
+
+Let me know if you'd like:
+
+* Help writing a unit test for this writer
+* To generate multiple invoice examples for validation
+* Help with ZIP + PGP + COS tests
 
 
