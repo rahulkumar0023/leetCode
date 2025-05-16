@@ -876,3 +876,69 @@ class XMLInvoiceBatchConfigurationTest {
     }
 }
 
+
+package com.example.batch.writer;
+
+import jakarta.xml.bind.Marshaller;
+import lombok.extern.slf4j.Slf4j;
+import network.oxalis.peppol.ubl2.jaxb.InvoiceType;
+import org.springframework.batch.item.ItemWriter;
+import org.springframework.oxm.jaxb.Jaxb2Marshaller;
+import org.springframework.stereotype.Component;
+import org.springframework.util.FileSystemUtils;
+import org.springframework.xml.transform.StringResult;
+
+import javax.xml.transform.stream.StreamResult;
+import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.UUID;
+
+@Slf4j
+@Component
+public class InvoiceWriter implements ItemWriter<InvoiceType> {
+
+    private final Jaxb2Marshaller marshaller;
+
+    public InvoiceWriter() {
+        this.marshaller = new Jaxb2Marshaller();
+        this.marshaller.setClassesToBeBound(InvoiceType.class);
+        this.marshaller.afterPropertiesSet();
+    }
+
+    @Override
+    public void write(List<? extends InvoiceType> invoices) throws Exception {
+        Path xmlDir = Path.of("/tmp/processed/xml");
+        Path pdfDir = Path.of("/tmp/processed/pdf");
+        Files.createDirectories(xmlDir);
+        Files.createDirectories(pdfDir);
+
+        for (InvoiceType invoice : invoices) {
+            String id = (invoice.getID() != null && invoice.getID().getValue() != null)
+                    ? invoice.getID().getValue()
+                    : UUID.randomUUID().toString();
+
+            // Write processed XML
+            File xmlOut = xmlDir.resolve("invoice-" + id + ".xml").toFile();
+            try (FileOutputStream fos = new FileOutputStream(xmlOut)) {
+                StreamResult result = new StreamResult(fos);
+                marshaller.marshal(invoice, result);
+                log.info("✅ Processed XML written: {}", xmlOut.getAbsolutePath());
+            } catch (Exception e) {
+                log.error("❌ Failed to write XML for invoice ID {}", id, e);
+            }
+
+            // Generate simple placeholder PDF
+            File pdfOut = pdfDir.resolve("invoice-" + id + ".pdf").toFile();
+            try (FileWriter fw = new FileWriter(pdfOut)) {
+                fw.write("Invoice ID: " + id + "\n");
+                fw.write("(More invoice details here...)\n");
+                log.info("📄 PDF generated: {}", pdfOut.getAbsolutePath());
+            } catch (IOException e) {
+                log.error("❌ Failed to generate PDF for invoice ID {}", id, e);
+            }
+        }
+    }
+}
+
