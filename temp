@@ -880,21 +880,6 @@ Absolutely! Here's the complete and updated `InvoiceWriter` class using **Apache
 
 ---
 
-### ✅ Prerequisite: Add PDFBox Dependency to `pom.xml`
-
-```xml
-<dependency>
-  <groupId>org.apache.pdfbox</groupId>
-  <artifactId>pdfbox</artifactId>
-  <version>2.0.30</version>
-</dependency>
-```
-
----
-
-### ✅ Updated `InvoiceWriter.java`
-
-```java
 package com.example.batch.writer;
 
 import lombok.extern.slf4j.Slf4j;
@@ -905,10 +890,12 @@ import org.apache.pdfbox.pdmodel.PDPageContentStream;
 import org.apache.pdfbox.pdmodel.font.PDType1Font;
 import org.springframework.batch.item.Chunk;
 import org.springframework.batch.item.ItemWriter;
-import org.springframework.oxm.jaxb.Jaxb2Marshaller;
 import org.springframework.stereotype.Component;
 
-import javax.xml.transform.stream.StreamResult;
+import javax.xml.bind.JAXBContext;
+import javax.xml.bind.JAXBElement;
+import javax.xml.bind.Marshaller;
+import javax.xml.namespace.QName;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -920,12 +907,14 @@ import java.util.UUID;
 @Component
 public class InvoiceWriter implements ItemWriter<InvoiceType> {
 
-    private final Jaxb2Marshaller marshaller;
+    private final JAXBContext jaxbContext;
 
     public InvoiceWriter() {
-        this.marshaller = new Jaxb2Marshaller();
-        this.marshaller.setClassesToBeBound(InvoiceType.class);
-        this.marshaller.afterPropertiesSet();
+        try {
+            this.jaxbContext = JAXBContext.newInstance("network.oxalis.peppol.ubl2.jaxb");
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to initialize JAXBContext", e);
+        }
     }
 
     @Override
@@ -935,22 +924,26 @@ public class InvoiceWriter implements ItemWriter<InvoiceType> {
         Files.createDirectories(xmlDir);
         Files.createDirectories(pdfDir);
 
+        Marshaller marshaller = jaxbContext.createMarshaller();
+        marshaller.setProperty(Marshaller.JAXB_FORMATTED_OUTPUT, true);
+
         for (InvoiceType invoice : invoices) {
             String id = (invoice.getID() != null && invoice.getID().getValue() != null)
                     ? invoice.getID().getValue()
                     : UUID.randomUUID().toString();
 
-            // Write processed XML
+            // XML Output
             File xmlOut = xmlDir.resolve("invoice-" + id + ".xml").toFile();
             try (FileOutputStream fos = new FileOutputStream(xmlOut)) {
-                StreamResult result = new StreamResult(fos);
-                marshaller.marshal(invoice, result);
+                QName qName = new QName("urn:oasis:names:specification:ubl:schema:xsd:Invoice-2", "Invoice");
+                JAXBElement<InvoiceType> jaxbElement = new JAXBElement<>(qName, InvoiceType.class, invoice);
+                marshaller.marshal(jaxbElement, fos);
                 log.info("✅ Processed XML written: {}", xmlOut.getAbsolutePath());
             } catch (Exception e) {
                 log.error("❌ Failed to write XML for invoice ID {}", id, e);
             }
 
-            // Generate real PDF using PDFBox
+            // PDF Output
             File pdfOut = pdfDir.resolve("invoice-" + id + ".pdf").toFile();
             try (PDDocument doc = new PDDocument()) {
                 PDPage page = new PDPage();
@@ -964,10 +957,7 @@ public class InvoiceWriter implements ItemWriter<InvoiceType> {
 
                     content.showText("Invoice ID: " + id);
                     content.newLine();
-                    content.showText("This is a generated invoice PDF.");
-                    content.newLine();
-                    content.showText("Date: " + java.time.LocalDate.now());
-
+                    content.showText("Generated on: " + java.time.LocalDate.now());
                     content.endText();
                 }
 
@@ -979,16 +969,5 @@ public class InvoiceWriter implements ItemWriter<InvoiceType> {
         }
     }
 }
-```
 
----
-
-### 📁 Output
-
-* XML → `/tmp/processed/xml/invoice-<id>.xml`
-* PDF → `/tmp/processed/pdf/invoice-<id>.pdf`
-
----
-
-Let me know when you're ready to proceed to the **ZIP + PGP encryption + COS upload** step!
 
