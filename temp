@@ -970,4 +970,146 @@ public class InvoiceWriter implements ItemWriter<InvoiceType> {
     }
 }
 
+Perfect — keeping everything in a single tasklet keeps your pipeline lean and easier to manage unless you need more granular failure control.
+
+---
+
+## ✅ Zip + Encrypt + Upload Tasklet (All-in-One)
+
+We’ll now build:
+
+1. **Zips all XML and PDF files** from `/tmp/processed`
+2. **Encrypts** the `.zip` using PGP
+3. **Uploads** the `.zip.pgp` to IBM COS
+
+---
+
+## ✅ Requirements
+
+### Maven dependencies
+
+```xml
+<!-- For PGP encryption -->
+<dependency>
+  <groupId>org.bouncycastle</groupId>
+  <artifactId>bcpg-jdk18on</artifactId>
+  <version>1.77</version>
+</dependency>
+<dependency>
+  <groupId>org.bouncycastle</groupId>
+  <artifactId>bcprov-jdk18on</artifactId>
+  <version>1.77</version>
+</dependency>
+
+<!-- Add your IBM COS SDK if not already present -->
+<dependency>
+  <groupId>com.ibm.cos</groupId>
+  <artifactId>ibm-cos-java-sdk</artifactId>
+  <version>2.13.0</version>
+</dependency>
+```
+
+---
+
+## ✅ 1. `PackageAndUploadTasklet.java`
+
+```java
+@Slf4j
+@Component
+public class PackageAndUploadTasklet implements Tasklet {
+
+    private static final Path XML_DIR = Path.of("/tmp/processed/xml");
+    private static final Path PDF_DIR = Path.of("/tmp/processed/pdf");
+    private static final Path OUTPUT_DIR = Path.of("/tmp/output");
+    private static final String ZIP_NAME = "invoices.zip";
+    private static final String ENCRYPTED_NAME = ZIP_NAME + ".pgp";
+
+    private final COSService cosService;
+    private final PGPEncryptionService pgpEncryptionService;
+
+    public PackageAndUploadTasklet(COSService cosService, PGPEncryptionService pgpEncryptionService) {
+        this.cosService = cosService;
+        this.pgpEncryptionService = pgpEncryptionService;
+    }
+
+    @Override
+    public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext) throws Exception {
+        log.info("📦 Starting zip + encrypt + upload process");
+
+        Files.createDirectories(OUTPUT_DIR);
+
+        File zipFile = OUTPUT_DIR.resolve(ZIP_NAME).toFile();
+        File encryptedFile = OUTPUT_DIR.resolve(ENCRYPTED_NAME).toFile();
+
+        // Step 1: Zip XML + PDF files
+        try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(zipFile))) {
+            zipDirectory(XML_DIR, zos);
+            zipDirectory(PDF_DIR, zos);
+        }
+        log.info("✅ Created ZIP: {}", zipFile.getAbsolutePath());
+
+        // Step 2: Encrypt
+        pgpEncryptionService.encrypt(zipFile, encryptedFile);
+        log.info("🔐 Encrypted ZIP: {}", encryptedFile.getAbsolutePath());
+
+        // Step 3: Upload
+        String key = "invoices/" + ENCRYPTED_NAME;
+        cosService.uploadFileToBucket(key, encryptedFile);
+        log.info("☁️ Uploaded to COS: {}", key);
+
+        return RepeatStatus.FINISHED;
+    }
+
+    private void zipDirectory(Path dir, ZipOutputStream zos) throws IOException {
+        if (!Files.exists(dir)) return;
+
+        Files.walk(dir)
+            .filter(Files::isRegularFile)
+            .forEach(path -> {
+                try (InputStream is = Files.newInputStream(path)) {
+                    ZipEntry entry = new ZipEntry(dir.getFileName() + "/" + path.getFileName());
+                    zos.putNextEntry(entry);
+                    is.transferTo(zos);
+                    zos.closeEntry();
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            });
+    }
+}
+```
+
+---
+
+## ✅ 2. `PGPEncryptionService.java` (skeleton)
+
+Let me know if you need help writing the PGP logic with public key encryption. I can provide:
+
+* Full working PGP encryption with BouncyCastle
+* Load from `.asc` or `.gpg` public key files
+
+---
+
+## ✅ 3. COSService.java (upload logic)
+
+Assuming this is already implemented:
+
+```java
+public void uploadFileToBucket(String key, File file) {
+    PutObjectRequest request = new PutObjectRequest("your-bucket-name", key, file);
+    cosClient.putObject(request);
+}
+```
+
+---
+
+## ✅ Next Steps
+
+Would you like the code for:
+
+* PGP encryption (with real public key file)?
+* Unit test for this tasklet?
+
+Let me know!
+
 
