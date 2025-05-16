@@ -876,23 +876,44 @@ class XMLInvoiceBatchConfigurationTest {
     }
 }
 
+Absolutely! Here's the complete and updated `InvoiceWriter` class using **Apache PDFBox** for real PDF generation, alongside XML marshalling.
 
+---
+
+### ✅ Prerequisite: Add PDFBox Dependency to `pom.xml`
+
+```xml
+<dependency>
+  <groupId>org.apache.pdfbox</groupId>
+  <artifactId>pdfbox</artifactId>
+  <version>2.0.30</version>
+</dependency>
+```
+
+---
+
+### ✅ Updated `InvoiceWriter.java`
+
+```java
 package com.example.batch.writer;
 
-import jakarta.xml.bind.Marshaller;
 import lombok.extern.slf4j.Slf4j;
 import network.oxalis.peppol.ubl2.jaxb.InvoiceType;
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.PDPage;
+import org.apache.pdfbox.pdmodel.PDPageContentStream;
+import org.apache.pdfbox.pdmodel.font.PDType1Font;
+import org.springframework.batch.item.Chunk;
 import org.springframework.batch.item.ItemWriter;
 import org.springframework.oxm.jaxb.Jaxb2Marshaller;
 import org.springframework.stereotype.Component;
-import org.springframework.util.FileSystemUtils;
-import org.springframework.xml.transform.StringResult;
 
 import javax.xml.transform.stream.StreamResult;
-import java.io.*;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
 import java.util.UUID;
 
 @Slf4j
@@ -908,7 +929,7 @@ public class InvoiceWriter implements ItemWriter<InvoiceType> {
     }
 
     @Override
-    public void write(List<? extends InvoiceType> invoices) throws Exception {
+    public void write(Chunk<? extends InvoiceType> invoices) throws Exception {
         Path xmlDir = Path.of("/tmp/processed/xml");
         Path pdfDir = Path.of("/tmp/processed/pdf");
         Files.createDirectories(xmlDir);
@@ -929,11 +950,28 @@ public class InvoiceWriter implements ItemWriter<InvoiceType> {
                 log.error("❌ Failed to write XML for invoice ID {}", id, e);
             }
 
-            // Generate simple placeholder PDF
+            // Generate real PDF using PDFBox
             File pdfOut = pdfDir.resolve("invoice-" + id + ".pdf").toFile();
-            try (FileWriter fw = new FileWriter(pdfOut)) {
-                fw.write("Invoice ID: " + id + "\n");
-                fw.write("(More invoice details here...)\n");
+            try (PDDocument doc = new PDDocument()) {
+                PDPage page = new PDPage();
+                doc.addPage(page);
+
+                try (PDPageContentStream content = new PDPageContentStream(doc, page)) {
+                    content.beginText();
+                    content.setFont(PDType1Font.HELVETICA_BOLD, 14);
+                    content.setLeading(16f);
+                    content.newLineAtOffset(50, 700);
+
+                    content.showText("Invoice ID: " + id);
+                    content.newLine();
+                    content.showText("This is a generated invoice PDF.");
+                    content.newLine();
+                    content.showText("Date: " + java.time.LocalDate.now());
+
+                    content.endText();
+                }
+
+                doc.save(pdfOut);
                 log.info("📄 PDF generated: {}", pdfOut.getAbsolutePath());
             } catch (IOException e) {
                 log.error("❌ Failed to generate PDF for invoice ID {}", id, e);
@@ -941,4 +979,16 @@ public class InvoiceWriter implements ItemWriter<InvoiceType> {
         }
     }
 }
+```
+
+---
+
+### 📁 Output
+
+* XML → `/tmp/processed/xml/invoice-<id>.xml`
+* PDF → `/tmp/processed/pdf/invoice-<id>.pdf`
+
+---
+
+Let me know when you're ready to proceed to the **ZIP + PGP encryption + COS upload** step!
 
