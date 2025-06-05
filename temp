@@ -2,22 +2,40 @@
 
 INPUT_FILE="hosts.csv"
 OUTPUT_FILE="nslookup_results.csv"
+TIMEOUT_DURATION=5
 
 # Write header to output
-echo "hostname,ip_address" > "$OUTPUT_FILE"
+echo "hostname,result,details" > "$OUTPUT_FILE"
 
 # Read input file line by line (skip header)
-tail -n +2 "$INPUT_FILE" | while IFS=, read -r hostname
-do
-    echo "Looking up $hostname ..."
-    ip=$(nslookup "$hostname" 2>/dev/null | awk '/^Address: / { print $2 }' | tail -n1)
-    
-    if [ -z "$ip" ]; then
-        ip="lookup_failed"
-    fi
+tail -n +2 "$INPUT_FILE" | while IFS= read -r line || [ -n "$line" ]; do
+    # Clean up line endings and whitespace
+    hostname=$(echo "$line" | tr -d '\r' | xargs)
 
-    # Append result to output CSV
-    echo "$hostname,$ip" >> "$OUTPUT_FILE"
+    # Skip empty lines
+    [ -z "$hostname" ] && continue
+
+    echo "Looking up $hostname ..."
+
+    # Run nslookup with timeout and capture both output and error
+    output=$(timeout "$TIMEOUT_DURATION" nslookup "$hostname" 2>&1)
+    exit_code=$?
+
+    if [ $exit_code -eq 0 ]; then
+        # Try to extract the last IP address found
+        ip=$(echo "$output" | awk '/^Address: / { print $2 }' | tail -n1)
+        if [ -n "$ip" ]; then
+            echo "$hostname,success,$ip" >> "$OUTPUT_FILE"
+        else
+            echo "$hostname,fail,no_ip_found" >> "$OUTPUT_FILE"
+        fi
+    elif [ $exit_code -eq 124 ]; then
+        echo "$hostname,timeout,timed out after ${TIMEOUT_DURATION}s" >> "$OUTPUT_FILE"
+    else
+        # Replace newlines with semicolons for better CSV format
+        clean_error=$(echo "$output" | tr '\n' ';' | tr -d '\r')
+        echo "$hostname,error,\"$clean_error\"" >> "$OUTPUT_FILE"
+    fi
 done
 
 echo "Done! Results saved to $OUTPUT_FILE"
