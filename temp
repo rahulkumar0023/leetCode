@@ -1,90 +1,20 @@
-Absolutely! Here's the complete, updated solution with:
+package com.example.batch.util;
 
-✅ A configurable `InvoiceWriter`
-✅ A Spring-friendly constructor for `@Value` injection
-✅ A convenient alternate constructor for tests
-✅ A JUnit 5 test that verifies output without deploying anything
+import com.sun.xml.bind.marshaller.NamespacePrefixMapper;
 
----
-
-## ✅ 1. `InvoiceWriter.java`
-
-```java
-package com.example.batch.writer;
-
-import jakarta.xml.bind.JAXBElement;
-import lombok.extern.slf4j.Slf4j;
-import network.oxalis.peppol.ubl2.jaxb.InvoiceType;
-import org.springframework.batch.item.Chunk;
-import org.springframework.batch.item.ItemWriter;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.oxm.jaxb.Jaxb2Marshaller;
-import org.springframework.stereotype.Component;
-
-import javax.xml.namespace.QName;
-import javax.xml.transform.stream.StreamResult;
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.FileWriter;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.List;
-import java.util.UUID;
-
-@Slf4j
-@Component
-public class InvoiceWriter implements ItemWriter<InvoiceType> {
-
-    private final Path xmlDir;
-    private final Path pdfDir;
-    private final Jaxb2Marshaller marshaller;
-
-    // Spring-injected constructor
-    public InvoiceWriter(
-            @Value("${invoice.output.xml-dir:/tmp/processed/xml}") String xmlDirPath,
-            @Value("${invoice.output.pdf-dir:/tmp/processed/pdf}") String pdfDirPath
-    ) {
-        this(Path.of(xmlDirPath), Path.of(pdfDirPath));
-    }
-
-    // Alternate constructor for testing
-    public InvoiceWriter(Path xmlDir, Path pdfDir) {
-        this.xmlDir = xmlDir;
-        this.pdfDir = pdfDir;
-        this.marshaller = new Jaxb2Marshaller();
-        this.marshaller.setClassesToBeBound(InvoiceType.class);
-        this.marshaller.afterPropertiesSet();
-    }
+public class UBLNamespacePrefixMapper extends NamespacePrefixMapper {
 
     @Override
-    public void write(Chunk<? extends InvoiceType> invoices) throws Exception {
-        Files.createDirectories(xmlDir);
-        Files.createDirectories(pdfDir);
-
-        for (InvoiceType invoice : invoices) {
-            String id = (invoice.getID() != null && invoice.getID().getValue() != null)
-                    ? invoice.getID().getValue()
-                    : UUID.randomUUID().toString();
-
-            File xmlOut = xmlDir.resolve("invoice-" + id + ".xml").toFile();
-            try (FileOutputStream fos = new FileOutputStream(xmlOut)) {
-                JAXBElement<InvoiceType> jaxbElement = new JAXBElement<>(
-                        new QName("urn:oasis:names:specification:ubl:schema:xsd:Invoice-2", "Invoice"),
-                        InvoiceType.class,
-                        invoice
-                );
-                marshaller.marshal(jaxbElement, new StreamResult(fos));
-                log.info("✅ XML written: {}", xmlOut.getAbsolutePath());
-            }
-
-            File pdfOut = pdfDir.resolve("invoice-" + id + ".pdf").toFile();
-            try (FileWriter fw = new FileWriter(pdfOut)) {
-                fw.write("Invoice ID: " + id + "\n(More details...)");
-                log.info("📄 PDF generated: {}", pdfOut.getAbsolutePath());
-            }
-        }
+    public String getPreferredPrefix(String namespaceUri, String suggestion, boolean requirePrefix) {
+        return switch (namespaceUri) {
+            case "urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" -> "cac";
+            case "urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2" -> "cbc";
+            case "urn:oasis:names:specification:ubl:schema:xsd:Invoice-2" -> ""; // Default namespace
+            default -> suggestion; // fallback
+        };
     }
 }
+
 ```
 
 ---
