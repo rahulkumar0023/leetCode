@@ -116,58 +116,44 @@ Let me know if you're using **Jakarta JAXB 4.0+**, and I’ll adjust the mapper 
 
 ---
 
-## ✅ 2. `InvoiceWriterTest.java`
-
-```java
 package com.example.batch.writer;
 
-import network.oxalis.peppol.ubl2.jaxb.IDType;
+import jakarta.xml.bind.JAXBContext;
+import jakarta.xml.bind.Unmarshaller;
 import network.oxalis.peppol.ubl2.jaxb.InvoiceType;
-import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.Test;
 import org.springframework.batch.item.Chunk;
 
-import java.io.File;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class InvoiceWriterTest {
 
-    private Path xmlDir;
-    private Path pdfDir;
-    private InvoiceWriter writer;
-
-    @BeforeEach
-    void setup() throws Exception {
-        xmlDir = Files.createTempDirectory("test-xml");
-        pdfDir = Files.createTempDirectory("test-pdf");
-        writer = new InvoiceWriter(xmlDir, pdfDir);
-    }
-
-    @AfterEach
-    void cleanup() throws Exception {
-        Files.walk(xmlDir).map(Path::toFile).forEach(File::delete);
-        Files.walk(pdfDir).map(Path::toFile).forEach(File::delete);
-    }
-
     @Test
-    void shouldGenerateXmlAndPdfFiles() throws Exception {
-        InvoiceType invoice = new InvoiceType();
-        IDType id = new IDType();
-        id.setValue("TEST-123");
-        invoice.setID(id);
+    void testWriteWithSampleInvoice() throws Exception {
+        // Load sample invoice XML from test resources
+        InputStream is = getClass().getResourceAsStream("/sample-invoice.xml");
+        JAXBContext context = JAXBContext.newInstance(InvoiceType.class);
+        Unmarshaller unmarshaller = context.createUnmarshaller();
+        InvoiceType invoice = (InvoiceType) unmarshaller.unmarshal(is);
 
-        writer.write(new Chunk<>(List.of(invoice)));
+        // Set temp output dirs
+        Path tempXmlDir = Files.createTempDirectory("test-xml");
+        Path tempPdfDir = Files.createTempDirectory("test-pdf");
 
-        Path expectedXml = xmlDir.resolve("invoice-TEST-123.xml");
-        Path expectedPdf = pdfDir.resolve("invoice-TEST-123.pdf");
+        InvoiceWriter writer = new InvoiceWriter(tempXmlDir.toString(), tempPdfDir.toString());
+        writer.write(Chunk.of(invoice));
 
-        assertTrue(Files.exists(expectedXml), "XML file should exist");
-        assertTrue(Files.exists(expectedPdf), "PDF file should exist");
+        // Verify output files
+        assertTrue(Files.list(tempXmlDir).findFirst().isPresent(), "XML file should be created");
+        assertTrue(Files.list(tempPdfDir).findFirst().isPresent(), "PDF file should be created");
     }
 }
+
 ```
 
 ---
