@@ -1,3 +1,12 @@
+You're right! To maintain proper prefixes like `cac`, `cbc` instead of `ns2`, `ns3`, we need to register a custom **`NamespacePrefixMapper`** with the marshaller.
+
+Here's the updated full code with `UBLNamespacePrefixMapper` integrated. This assumes you're using **Glassfish JAXB runtime**, which supports `com.sun.xml.bind.marshaller.NamespacePrefixMapper`.
+
+---
+
+## ✅ `UBLNamespacePrefixMapper.java`
+
+```java
 package com.example.batch.util;
 
 import com.sun.xml.bind.marshaller.NamespacePrefixMapper;
@@ -14,6 +23,103 @@ public class UBLNamespacePrefixMapper extends NamespacePrefixMapper {
         };
     }
 }
+```
+
+---
+
+## ✅ Updated `InvoiceWriter.java` (with namespace support)
+
+```java
+package com.example.batch.writer;
+
+import com.example.batch.util.UBLNamespacePrefixMapper;
+import jakarta.xml.bind.JAXBElement;
+import lombok.extern.slf4j.Slf4j;
+import network.oxalis.peppol.ubl2.jaxb.InvoiceType;
+import org.springframework.batch.item.Chunk;
+import org.springframework.batch.item.ItemWriter;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.oxm.jaxb.Jaxb2Marshaller;
+import org.springframework.stereotype.Component;
+
+import javax.xml.namespace.QName;
+import javax.xml.transform.stream.StreamResult;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.FileWriter;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.UUID;
+
+@Slf4j
+@Component
+public class InvoiceWriter implements ItemWriter<InvoiceType> {
+
+    private final Path xmlDir;
+    private final Path pdfDir;
+    private final Jaxb2Marshaller marshaller;
+
+    public InvoiceWriter(
+            @Value("${invoice.output.xml-dir:/tmp/processed/xml}") String xmlDirPath,
+            @Value("${invoice.output.pdf-dir:/tmp/processed/pdf}") String pdfDirPath
+    ) {
+        this(Path.of(xmlDirPath), Path.of(pdfDirPath));
+    }
+
+    // For test injection
+    public InvoiceWriter(Path xmlDir, Path pdfDir) {
+        this.xmlDir = xmlDir;
+        this.pdfDir = pdfDir;
+        this.marshaller = new Jaxb2Marshaller();
+        this.marshaller.setClassesToBeBound(InvoiceType.class);
+        this.marshaller.afterPropertiesSet();
+
+        // Set custom namespace prefix mapper
+        this.marshaller.setMarshallerProperties(
+                java.util.Map.of(
+                        com.sun.xml.bind.marshaller.NamespacePrefixMapper.class.getName(),
+                        new UBLNamespacePrefixMapper()
+                )
+        );
+    }
+
+    @Override
+    public void write(Chunk<? extends InvoiceType> invoices) throws Exception {
+        Files.createDirectories(xmlDir);
+        Files.createDirectories(pdfDir);
+
+        for (InvoiceType invoice : invoices) {
+            String id = (invoice.getID() != null && invoice.getID().getValue() != null)
+                    ? invoice.getID().getValue()
+                    : UUID.randomUUID().toString();
+
+            File xmlOut = xmlDir.resolve("invoice-" + id + ".xml").toFile();
+            try (FileOutputStream fos = new FileOutputStream(xmlOut)) {
+                JAXBElement<InvoiceType> jaxbElement = new JAXBElement<>(
+                        new QName("urn:oasis:names:specification:ubl:schema:xsd:Invoice-2", "Invoice"),
+                        InvoiceType.class,
+                        invoice
+                );
+                marshaller.marshal(jaxbElement, new StreamResult(fos));
+                log.info("✅ XML written: {}", xmlOut.getAbsolutePath());
+            }
+
+            File pdfOut = pdfDir.resolve("invoice-" + id + ".pdf").toFile();
+            try (FileWriter fw = new FileWriter(pdfOut)) {
+                fw.write("Invoice ID: " + id + "\n(More details...)");
+                log.info("📄 PDF generated: {}", pdfOut.getAbsolutePath());
+            }
+        }
+    }
+}
+```
+
+---
+
+✅ This should eliminate the extra `xmlns:nsX` noise and give you only `cac`, `cbc`, and the default namespace at the root.
+
+Let me know if you're using **Jakarta JAXB 4.0+**, and I’ll adjust the mapper accordingly using `jakarta.xml.bind.annotation.XmlNs`.
 
 ```
 
