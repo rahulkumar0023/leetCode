@@ -25,31 +25,26 @@ public class UBLNamespacePrefixMapper extends NamespacePrefixMapper {
 }
 ```
 
----
-
-## ✅ Updated `InvoiceWriter.java` (with namespace support)
-
-```java
 package com.example.batch.writer;
 
 import com.example.batch.util.UBLNamespacePrefixMapper;
+import jakarta.xml.bind.JAXBContext;
 import jakarta.xml.bind.JAXBElement;
+import jakarta.xml.bind.Marshaller;
 import lombok.extern.slf4j.Slf4j;
 import network.oxalis.peppol.ubl2.jaxb.InvoiceType;
 import org.springframework.batch.item.Chunk;
 import org.springframework.batch.item.ItemWriter;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.oxm.jaxb.Jaxb2Marshaller;
 import org.springframework.stereotype.Component;
 
 import javax.xml.namespace.QName;
-import javax.xml.transform.stream.StreamResult;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.FileWriter;
+import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
 import java.util.UUID;
 
 @Slf4j
@@ -58,30 +53,13 @@ public class InvoiceWriter implements ItemWriter<InvoiceType> {
 
     private final Path xmlDir;
     private final Path pdfDir;
-    private final Jaxb2Marshaller marshaller;
 
     public InvoiceWriter(
             @Value("${invoice.output.xml-dir:/tmp/processed/xml}") String xmlDirPath,
             @Value("${invoice.output.pdf-dir:/tmp/processed/pdf}") String pdfDirPath
     ) {
-        this(Path.of(xmlDirPath), Path.of(pdfDirPath));
-    }
-
-    // For test injection
-    public InvoiceWriter(Path xmlDir, Path pdfDir) {
-        this.xmlDir = xmlDir;
-        this.pdfDir = pdfDir;
-        this.marshaller = new Jaxb2Marshaller();
-        this.marshaller.setClassesToBeBound(InvoiceType.class);
-        this.marshaller.afterPropertiesSet();
-
-        // Set custom namespace prefix mapper
-        this.marshaller.setMarshallerProperties(
-                java.util.Map.of(
-                        com.sun.xml.bind.marshaller.NamespacePrefixMapper.class.getName(),
-                        new UBLNamespacePrefixMapper()
-                )
-        );
+        this.xmlDir = Path.of(xmlDirPath);
+        this.pdfDir = Path.of(pdfDirPath);
     }
 
     @Override
@@ -89,30 +67,43 @@ public class InvoiceWriter implements ItemWriter<InvoiceType> {
         Files.createDirectories(xmlDir);
         Files.createDirectories(pdfDir);
 
+        JAXBContext context = JAXBContext.newInstance(InvoiceType.class);
+        Marshaller marshaller = context.createMarshaller();
+        marshaller.setProperty(Marshaller.JAXB_FORMATTED_OUTPUT, true);
+        marshaller.setProperty("com.sun.xml.bind.namespacePrefixMapper", new UBLNamespacePrefixMapper());
+
         for (InvoiceType invoice : invoices) {
             String id = (invoice.getID() != null && invoice.getID().getValue() != null)
                     ? invoice.getID().getValue()
                     : UUID.randomUUID().toString();
 
+            // Write XML
             File xmlOut = xmlDir.resolve("invoice-" + id + ".xml").toFile();
-            try (FileOutputStream fos = new FileOutputStream(xmlOut)) {
-                JAXBElement<InvoiceType> jaxbElement = new JAXBElement<>(
-                        new QName("urn:oasis:names:specification:ubl:schema:xsd:Invoice-2", "Invoice"),
-                        InvoiceType.class,
-                        invoice
-                );
-                marshaller.marshal(jaxbElement, new StreamResult(fos));
+            JAXBElement<InvoiceType> jaxbElement = new JAXBElement<>(
+                    new QName("urn:oasis:names:specification:ubl:schema:xsd:Invoice-2", "Invoice"),
+                    InvoiceType.class,
+                    invoice
+            );
+
+            try (OutputStream os = new FileOutputStream(xmlOut)) {
+                marshaller.marshal(jaxbElement, os);
                 log.info("✅ XML written: {}", xmlOut.getAbsolutePath());
+            } catch (Exception e) {
+                log.error("❌ Failed to write XML for invoice {}", id, e);
             }
 
+            // Write placeholder PDF
             File pdfOut = pdfDir.resolve("invoice-" + id + ".pdf").toFile();
             try (FileWriter fw = new FileWriter(pdfOut)) {
-                fw.write("Invoice ID: " + id + "\n(More details...)");
-                log.info("📄 PDF generated: {}", pdfOut.getAbsolutePath());
+                fw.write("Invoice ID: " + id + "\n(More invoice details here)");
+                log.info("📄 PDF written: {}", pdfOut.getAbsolutePath());
+            } catch (Exception e) {
+                log.error("❌ Failed to write PDF for invoice {}", id, e);
             }
         }
     }
 }
+
 ```
 
 ---
