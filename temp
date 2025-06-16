@@ -170,3 +170,103 @@ invoice:
 ---
 
 Would you like to assert **XML contents** too in the tests? I can help with that next.
+
+
+
+
+
+Absolutely! Here’s a clean implementation of a PDF invoice reader class (PdfInvoiceReader) along with a corresponding JUnit 5 test class.
+
+⸻
+
+✅ PdfInvoiceReader.java
+
+This reads .pdf files from a given directory pattern and returns them as Resource items:
+
+package com.example.batch.reader;
+
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.batch.item.ItemReader;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.support.ResourcePatternResolver;
+
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.List;
+
+@Slf4j
+public class PdfInvoiceReader implements ItemReader<Resource> {
+
+    private final Iterator<Resource> resourceIterator;
+
+    public PdfInvoiceReader(ResourcePatternResolver resolver, String pattern) throws IOException {
+        Resource[] resources = resolver.getResources(pattern);
+        List<Resource> resourceList = Arrays.stream(resources)
+                .filter(Resource::isReadable)
+                .toList();
+        this.resourceIterator = resourceList.iterator();
+        log.info("🔍 Found {} PDF files to process.", resourceList.size());
+    }
+
+    @Override
+    public Resource read() {
+        if (resourceIterator.hasNext()) {
+            Resource next = resourceIterator.next();
+            log.info("📄 Reading PDF file: {}", next.getFilename());
+            return next;
+        }
+        return null; // Signals end of reading
+    }
+}
+
+
+⸻
+
+✅ PdfInvoiceReaderTest.java
+
+A test that loads PDFs from src/test/resources/pdf and verifies reading:
+
+package com.example.batch.reader;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class PdfInvoiceReaderTest {
+
+    private PdfInvoiceReader reader;
+
+    @BeforeEach
+    void setUp() throws Exception {
+        PathMatchingResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
+        reader = new PdfInvoiceReader(resolver, "classpath:pdf/*.pdf");
+    }
+
+    @Test
+    void shouldReadAllPdfResources() throws Exception {
+        List<Resource> pdfs = new ArrayList<>();
+        Resource pdf;
+        while ((pdf = reader.read()) != null) {
+            assertNotNull(pdf.getFilename());
+            assertTrue(pdf.getFilename().endsWith(".pdf"));
+            pdfs.add(pdf);
+        }
+        assertFalse(pdfs.isEmpty(), "No PDFs were read from classpath.");
+    }
+}
+
+
+⸻
+
+🧪 Test Setup Notes
+	•	Place at least one sample .pdf in src/test/resources/pdf/.
+	•	The test reads all PDF files matching classpath:pdf/*.pdf.
+
+Would you also like a PDF text extractor for validation in tests?
