@@ -1,5 +1,5 @@
 You're right! To maintain proper prefixes like `cac`, `cbc` instead of `ns2`, `ns3`, we need to register a custom **`NamespacePrefixMapper`** with the marshaller.
-
+="('" & B2 & "', '" & C2 & "'),"
 Here's the updated full code with `UBLNamespacePrefixMapper` integrated. This assumes you're using **Glassfish JAXB runtime**, which supports `com.sun.xml.bind.marshaller.NamespacePrefixMapper`.
 
 ---
