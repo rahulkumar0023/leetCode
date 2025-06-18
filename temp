@@ -1,349 +1,120 @@
-Perfect — that’s the ideal scenario for a **single Spring Batch job** with multiple well-defined steps.
-
-Let’s structure this step-by-step and I’ll give you sample code for each part. Here's how your job pipeline should look:
+Perfect — here's a focused approach for **unit testing only the `PdfInvoiceReader` and `PdfInvoiceWriter`** using a sample PDF file.
 
 ---
 
-## ✅ High-Level Job Plan
+## ✅ 1. Test Setup
 
-### 🔁 **Job: `invoiceJob`**
+### 📁 Directory Structure
 
-```text
-Step 1: fetchAndUnzipStep          ← fetch from COS + decrypt + unzip
-Step 2: xmlInvoiceStep             ← reads & processes XML invoices
-Step 3: pdfInvoiceStep             ← reads & processes PDF invoices
-Step 4: zipAndUploadStep           ← zips all processed & uploads back to COS
-Step 5: cleanupStep (optional)     ← clears /tmp and logs
+```
+src
+ └─ test
+     └─ resources
+         ├─ input-pdf/
+         │   └─ sample-invoice.pdf
+         └─ output-pdf/
 ```
 
 ---
 
-## ✅ Step 1: `fetchAndUnzipStep` (Already Done)
-
-Runs a `Tasklet` to:
-
-* Fetch `.zip.pgp` from COS
-* Decrypt to `.zip`
-* Unzip `.xml` and `.pdf` into `/tmp/unzipped`
-
----
-
-## ✅ Step 2: `xmlInvoiceStep`
-
-Already built with:
-
-* `MultiResourceItemReader<InvoiceType>`
-* `InvoiceProcessor`
-* `InvoiceWriter` (writes to `/tmp/processed/xml` and `/tmp/processed/pdf`)
-
-No changes needed unless you want to generate PDFs only here.
-
----
-
-## ✅ Step 3: `pdfInvoiceStep`
-
-### 🧩 Reader: `PdfInvoiceReader`
+## ✅ 2. `PdfInvoiceReaderTest.java`
 
 ```java
-@Component
-@StepScope
-public class PdfInvoiceReader implements ItemReader<File> {
-    private final Iterator<File> pdfFiles;
-
-    public PdfInvoiceReader(@Value("#{jobParameters['inputDir']}") String inputDir) {
-        File dir = new File(inputDir != null ? inputDir : "/tmp/unzipped");
-        this.pdfFiles = Arrays.stream(dir.listFiles((d, name) -> name.endsWith(".pdf"))).iterator();
-    }
-
-    @Override
-    public File read() {
-        return pdfFiles.hasNext() ? pdfFiles.next() : null;
-    }
-}
-```
-
----
-
-### 🧩 Writer: `PdfInvoiceWriter`
-
-```java
-@Component
-public class PdfInvoiceWriter implements ItemWriter<File> {
-    @Override
-    public void write(Chunk<? extends File> items) {
-        for (File pdf : items) {
-            try {
-                Path targetDir = Path.of("/tmp/processed/pdf");
-                Files.createDirectories(targetDir);
-                Path target = targetDir.resolve(pdf.getName());
-                Files.copy(pdf.toPath(), target, StandardCopyOption.REPLACE_EXISTING);
-                log.info("📥 Copied PDF: {}", target);
-            } catch (IOException e) {
-                log.error("Failed to write PDF", e);
-            }
-        }
-    }
-}
-```
-
----
-
-### 🧩 Step Configuration
-
-```java
-@Bean
-public Step pdfInvoiceStep(JobRepository jobRepository, PlatformTransactionManager txManager,
-                           PdfInvoiceReader reader, PdfInvoiceWriter writer) {
-    return new StepBuilder("pdfInvoiceStep", jobRepository)
-            .<File, File>chunk(5, txManager)
-            .reader(reader)
-            .writer(writer)
-            .build();
-}
-```
-
----
-
-## ✅ Step 4: `zipAndUploadStep`
-
-This should:
-
-* Zip all files from `/tmp/processed`
-* Encrypt `.zip` to `.zip.pgp`
-* Upload to COS bucket
-
-You likely already have this or I can help implement it.
-
----
-
-## ✅ Full Job Definition
-
-```java
-@Bean
-public Job invoiceJob(JobRepository jobRepository,
-                      Step fetchAndUnzipStep,
-                      Step xmlInvoiceStep,
-                      Step pdfInvoiceStep,
-                      Step zipAndUploadStep) {
-
-    return new JobBuilder("invoiceJob", jobRepository)
-            .start(fetchAndUnzipStep)
-            .next(xmlInvoiceStep)
-            .next(pdfInvoiceStep)
-            .next(zipAndUploadStep)
-            .build();
-}
-```
-
----
-
-## ✅ What’s Next?
-
-Would you like help with:
-
-* 🧪 JUnit tests for `PdfInvoiceReader` & `PdfInvoiceWriter`?
-* 🔐 Encrypt & zip logic in `zipAndUploadStep`?
-* 📁 Matching PDFs to XMLs by invoice ID?
-
-Let’s build the rest cleanly — one step at a time.
-
-
-
-Great! Let’s build this cleanly.
-
----
-
-## ✅ 1. `PdfInvoiceReader` — Code + JUnit Test
-
-### 🧩 `PdfInvoiceReader.java`
-
-```java
-@Slf4j
-@Component
-@StepScope
-public class PdfInvoiceReader implements ItemReader<File> {
-
-    private Iterator<File> pdfFiles;
-
-    @Value("#{jobParameters['inputDir'] ?: '/tmp/unzipped'}")
-    public void setInputDirectory(String inputDir) {
-        File dir = new File(inputDir);
-        if (dir.exists() && dir.isDirectory()) {
-            pdfFiles = Arrays.stream(dir.listFiles((d, name) -> name.toLowerCase().endsWith(".pdf"))).iterator();
-        } else {
-            pdfFiles = Collections.emptyIterator();
-            log.warn("PDF input directory doesn't exist: {}", inputDir);
-        }
-    }
-
-    @Override
-    public File read() {
-        return (pdfFiles != null && pdfFiles.hasNext()) ? pdfFiles.next() : null;
-    }
-}
-```
-
----
-
-### 🧪 `PdfInvoiceReaderTest.java`
-
-```java
-@SpringBootTest
 @ExtendWith(SpringExtension.class)
-@ActiveProfiles("test")
 class PdfInvoiceReaderTest {
 
-    @Autowired
     private PdfInvoiceReader reader;
 
     @BeforeEach
-    void setup() throws IOException {
-        Path inputDir = Path.of("/tmp/unzipped");
-        Files.createDirectories(inputDir);
-        Files.writeString(inputDir.resolve("sample.pdf"), "Dummy PDF content");
+    void setup() {
+        reader = new PdfInvoiceReader();
+
+        // Simulate job parameter injection
+        reader.setInputDirectory("src/test/resources/input-pdf");
     }
 
     @Test
-    void shouldReadPdfFilesFromInputDir() {
+    void shouldReadPdfFileFromInputDirectory() {
         File file = reader.read();
         assertNotNull(file);
         assertTrue(file.getName().endsWith(".pdf"));
+        assertEquals("sample-invoice.pdf", file.getName());
     }
 }
 ```
 
 ---
 
-## ✅ 2. `PdfInvoiceWriter` — Code + JUnit Test
-
-### 🧩 `PdfInvoiceWriter.java`
+## ✅ 3. `PdfInvoiceWriterTest.java`
 
 ```java
-@Slf4j
-@Component
-public class PdfInvoiceWriter implements ItemWriter<File> {
-
-    private final Path outputDir = Path.of("/tmp/processed/pdf");
-
-    @Override
-    public void write(Chunk<? extends File> items) {
-        try {
-            Files.createDirectories(outputDir);
-            for (File file : items) {
-                Path target = outputDir.resolve(file.getName());
-                Files.copy(file.toPath(), target, StandardCopyOption.REPLACE_EXISTING);
-                log.info("✅ Copied PDF to: {}", target);
-            }
-        } catch (IOException e) {
-            throw new UncheckedIOException("Failed to write PDF files", e);
-        }
-    }
-}
-```
-
----
-
-### 🧪 `PdfInvoiceWriterTest.java`
-
-```java
-@SpringBootTest
 @ExtendWith(SpringExtension.class)
 class PdfInvoiceWriterTest {
 
-    @Autowired
     private PdfInvoiceWriter writer;
+    private Path outputDir;
+
+    @BeforeEach
+    void setup() throws IOException {
+        outputDir = Path.of("src/test/resources/output-pdf");
+        Files.createDirectories(outputDir);
+        writer = new PdfInvoiceWriter(outputDir);
+    }
 
     @Test
-    void shouldWritePdfFilesToOutputDir() throws IOException {
-        File tempPdf = File.createTempFile("invoice", ".pdf");
-        Files.writeString(tempPdf.toPath(), "test pdf content");
+    void shouldWritePdfToOutputDirectory() throws Exception {
+        File input = new File("src/test/resources/input-pdf/sample-invoice.pdf");
+        assertTrue(input.exists(), "Sample PDF should exist");
 
-        writer.write(new Chunk<>(List.of(tempPdf)));
+        writer.write(new Chunk<>(List.of(input)));
 
-        Path writtenFile = Path.of("/tmp/processed/pdf", tempPdf.getName());
-        assertTrue(Files.exists(writtenFile));
+        File written = outputDir.resolve(input.getName()).toFile();
+        assertTrue(written.exists(), "Written file should exist");
+    }
+
+    @AfterEach
+    void cleanup() throws IOException {
+        Files.walk(outputDir)
+             .filter(Files::isRegularFile)
+             .forEach(f -> f.toFile().delete());
     }
 }
 ```
 
 ---
 
-## ✅ 3. `zipAndUploadStep` — Zip + Encrypt Logic
+## ✅ 4. PdfInvoiceWriter Constructor
 
-### 🧩 `ZipAndUploadTasklet.java`
+Update your `PdfInvoiceWriter` class to allow path injection for testing:
 
 ```java
 @Slf4j
-@Component
-public class ZipAndUploadTasklet implements Tasklet {
+public class PdfInvoiceWriter implements ItemWriter<File> {
+
+    private final Path outputDir;
+
+    public PdfInvoiceWriter(Path outputDir) {
+        this.outputDir = outputDir;
+    }
 
     @Override
-    public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext) {
-        try {
-            Path processedDir = Path.of("/tmp/processed");
-            Path zipFile = Path.of("/tmp/final/invoices.zip");
-            Path encryptedFile = Path.of("/tmp/final/invoices.zip.pgp");
-
-            zipDirectory(processedDir, zipFile);
-            encryptZip(zipFile, encryptedFile);
-
-            uploadToCOS(encryptedFile);
-            log.info("✅ Final encrypted file uploaded to COS");
-
-        } catch (Exception e) {
-            log.error("❌ Failed to zip/encrypt/upload", e);
-            throw new RuntimeException("Failed in zipAndUploadStep", e);
+    public void write(Chunk<? extends File> items) throws Exception {
+        Files.createDirectories(outputDir);
+        for (File file : items) {
+            Path target = outputDir.resolve(file.getName());
+            Files.copy(file.toPath(), target, StandardCopyOption.REPLACE_EXISTING);
+            log.info("✅ Copied PDF: {}", target);
         }
-
-        return RepeatStatus.FINISHED;
-    }
-
-    private void zipDirectory(Path sourceDir, Path zipPath) throws IOException {
-        Files.createDirectories(zipPath.getParent());
-        try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(zipPath.toFile()))) {
-            Files.walk(sourceDir)
-                 .filter(Files::isRegularFile)
-                 .forEach(path -> {
-                     ZipEntry entry = new ZipEntry(sourceDir.relativize(path).toString());
-                     try (InputStream is = Files.newInputStream(path)) {
-                         zos.putNextEntry(entry);
-                         is.transferTo(zos);
-                         zos.closeEntry();
-                         log.info("📦 Added to zip: {}", path);
-                     } catch (IOException e) {
-                         throw new UncheckedIOException("Failed to zip file: " + path, e);
-                     }
-                 });
-        }
-    }
-
-    private void encryptZip(Path zipPath, Path encryptedPath) throws Exception {
-        // Placeholder logic: just rename. Replace with real OpenPGP encryption
-        Files.move(zipPath, encryptedPath, StandardCopyOption.REPLACE_EXISTING);
-        log.info("🔐 Simulated encryption complete: {}", encryptedPath);
-    }
-
-    private void uploadToCOS(Path encryptedFile) {
-        // COS client logic
-        log.info("☁️ Simulated upload to COS: {}", encryptedFile.getFileName());
     }
 }
 ```
 
 ---
 
-### 🧩 Register as Step in Batch Config
+✅ This setup:
 
-```java
-@Bean
-public Step zipAndUploadStep(JobRepository jobRepository, PlatformTransactionManager txManager,
-                             ZipAndUploadTasklet tasklet) {
-    return new StepBuilder("zipAndUploadStep", jobRepository)
-            .tasklet(tasklet, txManager)
-            .build();
-}
-```
+* Reads a real PDF from `src/test/resources/input-pdf`
+* Copies it to `output-pdf`
+* Verifies correctness and cleanliness
 
----
-
-Let me know if you’d like the real GPG encryption logic and COS client setup next.
+Let me know if you want to include PDF **content validation** too (e.g. with PDFBox).
