@@ -1,272 +1,349 @@
-You're right! To maintain proper prefixes like `cac`, `cbc` instead of `ns2`, `ns3`, we need to register a custom **`NamespacePrefixMapper`** with the marshaller.
-="('" & B2 & "', '" & C2 & "'),"
-Here's the updated full code with `UBLNamespacePrefixMapper` integrated. This assumes you're using **Glassfish JAXB runtime**, which supports `com.sun.xml.bind.marshaller.NamespacePrefixMapper`.
+Perfect — that’s the ideal scenario for a **single Spring Batch job** with multiple well-defined steps.
+
+Let’s structure this step-by-step and I’ll give you sample code for each part. Here's how your job pipeline should look:
 
 ---
 
-## ✅ `UBLNamespacePrefixMapper.java`
+## ✅ High-Level Job Plan
+
+### 🔁 **Job: `invoiceJob`**
+
+```text
+Step 1: fetchAndUnzipStep          ← fetch from COS + decrypt + unzip
+Step 2: xmlInvoiceStep             ← reads & processes XML invoices
+Step 3: pdfInvoiceStep             ← reads & processes PDF invoices
+Step 4: zipAndUploadStep           ← zips all processed & uploads back to COS
+Step 5: cleanupStep (optional)     ← clears /tmp and logs
+```
+
+---
+
+## ✅ Step 1: `fetchAndUnzipStep` (Already Done)
+
+Runs a `Tasklet` to:
+
+* Fetch `.zip.pgp` from COS
+* Decrypt to `.zip`
+* Unzip `.xml` and `.pdf` into `/tmp/unzipped`
+
+---
+
+## ✅ Step 2: `xmlInvoiceStep`
+
+Already built with:
+
+* `MultiResourceItemReader<InvoiceType>`
+* `InvoiceProcessor`
+* `InvoiceWriter` (writes to `/tmp/processed/xml` and `/tmp/processed/pdf`)
+
+No changes needed unless you want to generate PDFs only here.
+
+---
+
+## ✅ Step 3: `pdfInvoiceStep`
+
+### 🧩 Reader: `PdfInvoiceReader`
 
 ```java
-package com.example.batch.util;
+@Component
+@StepScope
+public class PdfInvoiceReader implements ItemReader<File> {
+    private final Iterator<File> pdfFiles;
 
-import com.sun.xml.bind.marshaller.NamespacePrefixMapper;
-
-public class UBLNamespacePrefixMapper extends NamespacePrefixMapper {
+    public PdfInvoiceReader(@Value("#{jobParameters['inputDir']}") String inputDir) {
+        File dir = new File(inputDir != null ? inputDir : "/tmp/unzipped");
+        this.pdfFiles = Arrays.stream(dir.listFiles((d, name) -> name.endsWith(".pdf"))).iterator();
+    }
 
     @Override
-    public String getPreferredPrefix(String namespaceUri, String suggestion, boolean requirePrefix) {
-        return switch (namespaceUri) {
-            case "urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" -> "cac";
-            case "urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2" -> "cbc";
-            case "urn:oasis:names:specification:ubl:schema:xsd:Invoice-2" -> ""; // Default namespace
-            default -> suggestion; // fallback
-        };
+    public File read() {
+        return pdfFiles.hasNext() ? pdfFiles.next() : null;
     }
 }
 ```
 
-package com.example.batch.writer;
+---
 
-import com.example.batch.util.UBLNamespacePrefixMapper;
-import jakarta.xml.bind.JAXBContext;
-import jakarta.xml.bind.JAXBElement;
-import jakarta.xml.bind.Marshaller;
-import lombok.extern.slf4j.Slf4j;
-import network.oxalis.peppol.ubl2.jaxb.InvoiceType;
-import org.springframework.batch.item.Chunk;
-import org.springframework.batch.item.ItemWriter;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Component;
+### 🧩 Writer: `PdfInvoiceWriter`
 
-import javax.xml.namespace.QName;
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.FileWriter;
-import java.io.OutputStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.UUID;
+```java
+@Component
+public class PdfInvoiceWriter implements ItemWriter<File> {
+    @Override
+    public void write(Chunk<? extends File> items) {
+        for (File pdf : items) {
+            try {
+                Path targetDir = Path.of("/tmp/processed/pdf");
+                Files.createDirectories(targetDir);
+                Path target = targetDir.resolve(pdf.getName());
+                Files.copy(pdf.toPath(), target, StandardCopyOption.REPLACE_EXISTING);
+                log.info("📥 Copied PDF: {}", target);
+            } catch (IOException e) {
+                log.error("Failed to write PDF", e);
+            }
+        }
+    }
+}
+```
 
+---
+
+### 🧩 Step Configuration
+
+```java
+@Bean
+public Step pdfInvoiceStep(JobRepository jobRepository, PlatformTransactionManager txManager,
+                           PdfInvoiceReader reader, PdfInvoiceWriter writer) {
+    return new StepBuilder("pdfInvoiceStep", jobRepository)
+            .<File, File>chunk(5, txManager)
+            .reader(reader)
+            .writer(writer)
+            .build();
+}
+```
+
+---
+
+## ✅ Step 4: `zipAndUploadStep`
+
+This should:
+
+* Zip all files from `/tmp/processed`
+* Encrypt `.zip` to `.zip.pgp`
+* Upload to COS bucket
+
+You likely already have this or I can help implement it.
+
+---
+
+## ✅ Full Job Definition
+
+```java
+@Bean
+public Job invoiceJob(JobRepository jobRepository,
+                      Step fetchAndUnzipStep,
+                      Step xmlInvoiceStep,
+                      Step pdfInvoiceStep,
+                      Step zipAndUploadStep) {
+
+    return new JobBuilder("invoiceJob", jobRepository)
+            .start(fetchAndUnzipStep)
+            .next(xmlInvoiceStep)
+            .next(pdfInvoiceStep)
+            .next(zipAndUploadStep)
+            .build();
+}
+```
+
+---
+
+## ✅ What’s Next?
+
+Would you like help with:
+
+* 🧪 JUnit tests for `PdfInvoiceReader` & `PdfInvoiceWriter`?
+* 🔐 Encrypt & zip logic in `zipAndUploadStep`?
+* 📁 Matching PDFs to XMLs by invoice ID?
+
+Let’s build the rest cleanly — one step at a time.
+
+
+
+Great! Let’s build this cleanly.
+
+---
+
+## ✅ 1. `PdfInvoiceReader` — Code + JUnit Test
+
+### 🧩 `PdfInvoiceReader.java`
+
+```java
 @Slf4j
 @Component
-public class InvoiceWriter implements ItemWriter<InvoiceType> {
+@StepScope
+public class PdfInvoiceReader implements ItemReader<File> {
 
-    private final Path xmlDir;
-    private final Path pdfDir;
+    private Iterator<File> pdfFiles;
 
-    public InvoiceWriter(
-            @Value("${invoice.output.xml-dir:/tmp/processed/xml}") String xmlDirPath,
-            @Value("${invoice.output.pdf-dir:/tmp/processed/pdf}") String pdfDirPath
-    ) {
-        this.xmlDir = Path.of(xmlDirPath);
-        this.pdfDir = Path.of(pdfDirPath);
+    @Value("#{jobParameters['inputDir'] ?: '/tmp/unzipped'}")
+    public void setInputDirectory(String inputDir) {
+        File dir = new File(inputDir);
+        if (dir.exists() && dir.isDirectory()) {
+            pdfFiles = Arrays.stream(dir.listFiles((d, name) -> name.toLowerCase().endsWith(".pdf"))).iterator();
+        } else {
+            pdfFiles = Collections.emptyIterator();
+            log.warn("PDF input directory doesn't exist: {}", inputDir);
+        }
     }
 
     @Override
-    public void write(Chunk<? extends InvoiceType> invoices) throws Exception {
-        Files.createDirectories(xmlDir);
-        Files.createDirectories(pdfDir);
-
-        JAXBContext context = JAXBContext.newInstance(InvoiceType.class);
-        Marshaller marshaller = context.createMarshaller();
-        marshaller.setProperty(Marshaller.JAXB_FORMATTED_OUTPUT, true);
-        marshaller.setProperty("com.sun.xml.bind.namespacePrefixMapper", new UBLNamespacePrefixMapper());
-
-        for (InvoiceType invoice : invoices) {
-            String id = (invoice.getID() != null && invoice.getID().getValue() != null)
-                    ? invoice.getID().getValue()
-                    : UUID.randomUUID().toString();
-
-            // Write XML
-            File xmlOut = xmlDir.resolve("invoice-" + id + ".xml").toFile();
-            JAXBElement<InvoiceType> jaxbElement = new JAXBElement<>(
-                    new QName("urn:oasis:names:specification:ubl:schema:xsd:Invoice-2", "Invoice"),
-                    InvoiceType.class,
-                    invoice
-            );
-
-            try (OutputStream os = new FileOutputStream(xmlOut)) {
-                marshaller.marshal(jaxbElement, os);
-                log.info("✅ XML written: {}", xmlOut.getAbsolutePath());
-            } catch (Exception e) {
-                log.error("❌ Failed to write XML for invoice {}", id, e);
-            }
-
-            // Write placeholder PDF
-            File pdfOut = pdfDir.resolve("invoice-" + id + ".pdf").toFile();
-            try (FileWriter fw = new FileWriter(pdfOut)) {
-                fw.write("Invoice ID: " + id + "\n(More invoice details here)");
-                log.info("📄 PDF written: {}", pdfOut.getAbsolutePath());
-            } catch (Exception e) {
-                log.error("❌ Failed to write PDF for invoice {}", id, e);
-            }
-        }
+    public File read() {
+        return (pdfFiles != null && pdfFiles.hasNext()) ? pdfFiles.next() : null;
     }
 }
-
 ```
 
 ---
 
-✅ This should eliminate the extra `xmlns:nsX` noise and give you only `cac`, `cbc`, and the default namespace at the root.
+### 🧪 `PdfInvoiceReaderTest.java`
 
-Let me know if you're using **Jakarta JAXB 4.0+**, and I’ll adjust the mapper accordingly using `jakarta.xml.bind.annotation.XmlNs`.
-
-```
-
----
-
-package com.example.batch.writer;
-
-import jakarta.xml.bind.JAXBContext;
-import jakarta.xml.bind.Unmarshaller;
-import network.oxalis.peppol.ubl2.jaxb.InvoiceType;
-import org.junit.jupiter.api.Test;
-import org.springframework.batch.item.Chunk;
-
-import java.io.InputStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.List;
-
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
-class InvoiceWriterTest {
-
-    @Test
-    void testWriteWithSampleInvoice() throws Exception {
-        // Load sample invoice XML from test resources
-        InputStream is = getClass().getResourceAsStream("/sample-invoice.xml");
-        JAXBContext context = JAXBContext.newInstance(InvoiceType.class);
-        Unmarshaller unmarshaller = context.createUnmarshaller();
-        InvoiceType invoice = (InvoiceType) unmarshaller.unmarshal(is);
-
-        // Set temp output dirs
-        Path tempXmlDir = Files.createTempDirectory("test-xml");
-        Path tempPdfDir = Files.createTempDirectory("test-pdf");
-
-        InvoiceWriter writer = new InvoiceWriter(tempXmlDir.toString(), tempPdfDir.toString());
-        writer.write(Chunk.of(invoice));
-
-        // Verify output files
-        assertTrue(Files.list(tempXmlDir).findFirst().isPresent(), "XML file should be created");
-        assertTrue(Files.list(tempPdfDir).findFirst().isPresent(), "PDF file should be created");
-    }
-}
-
-```
-
----
-
-### 🔧 Add this to `application.yml` (optional):
-
-```yaml
-invoice:
-  output:
-    xml-dir: /tmp/processed/xml
-    pdf-dir: /tmp/processed/pdf
-```
-
----
-
-Would you like to assert **XML contents** too in the tests? I can help with that next.
-
-
-
-
-
-Absolutely! Here’s a clean implementation of a PDF invoice reader class (PdfInvoiceReader) along with a corresponding JUnit 5 test class.
-
-⸻
-
-✅ PdfInvoiceReader.java
-
-This reads .pdf files from a given directory pattern and returns them as Resource items:
-
-package com.example.batch.reader;
-
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.batch.item.ItemReader;
-import org.springframework.core.io.Resource;
-import org.springframework.core.io.support.ResourcePatternResolver;
-
-import java.io.IOException;
-import java.util.Arrays;
-import java.util.Iterator;
-import java.util.List;
-
-@Slf4j
-public class PdfInvoiceReader implements ItemReader<Resource> {
-
-    private final Iterator<Resource> resourceIterator;
-
-    public PdfInvoiceReader(ResourcePatternResolver resolver, String pattern) throws IOException {
-        Resource[] resources = resolver.getResources(pattern);
-        List<Resource> resourceList = Arrays.stream(resources)
-                .filter(Resource::isReadable)
-                .toList();
-        this.resourceIterator = resourceList.iterator();
-        log.info("🔍 Found {} PDF files to process.", resourceList.size());
-    }
-
-    @Override
-    public Resource read() {
-        if (resourceIterator.hasNext()) {
-            Resource next = resourceIterator.next();
-            log.info("📄 Reading PDF file: {}", next.getFilename());
-            return next;
-        }
-        return null; // Signals end of reading
-    }
-}
-
-
-⸻
-
-✅ PdfInvoiceReaderTest.java
-
-A test that loads PDFs from src/test/resources/pdf and verifies reading:
-
-package com.example.batch.reader;
-
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.springframework.core.io.Resource;
-import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
-
-import java.util.ArrayList;
-import java.util.List;
-
-import static org.junit.jupiter.api.Assertions.*;
-
+```java
+@SpringBootTest
+@ExtendWith(SpringExtension.class)
+@ActiveProfiles("test")
 class PdfInvoiceReaderTest {
 
+    @Autowired
     private PdfInvoiceReader reader;
 
     @BeforeEach
-    void setUp() throws Exception {
-        PathMatchingResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
-        reader = new PdfInvoiceReader(resolver, "classpath:pdf/*.pdf");
+    void setup() throws IOException {
+        Path inputDir = Path.of("/tmp/unzipped");
+        Files.createDirectories(inputDir);
+        Files.writeString(inputDir.resolve("sample.pdf"), "Dummy PDF content");
     }
 
     @Test
-    void shouldReadAllPdfResources() throws Exception {
-        List<Resource> pdfs = new ArrayList<>();
-        Resource pdf;
-        while ((pdf = reader.read()) != null) {
-            assertNotNull(pdf.getFilename());
-            assertTrue(pdf.getFilename().endsWith(".pdf"));
-            pdfs.add(pdf);
-        }
-        assertFalse(pdfs.isEmpty(), "No PDFs were read from classpath.");
+    void shouldReadPdfFilesFromInputDir() {
+        File file = reader.read();
+        assertNotNull(file);
+        assertTrue(file.getName().endsWith(".pdf"));
     }
 }
+```
 
+---
 
-⸻
+## ✅ 2. `PdfInvoiceWriter` — Code + JUnit Test
 
-🧪 Test Setup Notes
-	•	Place at least one sample .pdf in src/test/resources/pdf/.
-	•	The test reads all PDF files matching classpath:pdf/*.pdf.
+### 🧩 `PdfInvoiceWriter.java`
 
-Would you also like a PDF text extractor for validation in tests?
+```java
+@Slf4j
+@Component
+public class PdfInvoiceWriter implements ItemWriter<File> {
+
+    private final Path outputDir = Path.of("/tmp/processed/pdf");
+
+    @Override
+    public void write(Chunk<? extends File> items) {
+        try {
+            Files.createDirectories(outputDir);
+            for (File file : items) {
+                Path target = outputDir.resolve(file.getName());
+                Files.copy(file.toPath(), target, StandardCopyOption.REPLACE_EXISTING);
+                log.info("✅ Copied PDF to: {}", target);
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to write PDF files", e);
+        }
+    }
+}
+```
+
+---
+
+### 🧪 `PdfInvoiceWriterTest.java`
+
+```java
+@SpringBootTest
+@ExtendWith(SpringExtension.class)
+class PdfInvoiceWriterTest {
+
+    @Autowired
+    private PdfInvoiceWriter writer;
+
+    @Test
+    void shouldWritePdfFilesToOutputDir() throws IOException {
+        File tempPdf = File.createTempFile("invoice", ".pdf");
+        Files.writeString(tempPdf.toPath(), "test pdf content");
+
+        writer.write(new Chunk<>(List.of(tempPdf)));
+
+        Path writtenFile = Path.of("/tmp/processed/pdf", tempPdf.getName());
+        assertTrue(Files.exists(writtenFile));
+    }
+}
+```
+
+---
+
+## ✅ 3. `zipAndUploadStep` — Zip + Encrypt Logic
+
+### 🧩 `ZipAndUploadTasklet.java`
+
+```java
+@Slf4j
+@Component
+public class ZipAndUploadTasklet implements Tasklet {
+
+    @Override
+    public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext) {
+        try {
+            Path processedDir = Path.of("/tmp/processed");
+            Path zipFile = Path.of("/tmp/final/invoices.zip");
+            Path encryptedFile = Path.of("/tmp/final/invoices.zip.pgp");
+
+            zipDirectory(processedDir, zipFile);
+            encryptZip(zipFile, encryptedFile);
+
+            uploadToCOS(encryptedFile);
+            log.info("✅ Final encrypted file uploaded to COS");
+
+        } catch (Exception e) {
+            log.error("❌ Failed to zip/encrypt/upload", e);
+            throw new RuntimeException("Failed in zipAndUploadStep", e);
+        }
+
+        return RepeatStatus.FINISHED;
+    }
+
+    private void zipDirectory(Path sourceDir, Path zipPath) throws IOException {
+        Files.createDirectories(zipPath.getParent());
+        try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(zipPath.toFile()))) {
+            Files.walk(sourceDir)
+                 .filter(Files::isRegularFile)
+                 .forEach(path -> {
+                     ZipEntry entry = new ZipEntry(sourceDir.relativize(path).toString());
+                     try (InputStream is = Files.newInputStream(path)) {
+                         zos.putNextEntry(entry);
+                         is.transferTo(zos);
+                         zos.closeEntry();
+                         log.info("📦 Added to zip: {}", path);
+                     } catch (IOException e) {
+                         throw new UncheckedIOException("Failed to zip file: " + path, e);
+                     }
+                 });
+        }
+    }
+
+    private void encryptZip(Path zipPath, Path encryptedPath) throws Exception {
+        // Placeholder logic: just rename. Replace with real OpenPGP encryption
+        Files.move(zipPath, encryptedPath, StandardCopyOption.REPLACE_EXISTING);
+        log.info("🔐 Simulated encryption complete: {}", encryptedPath);
+    }
+
+    private void uploadToCOS(Path encryptedFile) {
+        // COS client logic
+        log.info("☁️ Simulated upload to COS: {}", encryptedFile.getFileName());
+    }
+}
+```
+
+---
+
+### 🧩 Register as Step in Batch Config
+
+```java
+@Bean
+public Step zipAndUploadStep(JobRepository jobRepository, PlatformTransactionManager txManager,
+                             ZipAndUploadTasklet tasklet) {
+    return new StepBuilder("zipAndUploadStep", jobRepository)
+            .tasklet(tasklet, txManager)
+            .build();
+}
+```
+
+---
+
+Let me know if you’d like the real GPG encryption logic and COS client setup next.
