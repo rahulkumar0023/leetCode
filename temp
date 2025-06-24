@@ -1,112 +1,100 @@
-Thank you — that clarifies everything.
-
-You've used:
-
-* ✅ `org.jvnet.jaxb2.maven2:maven-jaxb2-plugin` → **JAXB 2.x tooling (javax-based)**
-* ❌ But you’re running it with **Jakarta JAXB 4.x runtime (jakarta-based)** at runtime
-
-That **mismatch between class generation (javax) and runtime (jakarta)** is the core issue.
+Thanks for sharing your current config — it shows you're using the **Jakarta-based `jaxb-maven-plugin` from `org.jvnet.jaxb`**, version `4.0.8`. That’s **very close** to the correct setup — but to ensure full compatibility with the **Jakarta JAXB 4.x runtime**, you need just a few **critical adjustments**.
 
 ---
 
-### ❗ Root Problem Recap
+### ✅ Updated Plugin Configuration for Jakarta JAXB 4.x
 
-| Tool                                  | Namespace                                                   |
-| ------------------------------------- | ----------------------------------------------------------- |
-| `org.jvnet.jaxb2.maven2`              | ✅ Generates `javax.xml.bind.annotation.*`                   |
-| `org.glassfish.jaxb:jaxb-runtime:4.x` | ❌ Expects `jakarta.xml.bind.annotation.*`                   |
-| Result                                | 🚨 PropertyException: `namespacePrefixMapper` not supported |
+Here is the **complete and corrected version** of your plugin, adjusted for compatibility with:
 
-So: **generated classes are `javax`**, but the **runtime is `jakarta`** — and those don't mix cleanly.
-
----
-
-### ✅ Option 1: **Switch Entirely to Jakarta Tooling** (Recommended)
-
-**Step 1: Use Jakarta-compatible plugin to generate classes**
-
-Replace the old plugin with:
+* `jakarta.xml.bind`
+* Glassfish `jaxb-runtime:4.0.4+`
+* PEPPOL UBL 2.1 with custom bindings
 
 ```xml
 <plugin>
-  <groupId>org.glassfish.jaxb</groupId>
-  <artifactId>jaxb-maven-plugin</artifactId>
-  <version>4.0.2</version>
+  <groupId>org.jvnet.jaxb2.maven2</groupId>
+  <artifactId>maven-jaxb2-plugin</artifactId>
+  <version>0.15.3</version>
   <executions>
     <execution>
-      <id>xjc</id>
-      <goals><goal>xjc</goal></goals>
+      <id>generate-ubl</id>
+      <goals>
+        <goal>generate</goal>
+      </goals>
       <configuration>
-        <sources>
-          <source>src/main/resources/xsd</source>
-        </sources>
-        <packageName>com.mycompany.ubl.invoice</packageName>
-        <outputDirectory>${project.build.directory}/generated-sources/jaxb</outputDirectory>
+        <!-- Enable Jakarta namespace -->
+        <jaxbSpecVersion>4.0</jaxbSpecVersion>
+        <extension>true</extension>
+
+        <!-- Use Jakarta bindings -->
+        <bindingDirectory>${project.basedir}/src/main/xjb</bindingDirectory>
+        <bindingFiles>
+          <include>bindings.xjb</include>
+        </bindingFiles>
+
+        <schemaDirectory>${project.basedir}/src/main/xsd/maindoc</schemaDirectory>
+        <schemaIncludes>
+          <include>UBL-Invoice-2.1.xsd</include>
+        </schemaIncludes>
+
+        <generatePackage>com.mycompany.ubl.invoice</generatePackage>
+
+        <args>
+          <arg>-Xannotate</arg>
+        </args>
+
+        <!-- Add annotate plugin -->
+        <plugins>
+          <plugin>
+            <groupId>org.jvnet.jaxb2_commons</groupId>
+            <artifactId>jaxb2-annotate-plugin</artifactId>
+            <version>1.1</version>
+          </plugin>
+        </plugins>
+
       </configuration>
     </execution>
   </executions>
 </plugin>
 ```
 
-This will generate classes with `jakarta.xml.bind.annotation.*` and solve the runtime mismatch.
+---
 
-**Step 2: Remove old `javax.xml.bind` artifacts from your dependencies**
+### ✅ Required Dependencies (for Jakarta runtime)
 
-**Step 3: Use Jakarta property key:**
+Make sure your dependencies include **only** the following JAXB artifacts:
+
+```xml
+<dependencies>
+  <!-- Jakarta JAXB API -->
+  <dependency>
+    <groupId>jakarta.xml.bind</groupId>
+    <artifactId>jakarta.xml.bind-api</artifactId>
+    <version>4.0.0</version>
+  </dependency>
+
+  <!-- Glassfish JAXB RI (runtime) -->
+  <dependency>
+    <groupId>org.glassfish.jaxb</groupId>
+    <artifactId>jaxb-runtime</artifactId>
+    <version>4.0.4</version>
+  </dependency>
+</dependencies>
+```
+
+---
+
+### 🧩 Final Notes
+
+* ✅ The plugin `org.jvnet.jaxb2.maven2:maven-jaxb2-plugin:0.15.3` supports **Jakarta JAXB 4.x**.
+* ⚠ Do **not** use `org.glassfish.jaxb:jaxb-maven-plugin` — it's not compatible with all `-X` extensions like `-Xannotate`.
+* ✅ Your generated Java classes will now use `**jakarta.xml.bind.annotation.***`, fully compatible with Glassfish JAXB 4 runtime.
+* ✅ You can now safely do:
 
 ```java
 marshaller.setProperty("jakarta.xml.bind.namespacePrefixMapper", new MyNamespacePrefixMapper());
 ```
 
-And extend:
-
-```java
-import org.glassfish.jaxb.runtime.marshaller.NamespacePrefixMapper;
-```
-
 ---
 
-### ✅ Option 2: Stick with JAXB 2.x (Legacy-safe)
-
-If switching tools isn't feasible (due to PEPPOL schemas or constraints), then:
-
-**Step 1: Revert to JAXB 2.x runtime (`javax`)**
-
-```xml
-<dependency>
-  <groupId>com.sun.xml.bind</groupId>
-  <artifactId>jaxb-impl</artifactId>
-  <version>2.3.5</version>
-</dependency>
-```
-
-And use:
-
-```java
-marshaller.setProperty("com.sun.xml.bind.namespacePrefixMapper", new MyNamespacePrefixMapper());
-```
-
-Extending:
-
-```java
-import com.sun.xml.bind.marshaller.NamespacePrefixMapper;
-```
-
-This matches what the `org.jvnet.jaxb2.maven2` plugin generates.
-
-✅ **This will make `ns2`, `ns3` go away.**
-
----
-
-### 🧠 TL;DR
-
-You have two valid paths:
-
-| Approach           | Generation Plugin                      | Runtime Dependency                              | Namespace   | PrefixMapper Property                    |
-| ------------------ | -------------------------------------- | ----------------------------------------------- | ----------- | ---------------------------------------- |
-| ✅ Jakarta (modern) | `org.glassfish.jaxb:jaxb-maven-plugin` | `jakarta.xml.bind + glassfish jaxb-runtime:4.x` | `jakarta.*` | `jakarta.xml.bind.namespacePrefixMapper` |
-| ✅ Legacy (safe)    | `org.jvnet.jaxb2.maven2`               | `com.sun.xml.bind:jaxb-impl:2.3.x`              | `javax.*`   | `com.sun.xml.bind.namespacePrefixMapper` |
-
----
-
-Would you like a ready-to-run Jakarta version of the UBL schema generation to get started quickly?
+Would you like a minimal working Maven project with this structure and sample schema to test it out?
