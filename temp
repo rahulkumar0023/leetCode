@@ -1,120 +1,112 @@
-Perfect — here's a focused approach for **unit testing only the `PdfInvoiceReader` and `PdfInvoiceWriter`** using a sample PDF file.
+Thank you — that clarifies everything.
+
+You've used:
+
+* ✅ `org.jvnet.jaxb2.maven2:maven-jaxb2-plugin` → **JAXB 2.x tooling (javax-based)**
+* ❌ But you’re running it with **Jakarta JAXB 4.x runtime (jakarta-based)** at runtime
+
+That **mismatch between class generation (javax) and runtime (jakarta)** is the core issue.
 
 ---
 
-## ✅ 1. Test Setup
+### ❗ Root Problem Recap
 
-### 📁 Directory Structure
+| Tool                                  | Namespace                                                   |
+| ------------------------------------- | ----------------------------------------------------------- |
+| `org.jvnet.jaxb2.maven2`              | ✅ Generates `javax.xml.bind.annotation.*`                   |
+| `org.glassfish.jaxb:jaxb-runtime:4.x` | ❌ Expects `jakarta.xml.bind.annotation.*`                   |
+| Result                                | 🚨 PropertyException: `namespacePrefixMapper` not supported |
 
-```
-src
- └─ test
-     └─ resources
-         ├─ input-pdf/
-         │   └─ sample-invoice.pdf
-         └─ output-pdf/
-```
+So: **generated classes are `javax`**, but the **runtime is `jakarta`** — and those don't mix cleanly.
 
 ---
 
-## ✅ 2. `PdfInvoiceReaderTest.java`
+### ✅ Option 1: **Switch Entirely to Jakarta Tooling** (Recommended)
+
+**Step 1: Use Jakarta-compatible plugin to generate classes**
+
+Replace the old plugin with:
+
+```xml
+<plugin>
+  <groupId>org.glassfish.jaxb</groupId>
+  <artifactId>jaxb-maven-plugin</artifactId>
+  <version>4.0.2</version>
+  <executions>
+    <execution>
+      <id>xjc</id>
+      <goals><goal>xjc</goal></goals>
+      <configuration>
+        <sources>
+          <source>src/main/resources/xsd</source>
+        </sources>
+        <packageName>com.mycompany.ubl.invoice</packageName>
+        <outputDirectory>${project.build.directory}/generated-sources/jaxb</outputDirectory>
+      </configuration>
+    </execution>
+  </executions>
+</plugin>
+```
+
+This will generate classes with `jakarta.xml.bind.annotation.*` and solve the runtime mismatch.
+
+**Step 2: Remove old `javax.xml.bind` artifacts from your dependencies**
+
+**Step 3: Use Jakarta property key:**
 
 ```java
-@ExtendWith(SpringExtension.class)
-class PdfInvoiceReaderTest {
-
-    private PdfInvoiceReader reader;
-
-    @BeforeEach
-    void setup() {
-        reader = new PdfInvoiceReader();
-
-        // Simulate job parameter injection
-        reader.setInputDirectory("src/test/resources/input-pdf");
-    }
-
-    @Test
-    void shouldReadPdfFileFromInputDirectory() {
-        File file = reader.read();
-        assertNotNull(file);
-        assertTrue(file.getName().endsWith(".pdf"));
-        assertEquals("sample-invoice.pdf", file.getName());
-    }
-}
+marshaller.setProperty("jakarta.xml.bind.namespacePrefixMapper", new MyNamespacePrefixMapper());
 ```
 
----
-
-## ✅ 3. `PdfInvoiceWriterTest.java`
+And extend:
 
 ```java
-@ExtendWith(SpringExtension.class)
-class PdfInvoiceWriterTest {
-
-    private PdfInvoiceWriter writer;
-    private Path outputDir;
-
-    @BeforeEach
-    void setup() throws IOException {
-        outputDir = Path.of("src/test/resources/output-pdf");
-        Files.createDirectories(outputDir);
-        writer = new PdfInvoiceWriter(outputDir);
-    }
-
-    @Test
-    void shouldWritePdfToOutputDirectory() throws Exception {
-        File input = new File("src/test/resources/input-pdf/sample-invoice.pdf");
-        assertTrue(input.exists(), "Sample PDF should exist");
-
-        writer.write(new Chunk<>(List.of(input)));
-
-        File written = outputDir.resolve(input.getName()).toFile();
-        assertTrue(written.exists(), "Written file should exist");
-    }
-
-    @AfterEach
-    void cleanup() throws IOException {
-        Files.walk(outputDir)
-             .filter(Files::isRegularFile)
-             .forEach(f -> f.toFile().delete());
-    }
-}
+import org.glassfish.jaxb.runtime.marshaller.NamespacePrefixMapper;
 ```
 
 ---
 
-## ✅ 4. PdfInvoiceWriter Constructor
+### ✅ Option 2: Stick with JAXB 2.x (Legacy-safe)
 
-Update your `PdfInvoiceWriter` class to allow path injection for testing:
+If switching tools isn't feasible (due to PEPPOL schemas or constraints), then:
+
+**Step 1: Revert to JAXB 2.x runtime (`javax`)**
+
+```xml
+<dependency>
+  <groupId>com.sun.xml.bind</groupId>
+  <artifactId>jaxb-impl</artifactId>
+  <version>2.3.5</version>
+</dependency>
+```
+
+And use:
 
 ```java
-@Slf4j
-public class PdfInvoiceWriter implements ItemWriter<File> {
-
-    private final Path outputDir;
-
-    public PdfInvoiceWriter(Path outputDir) {
-        this.outputDir = outputDir;
-    }
-
-    @Override
-    public void write(Chunk<? extends File> items) throws Exception {
-        Files.createDirectories(outputDir);
-        for (File file : items) {
-            Path target = outputDir.resolve(file.getName());
-            Files.copy(file.toPath(), target, StandardCopyOption.REPLACE_EXISTING);
-            log.info("✅ Copied PDF: {}", target);
-        }
-    }
-}
+marshaller.setProperty("com.sun.xml.bind.namespacePrefixMapper", new MyNamespacePrefixMapper());
 ```
+
+Extending:
+
+```java
+import com.sun.xml.bind.marshaller.NamespacePrefixMapper;
+```
+
+This matches what the `org.jvnet.jaxb2.maven2` plugin generates.
+
+✅ **This will make `ns2`, `ns3` go away.**
 
 ---
 
-✅ This setup:
+### 🧠 TL;DR
 
-* Reads a real PDF from `src/test/resources/input-pdf`
-* Copies it to `output-pdf`
-* Verifies correctness and cleanliness
+You have two valid paths:
 
-Let me know if you want to include PDF **content validation** too (e.g. with PDFBox).
+| Approach           | Generation Plugin                      | Runtime Dependency                              | Namespace   | PrefixMapper Property                    |
+| ------------------ | -------------------------------------- | ----------------------------------------------- | ----------- | ---------------------------------------- |
+| ✅ Jakarta (modern) | `org.glassfish.jaxb:jaxb-maven-plugin` | `jakarta.xml.bind + glassfish jaxb-runtime:4.x` | `jakarta.*` | `jakarta.xml.bind.namespacePrefixMapper` |
+| ✅ Legacy (safe)    | `org.jvnet.jaxb2.maven2`               | `com.sun.xml.bind:jaxb-impl:2.3.x`              | `javax.*`   | `com.sun.xml.bind.namespacePrefixMapper` |
+
+---
+
+Would you like a ready-to-run Jakarta version of the UBL schema generation to get started quickly?
