@@ -1,3 +1,125 @@
+Here’s a complete and working Maven configuration using Jakarta JAXB 4.0.4, compatible with Java 17+, and supporting:
+	•	.xsd schemas (e.g., PEPPOL UBL)
+	•	.xjb binding files (e.g., Lombok annotations)
+	•	jakarta.xml.bind APIs
+	•	Optional @Builder, @NoArgsConstructor, etc. via Annox
+
+⸻
+
+✅ Full pom.xml JAXB Configuration
+
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.mycompany</groupId>
+  <artifactId>peppol-ubl-jaxb</artifactId>
+  <version>1.0-SNAPSHOT</version>
+  <properties>
+    <maven.compiler.source>17</maven.compiler.source>
+    <maven.compiler.target>17</maven.compiler.target>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <jakarta.jaxb.version>4.0.4</jakarta.jaxb.version>
+    <jaxb2.basics.version>1.11.1</jaxb2.basics.version>
+    <lombok.version>1.18.30</lombok.version>
+  </properties>
+
+  <dependencies>
+    <!-- JAXB Runtime (Jakarta 4.x) -->
+    <dependency>
+      <groupId>org.glassfish.jaxb</groupId>
+      <artifactId>jaxb-runtime</artifactId>
+      <version>${jakarta.jaxb.version}</version>
+    </dependency>
+
+    <!-- Annox for custom annotations via .xjb -->
+    <dependency>
+      <groupId>org.jvnet.jaxb2_commons</groupId>
+      <artifactId>jaxb2-basics-annotate</artifactId>
+      <version>${jaxb2.basics.version}</version>
+    </dependency>
+
+    <!-- Lombok (used by annox annotations) -->
+    <dependency>
+      <groupId>org.projectlombok</groupId>
+      <artifactId>lombok</artifactId>
+      <version>${lombok.version}</version>
+      <scope>provided</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <!-- JAXB Code Generation Plugin -->
+      <plugin>
+        <groupId>org.glassfish.jaxb</groupId>
+        <artifactId>jaxb-maven-plugin</artifactId>
+        <version>${jakarta.jaxb.version}</version>
+        <executions>
+          <execution>
+            <id>generate-jaxb</id>
+            <goals>
+              <goal>generate</goal>
+            </goals>
+            <configuration>
+              <extension>true</extension>
+              <schemaDirectory>src/main/xsd</schemaDirectory>
+              <bindingDirectory>src/main/xjb</bindingDirectory>
+              <schemaIncludes>
+                <include>**/*.xsd</include>
+              </schemaIncludes>
+              <bindingIncludes>
+                <include>**/*.xjb</include>
+              </bindingIncludes>
+              <clearOutputDir>false</clearOutputDir>
+              <args>
+                <arg>-Xannotate</arg>
+              </args>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- Compiler Plugin for Java 17 -->
+      <plugin>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.11.0</version>
+        <configuration>
+          <source>${maven.compiler.source}</source>
+          <target>${maven.compiler.target}</target>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+
+
+⸻
+
+✅ Folder Structure
+
+src/
+├── main/
+│   ├── xsd/
+│   │   ├── maindoc/UBL-Invoice-2.1.xsd
+│   │   └── common/*.xsd
+│   ├── xjb/
+│   │   ├── bindings-common.xjb
+│   │   └── bindings-maindoc.xjb
+
+
+⸻
+
+⚠ Notes
+	•	Ensure xsd and xjb files are present and valid.
+	•	Jakarta 4.x expects https://jakarta.ee/xml/ns/jaxb in your binding files (which you already use).
+	•	If behind a corporate proxy, configure .m2/settings.xml to resolve dependencies from Nexus/Artifactory.
+
+⸻
+
+Would you like the sample writer class next that uses MarshallerImpl or Jakarta’s Marshaller and sets namespacePrefixMapper with correct handling?
+
 <build>
   <plugins>
     <plugin>
