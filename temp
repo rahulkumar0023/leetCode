@@ -1,3 +1,88 @@
+<build>
+  <plugins>
+    <plugin>
+      <groupId>org.glassfish.jaxb</groupId>
+      <artifactId>jaxb-xjc</artifactId>
+      <version>4.0.4</version>
+      <executions>
+        <execution>
+          <id>generate-jaxb</id>
+          <goals>
+            <goal>xjc</goal>
+          </goals>
+          <configuration>
+            <sources>
+              <!-- All your main doc and common XSDs -->
+              <source>src/main/xsd/maindoc</source>
+              <source>src/main/xsd/common</source>
+            </sources>
+            <bindingFiles>
+              <bindingFile>src/main/xjb/peppol-maindoc-bindings.xjb</bindingFile>
+              <bindingFile>src/main/xjb/peppol-common-bindings.xjb</bindingFile>
+            </bindingFiles>
+            <outputDirectory>${project.build.directory}/generated-sources/jaxb</outputDirectory>
+            <extension>true</extension>
+            <args>
+              <arg>-Xannotate</arg>
+            </args>
+            <plugins>
+              <plugin>
+                <groupId>org.jvnet.jaxb2_commons</groupId>
+                <artifactId>jaxb2-basics-annotate</artifactId>
+                <version>1.1.0</version>
+              </plugin>
+            </plugins>
+          </configuration>
+        </execution>
+      </executions>
+    </plugin>
+
+    <!-- Adds generated code to compilation -->
+    <plugin>
+      <groupId>org.codehaus.mojo</groupId>
+      <artifactId>build-helper-maven-plugin</artifactId>
+      <version>3.2.0</version>
+      <executions>
+        <execution>
+          <id>add-source</id>
+          <phase>generate-sources</phase>
+          <goals>
+            <goal>add-source</goal>
+          </goals>
+          <configuration>
+            <sources>
+              <source>${project.build.directory}/generated-sources/jaxb</source>
+            </sources>
+          </configuration>
+        </execution>
+      </executions>
+    </plugin>
+  </plugins>
+</build>
+
+<dependencies>
+  <!-- Jakarta JAXB Runtime -->
+  <dependency>
+    <groupId>org.glassfish.jaxb</groupId>
+    <artifactId>jaxb-runtime</artifactId>
+    <version>4.0.4</version>
+  </dependency>
+
+  <!-- JAXB2 Basics for annox -->
+  <dependency>
+    <groupId>org.jvnet.jaxb2_commons</groupId>
+    <artifactId>jaxb2-basics-annotate</artifactId>
+    <version>1.1.0</version>
+  </dependency>
+
+  <!-- Lombok (annotation only) -->
+  <dependency>
+    <groupId>org.projectlombok</groupId>
+    <artifactId>lombok</artifactId>
+    <version>1.18.30</version>
+    <scope>provided</scope>
+  </dependency>
+</dependencies>
 Thanks for sharing your current config — it shows you're using the **Jakarta-based `jaxb-maven-plugin` from `org.jvnet.jaxb`**, version `4.0.8`. That’s **very close** to the correct setup — but to ensure full compatibility with the **Jakarta JAXB 4.x runtime**, you need just a few **critical adjustments**.
 
 ---
