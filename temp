@@ -98,3 +98,171 @@ marshaller.setProperty("jakarta.xml.bind.namespacePrefixMapper", new MyNamespace
 ---
 
 Would you like a minimal working Maven project with this structure and sample schema to test it out?
+
+Absolutely — here’s a complete working setup for generating Jakarta JAXB 4.x classes from UBL XSDs, with no legacy plugins, and full compatibility with Spring Boot 3+, Java 17+, and Jakarta EE APIs.
+
+This is the most future-proof, minimal, and stable solution as of mid-2025.
+
+⸻
+
+✅ 1. pom.xml (Essential Parts)
+
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.mycompany</groupId>
+  <artifactId>ubl-jaxb-example</artifactId>
+  <version>1.0.0</version>
+  <properties>
+    <maven.compiler.source>17</maven.compiler.source>
+    <maven.compiler.target>17</maven.compiler.target>
+  </properties>
+
+  <dependencies>
+    <!-- Jakarta JAXB API -->
+    <dependency>
+      <groupId>jakarta.xml.bind</groupId>
+      <artifactId>jakarta.xml.bind-api</artifactId>
+      <version>4.0.0</version>
+    </dependency>
+
+    <!-- Glassfish JAXB Runtime (needed at runtime and for prefix mapper) -->
+    <dependency>
+      <groupId>org.glassfish.jaxb</groupId>
+      <artifactId>jaxb-runtime</artifactId>
+      <version>4.0.4</version>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <!-- Use JAXB's own code generator -->
+      <plugin>
+        <groupId>org.glassfish.jaxb</groupId>
+        <artifactId>jaxb-xjc</artifactId>
+        <version>4.0.4</version>
+        <executions>
+          <execution>
+            <id>xjc</id>
+            <goals>
+              <goal>xjc</goal>
+            </goals>
+            <configuration>
+              <sources>
+                <source>src/main/xsd</source>
+              </sources>
+              <packageName>com.mycompany.ubl.invoice</packageName>
+              <outputDirectory>${project.build.directory}/generated-sources/jaxb</outputDirectory>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- Ensure generated sources are compiled -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.11.0</version>
+        <configuration>
+          <source>17</source>
+          <target>17</target>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+
+
+⸻
+
+✅ 2. Project Structure
+
+project-root/
+├── pom.xml
+└── src/
+    └── main/
+        └── xsd/
+            └── UBL-Invoice-2.1.xsd
+
+Add all the required PEPPOL/UBL schemas in src/main/xsd. If there are imports, make sure they are in the same directory or correctly referenced.
+
+⸻
+
+✅ 3. Java Code to Marshal (with PrefixMapper)
+
+MyNamespacePrefixMapper.java
+
+package com.mycompany.ubl.util;
+
+import org.glassfish.jaxb.runtime.marshaller.NamespacePrefixMapper;
+
+public class MyNamespacePrefixMapper extends NamespacePrefixMapper {
+    @Override
+    public String getPreferredPrefix(String namespaceUri, String suggestion, boolean requirePrefix) {
+        switch (namespaceUri) {
+            case "urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2":
+                return "cac";
+            case "urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2":
+                return "cbc";
+            case "urn:oasis:names:specification:ubl:schema:xsd:Invoice-2":
+                return ""; // default root namespace
+            default:
+                return suggestion;
+        }
+    }
+}
+
+Example Marshalling Code
+
+import com.mycompany.ubl.invoice.InvoiceType;
+
+import jakarta.xml.bind.JAXBContext;
+import jakarta.xml.bind.JAXBElement;
+import jakarta.xml.bind.Marshaller;
+import javax.xml.namespace.QName;
+
+import java.io.StringWriter;
+
+public class InvoiceMarshaller {
+    public static void main(String[] args) throws Exception {
+        InvoiceType invoice = new InvoiceType(); // fill in required fields if needed
+
+        JAXBContext context = JAXBContext.newInstance(InvoiceType.class);
+        Marshaller marshaller = context.createMarshaller();
+        marshaller.setProperty(Marshaller.JAXB_FORMATTED_OUTPUT, Boolean.TRUE);
+
+        marshaller.setProperty("jakarta.xml.bind.namespacePrefixMapper", new MyNamespacePrefixMapper());
+
+        QName qName = new QName("urn:oasis:names:specification:ubl:schema:xsd:Invoice-2", "Invoice");
+        JAXBElement<InvoiceType> root = new JAXBElement<>(qName, InvoiceType.class, invoice);
+
+        StringWriter writer = new StringWriter();
+        marshaller.marshal(root, writer);
+
+        System.out.println(writer.toString());
+    }
+}
+
+
+⸻
+
+✅ 4. After Running mvn clean compile
+
+Generated classes will be in:
+
+target/generated-sources/jaxb/com/mycompany/ubl/invoice
+
+You can import and use them in your application, and they’ll use jakarta.xml.bind.annotation.*.
+
+⸻
+
+✅ 5. Optional Improvements
+	•	Add a package-info.java to control namespaces explicitly
+	•	Add a .xjb binding file to override types or element names
+	•	Use Lombok to wrap or enhance the generated models if you need equals() or toString() safely
+
+⸻
+
+Let me know if you want this bundled into a downloadable ZIP template!
+
+
+
