@@ -1,42 +1,36 @@
 import java.io.*;
 import java.util.*;
 
-public class MapStructMappingGenerator {
+public class MapStructMappingGeneratorFull {
 
-    // Simple helper to convert a CSV header name to Java field name in camelCase
-    static String toFieldName(String header) {
-        String[] parts = header.replace("\"", "").replace(";", "").split("_");
+    static String toCamel(String s) {
+        s = s.replace("\"", "").replace(";", "");
+        String[] parts = s.split("_");
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < parts.length; i++) {
-            String s = parts[i].toLowerCase();
-            if (i > 0) s = Character.toUpperCase(s.charAt(0)) + s.substring(1);
-            sb.append(s);
+            String part = parts[i].toLowerCase();
+            if (i > 0) part = part.substring(0,1).toUpperCase() + part.substring(1);
+            sb.append(part);
         }
         return sb.toString();
     }
 
-    // Helper to create method name from header
-    static String toMethodName(String header) {
-        String field = toFieldName(header);
-        return "to" + Character.toUpperCase(field.charAt(0)) + field.substring(1);
+    static String capitalize(String s) {
+        if (s == null || s.isEmpty()) return s;
+        return Character.toUpperCase(s.charAt(0)) + s.substring(1);
     }
 
-    // Helper to create type name from header (customize this as needed)
-    static String toTypeName(String header) {
-        // Example: for ID => IDType
-        String field = toFieldName(header);
-        return Character.toUpperCase(field.charAt(0)) + field.substring(1) + "Type";
+    static String typeFor(String header) {
+        return capitalize(toCamel(header)) + "Type";
     }
 
     public static void main(String[] args) throws IOException {
-        // Input: file containing headers (one per line or separated by ;)
-        String file = "headers.txt"; // Change to your file path
+        String file = "headers.txt"; // Adjust as needed
 
         List<String> headers = new ArrayList<>();
         try (BufferedReader br = new BufferedReader(new FileReader(file))) {
             String line;
             while ((line = br.readLine()) != null) {
-                // Split by semicolon if necessary, or just add trimmed line
                 if (line.contains(";")) {
                     for (String part : line.split(";")) {
                         headers.add(part.trim().replace("\"", ""));
@@ -47,38 +41,47 @@ public class MapStructMappingGenerator {
             }
         }
 
-        // 1. Generate @Mapping lines
-        System.out.println("// === @Mapping lines ===");
+        // 1. Forward @Mapping lines
+        System.out.println("// === @Mapping lines (CsvInvoiceRecord -> InvoiceType) ===");
         for (String header : headers) {
-            String field = toFieldName(header);
-            String method = toMethodName(header);
-            System.out.printf("@Mapping(target = \"%s\", expression = \"java(%s(item.get%s()))\")%n",
-                    field, method, capitalize(field));
+            String javaField = toCamel(header);
+            String methodName = "to" + capitalize(javaField);
+            System.out.println("@Mapping(target = \"" + javaField + "\", expression = \"java(" + methodName + "(item.get" + capitalize(javaField) + "()))\")");
         }
         System.out.println();
 
-        // 2. Generate default conversion methods
-        System.out.println("// === Conversion methods ===");
+        // 2. Inverse @Mapping lines
+        System.out.println("// === @Mapping lines (InvoiceType -> CsvInvoiceRecord) ===");
         for (String header : headers) {
-            String field = toFieldName(header);
-            String type = toTypeName(header);
-            String method = toMethodName(header);
-            System.out.printf("default %s %s(String value) {%n", type, method);
+            String javaField = toCamel(header);
+            String methodName = "from" + capitalize(javaField);
+            System.out.println("@Mapping(target = \"" + javaField + "\", expression = \"java(" + methodName + "(invoice.get" + capitalize(javaField) + "()))\")");
+        }
+        System.out.println();
+
+        // 3. Default methods for forward
+        System.out.println("// === Default methods for forward ===");
+        for (String header : headers) {
+            String javaField = toCamel(header);
+            String typeName = typeFor(header);
+            String methodName = "to" + capitalize(javaField);
+            System.out.println("default " + typeName + " " + methodName + "(String value) {");
             System.out.println("    if (value == null) return null;");
-            System.out.printf("    %s t = new %s();%n", type, type);
+            System.out.println("    " + typeName + " t = new " + typeName + "();");
             System.out.println("    t.setValue(value);");
             System.out.println("    return t;");
             System.out.println("}\n");
         }
 
-        // 3. Inverse mapping
-        System.out.println("// === Inverse mapping ===");
-        System.out.println("@InheritInverseConfiguration(name = \"toInvoice\")");
-        System.out.println("CsvInvoiceRecord fromInvoice(InvoiceType invoice);");
-    }
-
-    private static String capitalize(String s) {
-        if (s == null || s.isEmpty()) return s;
-        return Character.toUpperCase(s.charAt(0)) + s.substring(1);
+        // 4. Default methods for inverse
+        System.out.println("// === Default methods for inverse ===");
+        for (String header : headers) {
+            String javaField = toCamel(header);
+            String typeName = typeFor(header);
+            String methodName = "from" + capitalize(javaField);
+            System.out.println("default String " + methodName + "(" + typeName + " t) {");
+            System.out.println("    return t != null ? t.getValue() : null;");
+            System.out.println("}\n");
+        }
     }
 }
