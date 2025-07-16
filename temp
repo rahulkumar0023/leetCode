@@ -4,16 +4,21 @@ import java.util.*;
 public class MapStructMappingGeneratorFull {
 
     static String toCamel(String s) {
-        s = s.replace("\"", "").replace(";", "");
-        String[] parts = s.split("_");
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < parts.length; i++) {
-            String part = parts[i].toLowerCase();
-            if (i > 0) part = part.substring(0,1).toUpperCase() + part.substring(1);
-            sb.append(part);
+    s = s.replace("\"", "").replace(";", "");
+    String[] parts = s.split("_");
+    StringBuilder sb = new StringBuilder();
+    for (int i = 0; i < parts.length; i++) {
+        String part = parts[i];
+        if (part.isEmpty()) continue;
+        if (i == 0) {
+            sb.append(part.substring(0, 1).toLowerCase()).append(part.substring(1));
+        } else {
+            sb.append(part.substring(0, 1).toUpperCase()).append(part.substring(1));
         }
-        return sb.toString();
     }
+    return sb.toString();
+}
+
 
     static String capitalize(String s) {
         if (s == null || s.isEmpty()) return s;
