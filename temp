@@ -1,39 +1,50 @@
-import java.nio.file.*;
 import java.util.*;
 
-public class CsvFieldGenerator {
-    public static void main(String[] args) throws Exception {
-        // Change this path to your header file path
-        List<String> lines = Files.readAllLines(Paths.get("headers.txt"));
-        
-        // If your file is CSV-like (all headers in one line, separated by ';' or ','):
-        // String headerLine = lines.get(0);
-        // String[] headers = headerLine.replace("\"", "").split(";"); // or split(",") if comma-separated
+public class CsvMapstructGenerator {
+    public static void main(String[] args) {
+        // Paste your header names here (could be read from file, shown for clarity)
+        String[] headers = {
+            "ID", "Note", "InvoiceTypeCode", "DueDate", "ProfileID", "BuyerReference"
+            // ... add your full list here
+        };
 
-        // If each header is on its own line:
-        String[] headers = lines.stream().map(h -> h.replace("\"", "").trim()).toArray(String[]::new);
-
+        // 1. Generate @Mapping lines
+        System.out.println("// === @Mapping lines ===");
         for (String header : headers) {
-            if (header.isBlank()) continue;
-            String javaField = toJavaField(header);
-            System.out.println("    @CsvBindByName(column = \"" + header + "\")");
-            System.out.println("    private String " + javaField + ";");
+            String javaField = toCamel(header);
+            String methodName = "to" + header;
+            System.out.println("@Mapping(target = \"" + javaField + "\", expression = \"java(" + methodName + "(item.get" + capitalize(javaField) + "()))\")");
+        }
+        System.out.println();
+
+        // 2. Generate conversion methods
+        System.out.println("// === Conversion methods ===");
+        for (String header : headers) {
+            String type = header + "Type"; // Example: "ID" → "IDType"
+            String methodName = "to" + header;
+            String javaField = toCamel(header);
+            System.out.println("default " + type + " " + methodName + "(String value) {");
+            System.out.println("    if (value == null) return null;");
+            System.out.println("    " + type + " t = new " + type + "();");
+            System.out.println("    t.setValue(value);");
+            System.out.println("    return t;");
+            System.out.println("}");
             System.out.println();
         }
     }
 
-    // Convert header like "BuyerReference" or "InvoicePeriod_StartDate" to "buyerReference" or "invoicePeriodStartDate"
-    private static String toJavaField(String header) {
-        // Remove invalid characters, handle underscores (simple camelCase)
-        String[] parts = header.split("_");
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < parts.length; i++) {
-            String part = parts[i].replaceAll("[^a-zA-Z0-9]", "");
-            if (i == 0)
-                sb.append(part.substring(0, 1).toLowerCase()).append(part.substring(1));
-            else if (!part.isEmpty())
-                sb.append(part.substring(0, 1).toUpperCase()).append(part.substring(1));
+    private static String toCamel(String name) {
+        if (!name.contains("_")) return name.substring(0,1).toLowerCase() + name.substring(1);
+        String[] parts = name.split("_");
+        StringBuilder sb = new StringBuilder(parts[0].toLowerCase());
+        for (int i = 1; i < parts.length; i++) {
+            sb.append(parts[i].substring(0,1).toUpperCase());
+            sb.append(parts[i].substring(1));
         }
         return sb.toString();
+    }
+
+    private static String capitalize(String name) {
+        return name.substring(0,1).toUpperCase() + name.substring(1);
     }
 }
