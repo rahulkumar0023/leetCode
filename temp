@@ -1,92 +1,47 @@
-import java.io.*;
-import java.util.*;
+import com.example.csvbatch.model.CsvInvoiceDto;
+import org.springframework.batch.item.file.FlatFileItemReader;
+import org.springframework.batch.item.file.mapping.DefaultLineMapper;
+import org.springframework.batch.item.file.mapping.LineMapper;
+import org.springframework.batch.item.file.transform.DelimitedLineTokenizer;
+import org.springframework.batch.item.file.transform.DefaultFieldSetFactory;
+import org.springframework.batch.item.file.transform.FieldSet;
+import org.springframework.batch.item.file.mapping.FieldSetMapper;
+import org.springframework.core.io.Resource;
+import org.springframework.batch.item.file.ResourceAwareItemReaderItemStream;
+import org.springframework.core.io.Resource;
 
-public class MapStructMappingGeneratorFull {
+import javax.annotation.PostConstruct;
+import java.io.IOException;
 
-    static String toCamel(String s) {
-    s = s.replace("\"", "").replace(";", "");
-    String[] parts = s.split("_");
-    StringBuilder sb = new StringBuilder();
-    for (int i = 0; i < parts.length; i++) {
-        String part = parts[i];
-        if (part.isEmpty()) continue;
-        if (i == 0) {
-            sb.append(part.substring(0, 1).toLowerCase()).append(part.substring(1));
-        } else {
-            sb.append(part.substring(0, 1).toUpperCase()).append(part.substring(1));
-        }
-    }
-    return sb.toString();
-}
+public class CsvInvoiceReader extends FlatFileItemReader<CsvInvoiceDto>
+        implements ResourceAwareItemReaderItemStream<CsvInvoiceDto> {
 
-
-    static String capitalize(String s) {
-        if (s == null || s.isEmpty()) return s;
-        return Character.toUpperCase(s.charAt(0)) + s.substring(1);
+    public CsvInvoiceReader() {
+        setName("csvInvoiceReader");
+        setLinesToSkip(1); // skip header
+        setLineMapper(createLineMapper());
     }
 
-    static String typeFor(String header) {
-        return capitalize(toCamel(header)) + "Type";
+    private LineMapper<CsvInvoiceDto> createLineMapper() {
+        DefaultLineMapper<CsvInvoiceDto> lineMapper = new DefaultLineMapper<>();
+
+        DelimitedLineTokenizer tokenizer = new DelimitedLineTokenizer(";");
+        tokenizer.setFieldSetFactory(new DefaultFieldSetFactory());
+        tokenizer.setNames(/* your header names here, or constant like CsvHeader.INVOICE_FIELDS */);
+
+        FieldSetMapper<CsvInvoiceDto> fieldSetMapper = new SmartCsvInvoiceFieldSetMapper(); // your custom mapper
+
+        lineMapper.setLineTokenizer(tokenizer);
+        lineMapper.setFieldSetMapper(fieldSetMapper);
+        return lineMapper;
     }
 
-    public static void main(String[] args) throws IOException {
-        String file = "headers.txt"; // Adjust as needed
-
-        List<String> headers = new ArrayList<>();
-        try (BufferedReader br = new BufferedReader(new FileReader(file))) {
-            String line;
-            while ((line = br.readLine()) != null) {
-                if (line.contains(";")) {
-                    for (String part : line.split(";")) {
-                        headers.add(part.trim().replace("\"", ""));
-                    }
-                } else if (!line.isBlank()) {
-                    headers.add(line.trim().replace("\"", ""));
-                }
-            }
-        }
-
-        // 1. Forward @Mapping lines
-        System.out.println("// === @Mapping lines (CsvInvoiceRecord -> InvoiceType) ===");
-        for (String header : headers) {
-            String javaField = toCamel(header);
-            String methodName = "to" + capitalize(javaField);
-            System.out.println("@Mapping(target = \"" + javaField + "\", expression = \"java(" + methodName + "(item.get" + capitalize(javaField) + "()))\")");
-        }
-        System.out.println();
-
-        // 2. Inverse @Mapping lines
-        System.out.println("// === @Mapping lines (InvoiceType -> CsvInvoiceRecord) ===");
-        for (String header : headers) {
-            String javaField = toCamel(header);
-            String methodName = "from" + capitalize(javaField);
-            System.out.println("@Mapping(target = \"" + javaField + "\", expression = \"java(" + methodName + "(invoice.get" + capitalize(javaField) + "()))\")");
-        }
-        System.out.println();
-
-        // 3. Default methods for forward
-        System.out.println("// === Default methods for forward ===");
-        for (String header : headers) {
-            String javaField = toCamel(header);
-            String typeName = typeFor(header);
-            String methodName = "to" + capitalize(javaField);
-            System.out.println("default " + typeName + " " + methodName + "(String value) {");
-            System.out.println("    if (value == null) return null;");
-            System.out.println("    " + typeName + " t = new " + typeName + "();");
-            System.out.println("    t.setValue(value);");
-            System.out.println("    return t;");
-            System.out.println("}\n");
-        }
-
-        // 4. Default methods for inverse
-        System.out.println("// === Default methods for inverse ===");
-        for (String header : headers) {
-            String javaField = toCamel(header);
-            String typeName = typeFor(header);
-            String methodName = "from" + capitalize(javaField);
-            System.out.println("default String " + methodName + "(" + typeName + " t) {");
-            System.out.println("    return t != null ? t.getValue() : null;");
-            System.out.println("}\n");
+    @Override
+    public void setResource(Resource resource) {
+        try {
+            super.setResource(resource);
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to initialize CsvInvoiceReader for: " + resource.getFilename(), e);
         }
     }
 }
