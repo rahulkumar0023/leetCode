@@ -1,47 +1,83 @@
-import com.example.csvbatch.model.CsvInvoiceDto;
-import org.springframework.batch.item.file.FlatFileItemReader;
-import org.springframework.batch.item.file.mapping.DefaultLineMapper;
-import org.springframework.batch.item.file.mapping.LineMapper;
-import org.springframework.batch.item.file.transform.DelimitedLineTokenizer;
-import org.springframework.batch.item.file.transform.DefaultFieldSetFactory;
-import org.springframework.batch.item.file.transform.FieldSet;
-import org.springframework.batch.item.file.mapping.FieldSetMapper;
-import org.springframework.core.io.Resource;
-import org.springframework.batch.item.file.ResourceAwareItemReaderItemStream;
-import org.springframework.core.io.Resource;
+To support dynamic **additional properties** (like `additionalPropertyXName`, `additionalPropertyXValue`, etc.) and map them into a list of `ItemPropertyType` in your DTO and UBL invoice, here's how to do it cleanly and maintainably:
 
-import javax.annotation.PostConstruct;
-import java.io.IOException;
+---
 
-public class CsvInvoiceReader extends FlatFileItemReader<CsvInvoiceDto>
-        implements ResourceAwareItemReaderItemStream<CsvInvoiceDto> {
+### ✅ Step 1: Update `CsvInvoiceDto`
 
-    public CsvInvoiceReader() {
-        setName("csvInvoiceReader");
-        setLinesToSkip(1); // skip header
-        setLineMapper(createLineMapper());
+Add flat fields for each property name/value pair:
+
+```java
+private String additionalPropertyXName;
+private String additionalPropertyXValue;
+private String additionalPropertyYName;
+private String additionalPropertyYValue;
+private String additionalPropertyZName;
+private String additionalPropertyZValue;
+```
+
+If you want a more dynamic model, you could do this with a `Map<String, String>` but that would require a custom `FieldSetMapper`.
+
+---
+
+### ✅ Step 2: Update the Mapper
+
+In your `CsvInvoiceMapper`, define a helper method that maps the flat name/value pairs to `ItemPropertyType` instances:
+
+```java
+default List<ItemPropertyType> toAdditionalItemProperties(CsvInvoiceDto dto) {
+    List<ItemPropertyType> props = new ArrayList<>();
+
+    if (dto.getAdditionalPropertyXName() != null && dto.getAdditionalPropertyXValue() != null) {
+        props.add(toItemProperty(dto.getAdditionalPropertyXName(), dto.getAdditionalPropertyXValue()));
+    }
+    if (dto.getAdditionalPropertyYName() != null && dto.getAdditionalPropertyYValue() != null) {
+        props.add(toItemProperty(dto.getAdditionalPropertyYName(), dto.getAdditionalPropertyYValue()));
+    }
+    if (dto.getAdditionalPropertyZName() != null && dto.getAdditionalPropertyZValue() != null) {
+        props.add(toItemProperty(dto.getAdditionalPropertyZName(), dto.getAdditionalPropertyZValue()));
     }
 
-    private LineMapper<CsvInvoiceDto> createLineMapper() {
-        DefaultLineMapper<CsvInvoiceDto> lineMapper = new DefaultLineMapper<>();
-
-        DelimitedLineTokenizer tokenizer = new DelimitedLineTokenizer(";");
-        tokenizer.setFieldSetFactory(new DefaultFieldSetFactory());
-        tokenizer.setNames(/* your header names here, or constant like CsvHeader.INVOICE_FIELDS */);
-
-        FieldSetMapper<CsvInvoiceDto> fieldSetMapper = new SmartCsvInvoiceFieldSetMapper(); // your custom mapper
-
-        lineMapper.setLineTokenizer(tokenizer);
-        lineMapper.setFieldSetMapper(fieldSetMapper);
-        return lineMapper;
-    }
-
-    @Override
-    public void setResource(Resource resource) {
-        try {
-            super.setResource(resource);
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to initialize CsvInvoiceReader for: " + resource.getFilename(), e);
-        }
-    }
+    return props;
 }
+
+default ItemPropertyType toItemProperty(String name, String value) {
+    ItemPropertyType property = new ItemPropertyType();
+
+    NameType nameType = new NameType();
+    nameType.setValue(name);
+    property.setName(nameType);
+
+    ValueType valueType = new ValueType();
+    valueType.setValue(value);
+    property.setValue(valueType);
+
+    return property;
+}
+```
+
+---
+
+### ✅ Step 3: Wire into `InvoiceLine` mapping
+
+If you're already mapping an `Item` object in each `InvoiceLine`, set the `additionalItemProperty` like this:
+
+```java
+ItemType item = new ItemType();
+item.setName(toName(dto.getItemCbcName()));
+item.setAdditionalItemProperty(toAdditionalItemProperties(dto));
+line.setItem(item);
+```
+
+---
+
+### ✅ Optional: CSV Header
+
+Make sure your CSV headers align:
+
+```csv
+...,additionalPropertyXName,additionalPropertyXValue,additionalPropertyYName,additionalPropertyYValue,...
+```
+
+---
+
+Let me know if you'd like this to work dynamically for any number of property pairs (not just X/Y/Z), and I can help you implement a more generic solution using reflection or a `Map<String, String>`.
