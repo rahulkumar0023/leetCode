@@ -1,83 +1,299 @@
-To support dynamic **additional properties** (like `additionalPropertyXName`, `additionalPropertyXValue`, etc.) and map them into a list of `ItemPropertyType` in your DTO and UBL invoice, here's how to do it cleanly and maintainably:
+Perfect — here's how we can break this down into actionable steps to integrate your **supplier list**, persist it via **Liquibase**, and use it during the invoice → XML generation to determine the correct **bucket (M or F)**.
 
 ---
 
-### ✅ Step 1: Update `CsvInvoiceDto`
+## ✅ Step-by-Step Plan
 
-Add flat fields for each property name/value pair:
+### **1. Add Supplier Info to Database via Liquibase**
 
-```java
-private String additionalPropertyXName;
-private String additionalPropertyXValue;
-private String additionalPropertyYName;
-private String additionalPropertyYValue;
-private String additionalPropertyZName;
-private String additionalPropertyZValue;
+**Your table design** could look like:
+
+```sql
+CREATE TABLE suppliers (
+    id SERIAL PRIMARY KEY,
+    enterprise_number VARCHAR(20) NOT NULL UNIQUE,
+    company_name VARCHAR(255)
+);
 ```
 
-If you want a more dynamic model, you could do this with a `Map<String, String>` but that would require a custom `FieldSetMapper`.
+#### ✅ Liquibase ChangeSet (YAML example):
+
+```yaml
+databaseChangeLog:
+  - changeSet:
+      id: 1
+      author: yourname
+      changes:
+        - createTable:
+            tableName: suppliers
+            columns:
+              - column:
+                  name: id
+                  type: SERIAL
+                  constraints:
+                    primaryKey: true
+              - column:
+                  name: enterprise_number
+                  type: VARCHAR(20)
+                  constraints:
+                    nullable: false
+                    unique: true
+              - column:
+                  name: company_name
+                  type: VARCHAR(255)
+
+  - changeSet:
+      id: 2
+      author: yourname
+      changes:
+        - loadData:
+            file: db/data/suppliers.csv
+            tableName: suppliers
+            separator: ","
+```
+
+**Put your CSV at**: `src/main/resources/db/data/suppliers.csv`
+Format:
+
+```
+enterprise_number,company_name
+123456789,Acme Corporation
+987654321,Globex Inc.
+```
 
 ---
 
-### ✅ Step 2: Update the Mapper
+### **2. Load Suppliers Into Memory for Fast Matching**
 
-In your `CsvInvoiceMapper`, define a helper method that maps the flat name/value pairs to `ItemPropertyType` instances:
+Create a `SupplierService` to cache them:
 
 ```java
-default List<ItemPropertyType> toAdditionalItemProperties(CsvInvoiceDto dto) {
-    List<ItemPropertyType> props = new ArrayList<>();
+@Service
+public class SupplierService {
+    private final Map<String, Supplier> supplierMap = new HashMap<>();
 
-    if (dto.getAdditionalPropertyXName() != null && dto.getAdditionalPropertyXValue() != null) {
-        props.add(toItemProperty(dto.getAdditionalPropertyXName(), dto.getAdditionalPropertyXValue()));
-    }
-    if (dto.getAdditionalPropertyYName() != null && dto.getAdditionalPropertyYValue() != null) {
-        props.add(toItemProperty(dto.getAdditionalPropertyYName(), dto.getAdditionalPropertyYValue()));
-    }
-    if (dto.getAdditionalPropertyZName() != null && dto.getAdditionalPropertyZValue() != null) {
-        props.add(toItemProperty(dto.getAdditionalPropertyZName(), dto.getAdditionalPropertyZValue()));
+    public SupplierService(SupplierRepository repo) {
+        repo.findAll().forEach(supplier -> 
+            supplierMap.put(supplier.getEnterpriseNumber(), supplier));
     }
 
-    return props;
+    public boolean isKnownSupplier(String enterpriseNumber) {
+        return supplierMap.containsKey(enterpriseNumber);
+    }
 }
+```
 
-default ItemPropertyType toItemProperty(String name, String value) {
-    ItemPropertyType property = new ItemPropertyType();
+---
 
-    NameType nameType = new NameType();
-    nameType.setValue(name);
-    property.setName(nameType);
+### **3. Add Logic in Writer or Filename Resolver**
 
-    ValueType valueType = new ValueType();
-    valueType.setValue(value);
-    property.setValue(valueType);
+Wherever you name or route the output file (e.g., `XmlInvoiceWriter`, or some `OutputPathResolver`), add:
 
-    return property;
+```java
+public String resolveBucket(InvoiceType invoice) {
+    String contractId = Optional.ofNullable(invoice.getContractDocumentReference())
+                                .stream().findFirst()
+                                .map(ContractDocumentReferenceType::getID)
+                                .map(IDType::getValue)
+                                .orElse("");
+
+    String supplierEnterpriseNumber = Optional.ofNullable(invoice.getAccountingSupplierParty())
+        .map(PartyType::getParty)
+        .map(PartyType::getPartyTaxScheme)
+        .stream().flatMap(List::stream)
+        .map(PartyTaxSchemeType::getCompanyID)
+        .map(IDType::getValue)
+        .findFirst()
+        .orElse("");
+
+    boolean matchesPrefix = contractId.startsWith("12") || contractId.startsWith("13") ||
+                            contractId.startsWith("14") || contractId.startsWith("15") ||
+                            contractId.startsWith("19");
+
+    boolean matchesDb = supplierService.isKnownSupplier(supplierEnterpriseNumber);
+
+    return (matchesPrefix || matchesDb) ? "M" : "F";
 }
 ```
 
+Use that `"M"` or `"F"` to:
+
+* Set the target output folder
+* Prefix the filename
+* Choose S3 bucket, etc.
+
 ---
 
-### ✅ Step 3: Wire into `InvoiceLine` mapping
+### ✅ Next Steps
 
-If you're already mapping an `Item` object in each `InvoiceLine`, set the `additionalItemProperty` like this:
+Let me know if you want me to:
 
-```java
-ItemType item = new ItemType();
-item.setName(toName(dto.getItemCbcName()));
-item.setAdditionalItemProperty(toAdditionalItemProperties(dto));
-line.setItem(item);
+1. **Generate the Liquibase file** and CSV stub.
+2. **Create the `Supplier` entity and JPA repo.**
+3. **Add the bucket routing logic into your existing `XmlInvoiceWriter`.**
+
+We can wire this into your Spring Batch config cleanly. Ready?
+
+
+
+Great! Let’s go step-by-step and generate the necessary components.
+
+---
+
+## ✅ 1. **Liquibase Setup**
+
+### 🔧 `changelog-suppliers.yaml`
+
+Put this file under: `src/main/resources/db/changelog/changelog-suppliers.yaml`
+
+```yaml
+databaseChangeLog:
+  - changeSet:
+      id: 001-create-supplier-table
+      author: you
+      changes:
+        - createTable:
+            tableName: suppliers
+            columns:
+              - column:
+                  name: id
+                  type: SERIAL
+                  constraints:
+                    primaryKey: true
+              - column:
+                  name: enterprise_number
+                  type: VARCHAR(20)
+                  constraints:
+                    nullable: false
+                    unique: true
+              - column:
+                  name: company_name
+                  type: VARCHAR(255)
+
+  - changeSet:
+      id: 002-load-suppliers-data
+      author: you
+      changes:
+        - loadData:
+            file: db/data/suppliers.csv
+            tableName: suppliers
+            separator: ","
+```
+
+Then include it in your `master.yaml`:
+
+```yaml
+databaseChangeLog:
+  - include:
+      file: db/changelog/changelog-suppliers.yaml
 ```
 
 ---
 
-### ✅ Optional: CSV Header
-
-Make sure your CSV headers align:
+### 📄 `suppliers.csv` (place under `src/main/resources/db/data/suppliers.csv`)
 
 ```csv
-...,additionalPropertyXName,additionalPropertyXValue,additionalPropertyYName,additionalPropertyYValue,...
+enterprise_number,company_name
+123456789,Acme Corporation
+987654321,Globex Inc.
 ```
 
 ---
 
-Let me know if you'd like this to work dynamically for any number of property pairs (not just X/Y/Z), and I can help you implement a more generic solution using reflection or a `Map<String, String>`.
+## ✅ 2. **JPA Entity & Repository**
+
+### 📦 `Supplier.java`
+
+```java
+@Entity
+@Table(name = "suppliers")
+public class Supplier {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(name = "enterprise_number", nullable = false, unique = true)
+    private String enterpriseNumber;
+
+    @Column(name = "company_name")
+    private String companyName;
+
+    // Getters and setters
+}
+```
+
+### 📦 `SupplierRepository.java`
+
+```java
+public interface SupplierRepository extends JpaRepository<Supplier, Long> {
+    Optional<Supplier> findByEnterpriseNumber(String enterpriseNumber);
+}
+```
+
+---
+
+## ✅ 3. **SupplierService with In-Memory Cache**
+
+### 📦 `SupplierService.java`
+
+```java
+@Service
+public class SupplierService {
+    private final Map<String, Supplier> supplierMap = new HashMap<>();
+
+    public SupplierService(SupplierRepository repo) {
+        repo.findAll().forEach(supplier -> 
+            supplierMap.put(supplier.getEnterpriseNumber(), supplier));
+    }
+
+    public boolean isKnownSupplier(String enterpriseNumber) {
+        return enterpriseNumber != null && supplierMap.containsKey(enterpriseNumber);
+    }
+}
+```
+
+---
+
+## ✅ 4. **Routing Logic: `resolveBucket()`**
+
+Where you decide your output directory or file name (likely in `XmlInvoiceWriter` or helper class), add this:
+
+```java
+public String resolveBucket(InvoiceType invoice) {
+    String contractId = invoice.getContractDocumentReference() != null && !invoice.getContractDocumentReference().isEmpty()
+        ? invoice.getContractDocumentReference().get(0).getID().getValue()
+        : "";
+
+    String supplierEnterpriseNumber = Optional.ofNullable(invoice.getAccountingSupplierParty())
+        .map(asp -> asp.getParty().getPartyTaxScheme())
+        .filter(list -> !list.isEmpty())
+        .map(list -> list.get(0).getCompanyID().getValue())
+        .orElse(null);
+
+    boolean matchesPrefix = Stream.of("12", "13", "14", "15", "19")
+                                  .anyMatch(contractId::startsWith);
+
+    boolean matchesSupplier = supplierService.isKnownSupplier(supplierEnterpriseNumber);
+
+    return (matchesPrefix || matchesSupplier) ? "M" : "F";
+}
+```
+
+You can use that value to:
+
+* Name output file: `M-INV123.xml`
+* Route to different folders or S3 buckets
+* Log routing decisions
+
+---
+
+## ✅ 5. Next Actions (Optional)
+
+Would you like me to:
+
+1. Add unit test for `resolveBucket()`?
+2. Generate a Spring Batch `ClassifierCompositeItemWriter` to split XML writes into M and F folders?
+3. Add a CLI test runner to verify one invoice → correct bucket?
+
+Let me know!
+
