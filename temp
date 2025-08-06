@@ -175,3 +175,137 @@ Let me know if you'd like:
 * A test for how filenames are resolved
 
 We can move to the next step!
+
+
+
+
+Great — that’s the cleanest approach for your case:
+
+> You have **two separate jobs**:
+> ✅ `xmlInvoiceJob`
+> ✅ `csvInvoiceJob`
+
+So you want to:
+
+* Run **each job only if its own file type is present**
+* Skip the job **entirely** if no relevant files exist **after** fetch/decrypt/unzip
+
+---
+
+## ✅ Clean Architecture for This Setup
+
+### Each Job Has:
+
+* Step 1: `fetchDecryptAndUnzipStep`
+* Step 2: `FilePresenceDecider` (job-specific)
+* Step 3: Invoice processing step (XML or CSV)
+
+---
+
+## ✅ 1. `XmlFilePresenceDecider.java`
+
+```java
+@Component
+public class XmlFilePresenceDecider implements JobExecutionDecider {
+
+    private static final String XML_DIR = "/tmp/unzipped/xml";
+
+    @Override
+    public FlowExecutionStatus decide(JobExecution jobExecution, StepExecution stepExecution) {
+        File dir = new File(XML_DIR);
+        boolean hasXml = dir.exists() && dir.isDirectory() &&
+                         Arrays.stream(dir.listFiles())
+                               .anyMatch(f -> f.getName().endsWith(".xml"));
+
+        return hasXml ? new FlowExecutionStatus("CONTINUE") : new FlowExecutionStatus("SKIP");
+    }
+}
+```
+
+---
+
+## ✅ 2. `CsvFilePresenceDecider.java`
+
+```java
+@Component
+public class CsvFilePresenceDecider implements JobExecutionDecider {
+
+    private static final String CSV_DIR = "/tmp/unzipped/csv";
+
+    @Override
+    public FlowExecutionStatus decide(JobExecution jobExecution, StepExecution stepExecution) {
+        File dir = new File(CSV_DIR);
+        boolean hasCsv = dir.exists() && dir.isDirectory() &&
+                         Arrays.stream(dir.listFiles())
+                               .anyMatch(f -> f.getName().endsWith(".csv"));
+
+        return hasCsv ? new FlowExecutionStatus("CONTINUE") : new FlowExecutionStatus("SKIP");
+    }
+}
+```
+
+---
+
+## ✅ 3. Job Config — XML Job
+
+```java
+@Bean
+public Job xmlInvoiceJob(JobBuilderFactory jobs,
+                         Step fetchDecryptAndUnzipStep,
+                         Step xmlProcessingStep,
+                         XmlFilePresenceDecider xmlFilePresenceDecider) {
+
+    return jobs.get("xmlInvoiceJob")
+        .start(fetchDecryptAndUnzipStep)
+        .next(xmlFilePresenceDecider)
+            .on("CONTINUE").to(xmlProcessingStep)
+        .from(xmlFilePresenceDecider)
+            .on("SKIP").end()
+        .end()
+        .build();
+}
+```
+
+---
+
+## ✅ 4. Job Config — CSV Job
+
+```java
+@Bean
+public Job csvInvoiceJob(JobBuilderFactory jobs,
+                         Step fetchDecryptAndUnzipStep,
+                         Step csvProcessingStep,
+                         CsvFilePresenceDecider csvFilePresenceDecider) {
+
+    return jobs.get("csvInvoiceJob")
+        .start(fetchDecryptAndUnzipStep)
+        .next(csvFilePresenceDecider)
+            .on("CONTINUE").to(csvProcessingStep)
+        .from(csvFilePresenceDecider)
+            .on("SKIP").end()
+        .end()
+        .build();
+}
+```
+
+---
+
+## ✅ Optional Enhancement: Share `fetchDecryptAndUnzipStep`
+
+Since both jobs use the same fetch logic, you can reuse the step across both — Spring Batch allows steps to be shared between jobs.
+
+> Just be sure it's **stateless** or uses `@StepScope` if dynamic parameters are involved.
+
+---
+
+## ✅ TL;DR — You Now Have:
+
+| Job             | Steps                                     |
+| --------------- | ----------------------------------------- |
+| `xmlInvoiceJob` | `fetchDecrypt → XmlDecider → xmlStep`     |
+| `csvInvoiceJob` | `fetchDecrypt → CsvDecider → csvStep`     |
+| Outcome         | Each job skips itself if no files present |
+
+---
+
+Would you like me to generate a shared helper to check file presence so both deciders are DRY? Or combine this into a sample working config file?
