@@ -1,299 +1,35 @@
-Perfect — here's how we can break this down into actionable steps to integrate your **supplier list**, persist it via **Liquibase**, and use it during the invoice → XML generation to determine the correct **bucket (M or F)**.
+package com.yourcompany.yourapp.service;
 
----
+import com.yourcompany.yourapp.model.Supplier;
+import com.yourcompany.yourapp.repository.SupplierRepository;
+import org.springframework.stereotype.Service;
 
-## ✅ Step-by-Step Plan
+import jakarta.annotation.PostConstruct;
+import java.util.HashMap;
+import java.util.Map;
 
-### **1. Add Supplier Info to Database via Liquibase**
-
-**Your table design** could look like:
-
-```sql
-CREATE TABLE suppliers (
-    id SERIAL PRIMARY KEY,
-    enterprise_number VARCHAR(20) NOT NULL UNIQUE,
-    company_name VARCHAR(255)
-);
-```
-
-#### ✅ Liquibase ChangeSet (YAML example):
-
-```yaml
-databaseChangeLog:
-  - changeSet:
-      id: 1
-      author: yourname
-      changes:
-        - createTable:
-            tableName: suppliers
-            columns:
-              - column:
-                  name: id
-                  type: SERIAL
-                  constraints:
-                    primaryKey: true
-              - column:
-                  name: enterprise_number
-                  type: VARCHAR(20)
-                  constraints:
-                    nullable: false
-                    unique: true
-              - column:
-                  name: company_name
-                  type: VARCHAR(255)
-
-  - changeSet:
-      id: 2
-      author: yourname
-      changes:
-        - loadData:
-            file: db/data/suppliers.csv
-            tableName: suppliers
-            separator: ","
-```
-
-**Put your CSV at**: `src/main/resources/db/data/suppliers.csv`
-Format:
-
-```
-enterprise_number,company_name
-123456789,Acme Corporation
-987654321,Globex Inc.
-```
-
----
-
-### **2. Load Suppliers Into Memory for Fast Matching**
-
-Create a `SupplierService` to cache them:
-
-```java
 @Service
 public class SupplierService {
+
+    private final SupplierRepository supplierRepository;
     private final Map<String, Supplier> supplierMap = new HashMap<>();
 
-    public SupplierService(SupplierRepository repo) {
-        repo.findAll().forEach(supplier -> 
-            supplierMap.put(supplier.getEnterpriseNumber(), supplier));
+    public SupplierService(SupplierRepository supplierRepository) {
+        this.supplierRepository = supplierRepository;
     }
 
-    public boolean isKnownSupplier(String enterpriseNumber) {
-        return supplierMap.containsKey(enterpriseNumber);
-    }
-}
-```
-
----
-
-### **3. Add Logic in Writer or Filename Resolver**
-
-Wherever you name or route the output file (e.g., `XmlInvoiceWriter`, or some `OutputPathResolver`), add:
-
-```java
-public String resolveBucket(InvoiceType invoice) {
-    String contractId = Optional.ofNullable(invoice.getContractDocumentReference())
-                                .stream().findFirst()
-                                .map(ContractDocumentReferenceType::getID)
-                                .map(IDType::getValue)
-                                .orElse("");
-
-    String supplierEnterpriseNumber = Optional.ofNullable(invoice.getAccountingSupplierParty())
-        .map(PartyType::getParty)
-        .map(PartyType::getPartyTaxScheme)
-        .stream().flatMap(List::stream)
-        .map(PartyTaxSchemeType::getCompanyID)
-        .map(IDType::getValue)
-        .findFirst()
-        .orElse("");
-
-    boolean matchesPrefix = contractId.startsWith("12") || contractId.startsWith("13") ||
-                            contractId.startsWith("14") || contractId.startsWith("15") ||
-                            contractId.startsWith("19");
-
-    boolean matchesDb = supplierService.isKnownSupplier(supplierEnterpriseNumber);
-
-    return (matchesPrefix || matchesDb) ? "M" : "F";
-}
-```
-
-Use that `"M"` or `"F"` to:
-
-* Set the target output folder
-* Prefix the filename
-* Choose S3 bucket, etc.
-
----
-
-### ✅ Next Steps
-
-Let me know if you want me to:
-
-1. **Generate the Liquibase file** and CSV stub.
-2. **Create the `Supplier` entity and JPA repo.**
-3. **Add the bucket routing logic into your existing `XmlInvoiceWriter`.**
-
-We can wire this into your Spring Batch config cleanly. Ready?
-
-
-
-Great! Let’s go step-by-step and generate the necessary components.
-
----
-
-## ✅ 1. **Liquibase Setup**
-
-### 🔧 `changelog-suppliers.yaml`
-
-Put this file under: `src/main/resources/db/changelog/changelog-suppliers.yaml`
-
-```yaml
-databaseChangeLog:
-  - changeSet:
-      id: 001-create-supplier-table
-      author: you
-      changes:
-        - createTable:
-            tableName: suppliers
-            columns:
-              - column:
-                  name: id
-                  type: SERIAL
-                  constraints:
-                    primaryKey: true
-              - column:
-                  name: enterprise_number
-                  type: VARCHAR(20)
-                  constraints:
-                    nullable: false
-                    unique: true
-              - column:
-                  name: company_name
-                  type: VARCHAR(255)
-
-  - changeSet:
-      id: 002-load-suppliers-data
-      author: you
-      changes:
-        - loadData:
-            file: db/data/suppliers.csv
-            tableName: suppliers
-            separator: ","
-```
-
-Then include it in your `master.yaml`:
-
-```yaml
-databaseChangeLog:
-  - include:
-      file: db/changelog/changelog-suppliers.yaml
-```
-
----
-
-### 📄 `suppliers.csv` (place under `src/main/resources/db/data/suppliers.csv`)
-
-```csv
-enterprise_number,company_name
-123456789,Acme Corporation
-987654321,Globex Inc.
-```
-
----
-
-## ✅ 2. **JPA Entity & Repository**
-
-### 📦 `Supplier.java`
-
-```java
-@Entity
-@Table(name = "suppliers")
-public class Supplier {
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
-
-    @Column(name = "enterprise_number", nullable = false, unique = true)
-    private String enterpriseNumber;
-
-    @Column(name = "company_name")
-    private String companyName;
-
-    // Getters and setters
-}
-```
-
-### 📦 `SupplierRepository.java`
-
-```java
-public interface SupplierRepository extends JpaRepository<Supplier, Long> {
-    Optional<Supplier> findByEnterpriseNumber(String enterpriseNumber);
-}
-```
-
----
-
-## ✅ 3. **SupplierService with In-Memory Cache**
-
-### 📦 `SupplierService.java`
-
-```java
-@Service
-public class SupplierService {
-    private final Map<String, Supplier> supplierMap = new HashMap<>();
-
-    public SupplierService(SupplierRepository repo) {
-        repo.findAll().forEach(supplier -> 
-            supplierMap.put(supplier.getEnterpriseNumber(), supplier));
+    @PostConstruct
+    public void loadSuppliers() {
+        supplierRepository.findAll().forEach(supplier ->
+            supplierMap.put(supplier.getEnterpriseNumber(), supplier)
+        );
     }
 
     public boolean isKnownSupplier(String enterpriseNumber) {
         return enterpriseNumber != null && supplierMap.containsKey(enterpriseNumber);
     }
+
+    public Supplier getByEnterpriseNumber(String enterpriseNumber) {
+        return supplierMap.get(enterpriseNumber);
+    }
 }
-```
-
----
-
-## ✅ 4. **Routing Logic: `resolveBucket()`**
-
-Where you decide your output directory or file name (likely in `XmlInvoiceWriter` or helper class), add this:
-
-```java
-public String resolveBucket(InvoiceType invoice) {
-    String contractId = invoice.getContractDocumentReference() != null && !invoice.getContractDocumentReference().isEmpty()
-        ? invoice.getContractDocumentReference().get(0).getID().getValue()
-        : "";
-
-    String supplierEnterpriseNumber = Optional.ofNullable(invoice.getAccountingSupplierParty())
-        .map(asp -> asp.getParty().getPartyTaxScheme())
-        .filter(list -> !list.isEmpty())
-        .map(list -> list.get(0).getCompanyID().getValue())
-        .orElse(null);
-
-    boolean matchesPrefix = Stream.of("12", "13", "14", "15", "19")
-                                  .anyMatch(contractId::startsWith);
-
-    boolean matchesSupplier = supplierService.isKnownSupplier(supplierEnterpriseNumber);
-
-    return (matchesPrefix || matchesSupplier) ? "M" : "F";
-}
-```
-
-You can use that value to:
-
-* Name output file: `M-INV123.xml`
-* Route to different folders or S3 buckets
-* Log routing decisions
-
----
-
-## ✅ 5. Next Actions (Optional)
-
-Would you like me to:
-
-1. Add unit test for `resolveBucket()`?
-2. Generate a Spring Batch `ClassifierCompositeItemWriter` to split XML writes into M and F folders?
-3. Add a CLI test runner to verify one invoice → correct bucket?
-
-Let me know!
-
