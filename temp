@@ -1,35 +1,177 @@
-package com.yourcompany.yourapp.service;
+Perfect. Let me now give you the **complete working code** for:
 
-import com.yourcompany.yourapp.model.Supplier;
-import com.yourcompany.yourapp.repository.SupplierRepository;
-import org.springframework.stereotype.Service;
+✅ `InvoiceBucketResolver` (as a real Spring component)
+✅ Unit tests for both conditions (`prefix match` and `supplier match`)
+✅ How to use it in your `XmlInvoiceWriter` or any batch component
 
+---
+
+## 📦 1. `InvoiceBucketResolver.java`
+
+```java
+package com.yourcompany.yourapp.util;
+
+import com.yourcompany.yourapp.service.SupplierService;
 import jakarta.annotation.PostConstruct;
-import java.util.HashMap;
-import java.util.Map;
+import lombok.RequiredArgsConstructor;
+import oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.*;
+import oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType;
+import oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType;
+import org.springframework.stereotype.Component;
 
-@Service
-public class SupplierService {
+import java.util.List;
+import java.util.Optional;
 
-    private final SupplierRepository supplierRepository;
-    private final Map<String, Supplier> supplierMap = new HashMap<>();
+@Component
+@RequiredArgsConstructor
+public class InvoiceBucketResolver {
 
-    public SupplierService(SupplierRepository supplierRepository) {
-        this.supplierRepository = supplierRepository;
+    private static final List<String> PREFIXES = List.of("12", "13", "14", "15", "19");
+
+    private final SupplierService supplierService;
+
+    /**
+     * Main logic to determine if the invoice belongs in bucket "M" or "F"
+     */
+    public String resolveBucket(InvoiceType invoice) {
+        String contractId = getContractId(invoice);
+        String supplierCompanyId = getSupplierCompanyId(invoice);
+
+        boolean prefixMatch = PREFIXES.stream().anyMatch(contractId::startsWith);
+        boolean knownSupplier = supplierService.isKnownSupplier(supplierCompanyId);
+
+        return (prefixMatch || knownSupplier) ? "M" : "F";
     }
 
-    @PostConstruct
-    public void loadSuppliers() {
-        supplierRepository.findAll().forEach(supplier ->
-            supplierMap.put(supplier.getEnterpriseNumber(), supplier)
-        );
+    private String getContractId(InvoiceType invoice) {
+        return Optional.ofNullable(invoice.getContractDocumentReference())
+                .filter(list -> !list.isEmpty())
+                .map(list -> list.get(0).getID())
+                .map(IDType::getValue)
+                .orElse("");
     }
 
-    public boolean isKnownSupplier(String enterpriseNumber) {
-        return enterpriseNumber != null && supplierMap.containsKey(enterpriseNumber);
-    }
-
-    public Supplier getByEnterpriseNumber(String enterpriseNumber) {
-        return supplierMap.get(enterpriseNumber);
+    private String getSupplierCompanyId(InvoiceType invoice) {
+        return Optional.ofNullable(invoice.getAccountingSupplierParty())
+                .map(AccountingSupplierPartyType::getParty)
+                .map(PartyType::getPartyTaxScheme)
+                .filter(list -> !list.isEmpty())
+                .map(list -> list.get(0).getCompanyID())
+                .map(IDType::getValue)
+                .orElse("");
     }
 }
+```
+
+---
+
+## 🧪 2. `InvoiceBucketResolverTest.java`
+
+```java
+package com.yourcompany.yourapp.util;
+
+import com.yourcompany.yourapp.service.SupplierService;
+import oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.*;
+import oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType;
+import oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+class InvoiceBucketResolverTest {
+
+    private SupplierService supplierService;
+    private InvoiceBucketResolver resolver;
+
+    @BeforeEach
+    void setup() {
+        supplierService = mock(SupplierService.class);
+        resolver = new InvoiceBucketResolver(supplierService);
+    }
+
+    @Test
+    void testBucketM_whenContractIdStartsWithPrefix() {
+        InvoiceType invoice = new InvoiceType();
+
+        ContractDocumentReferenceType contract = new ContractDocumentReferenceType();
+        IDType contractId = new IDType();
+        contractId.setValue("14-XYZ");
+        contract.setID(contractId);
+        invoice.getContractDocumentReference().add(contract);
+
+        when(supplierService.isKnownSupplier(any())).thenReturn(false);
+
+        assertEquals("M", resolver.resolveBucket(invoice));
+    }
+
+    @Test
+    void testBucketM_whenKnownSupplier() {
+        InvoiceType invoice = new InvoiceType();
+
+        AccountingSupplierPartyType asp = new AccountingSupplierPartyType();
+        PartyType party = new PartyType();
+        PartyTaxSchemeType tax = new PartyTaxSchemeType();
+        IDType companyId = new IDType();
+        companyId.setValue("123456789");
+        tax.setCompanyID(companyId);
+        party.getPartyTaxScheme().add(tax);
+        asp.setParty(party);
+        invoice.setAccountingSupplierParty(asp);
+
+        when(supplierService.isKnownSupplier("123456789")).thenReturn(true);
+
+        assertEquals("M", resolver.resolveBucket(invoice));
+    }
+
+    @Test
+    void testBucketF_whenNoMatch() {
+        InvoiceType invoice = new InvoiceType();
+        // No contract ID
+        // No known supplier
+
+        when(supplierService.isKnownSupplier(any())).thenReturn(false);
+
+        assertEquals("F", resolver.resolveBucket(invoice));
+    }
+}
+```
+
+---
+
+## ✅ 3. How to Use in `XmlInvoiceWriter` or Anywhere
+
+In your XML writer, processor, or file naming logic:
+
+```java
+@Autowired
+private InvoiceBucketResolver bucketResolver;
+
+...
+
+String bucket = bucketResolver.resolveBucket(invoice); // "M" or "F"
+String filename = bucket + "-" + invoice.getID().getValue() + ".xml";
+```
+
+---
+
+## ✅ Summary
+
+| Class                       | Purpose                                   |
+| --------------------------- | ----------------------------------------- |
+| `InvoiceBucketResolver`     | Resolves if invoice goes in M or F bucket |
+| `InvoiceBucketResolverTest` | Validates logic across 3 scenarios        |
+| Usage                       | Prefix file or use in routing logic       |
+
+---
+
+Let me know if you'd like:
+
+* To wire this into your Spring Batch job as part of the writer
+* Add zip/encryption logic to post-process "M" and "F" files separately
+* A test for how filenames are resolved
+
+We can move to the next step!
