@@ -576,3 +576,140 @@ UploadJobListener	Triggers upload at the end of the job
 	•	Dynamic bucket configuration per environment
 
 Ready to plug into your job!
+
+Yes — you absolutely can and should do that!
+It’s a great optimization, and it keeps your /tmp/unzipped directory clean and relevant to each job.
+
+⸻
+
+✅ Goal Recap
+
+During the shared fetchDecryptAndUnzipStep, you want to:
+
+	•	Only unzip CSV-related .zip.pgp files when running csvInvoiceJob
+	•	Only unzip XML-related .zip.pgp files when running xmlInvoiceJob
+
+⸻
+
+✅ Solution: Use JobParameters to pass the job type
+
+And inside your fetchDecryptAndUnzipTasklet, only process files of that type.
+
+⸻
+
+✅ 1. Pass job type as a parameter
+
+When launching jobs:
+
+jobLauncher.run(csvInvoiceJob, new JobParametersBuilder()
+    .addString("jobType", "csv")
+    .addLong("time", System.currentTimeMillis())
+    .toJobParameters());
+
+Or for XML:
+
+jobLauncher.run(xmlInvoiceJob, new JobParametersBuilder()
+    .addString("jobType", "xml")
+    .addLong("time", System.currentTimeMillis())
+    .toJobParameters());
+
+
+⸻
+
+✅ 2. Inject the jobType parameter in your tasklet
+
+Use @StepScope and Spring EL to read the parameter dynamically.
+
+@Component
+@StepScope
+public class FetchDecryptAndUnzipTasklet implements Tasklet {
+
+    @Value("#{jobParameters['jobType']}")
+    private String jobType;
+
+    @Override
+    public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext) throws Exception {
+        File fetchDir = new File("/input/downloaded"); // or wherever files are
+
+        for (File encryptedFile : fetchDir.listFiles()) {
+            if (!encryptedFile.getName().endsWith(".zip.pgp")) continue;
+
+            if (shouldExtractFile(encryptedFile)) {
+                // decrypt → unzip → /tmp/unzipped/xml or /tmp/unzipped/csv
+                extractFileToTemp(encryptedFile);
+            } else {
+                System.out.println("Skipping unrelated file: " + encryptedFile.getName());
+            }
+        }
+
+        return RepeatStatus.FINISHED;
+    }
+
+    private boolean shouldExtractFile(File file) {
+        String name = file.getName().toLowerCase();
+
+        return (jobType.equals("xml") && name.contains("xml")) ||
+               (jobType.equals("csv") && name.contains("csv"));
+    }
+
+    private void extractFileToTemp(File encryptedFile) {
+        // 1. Decrypt to temp ZIP
+        // 2. Unzip to /tmp/unzipped/xml or /tmp/unzipped/csv based on jobType
+        File unzipDir = new File("/tmp/unzipped/" + jobType);
+        // ... implement logic here
+    }
+}
+
+
+⸻
+
+✅ 3. Update job configuration to inject the tasklet
+
+Make sure the tasklet is declared as a bean:
+
+@Bean
+@StepScope
+public FetchDecryptAndUnzipTasklet fetchDecryptAndUnzipTasklet() {
+    return new FetchDecryptAndUnzipTasklet();
+}
+
+@Bean
+public Step fetchDecryptAndUnzipStep(StepBuilderFactory steps,
+                                     FetchDecryptAndUnzipTasklet tasklet) {
+    return steps.get("fetchDecryptAndUnzipStep")
+        .tasklet(tasklet)
+        .build();
+}
+
+
+⸻
+
+✅ What You Achieve
+
+Job Type	Files Extracted To
+csvInvoiceJob	/tmp/unzipped/csv/ only
+xmlInvoiceJob	/tmp/unzipped/xml/ only
+
+Unrelated files are skipped in the decrypt-unzip step.
+
+⸻
+
+✅ TL;DR
+
+Task	Solution
+Selective unzip per job	✅ Use jobType JobParameter
+Read it in tasklet	✅ Use @StepScope + @Value(...)
+Skip unrelated files	✅ Use filename filter logic
+Keep /tmp clean	✅ Only write to relevant subfolder
+
+
+⸻
+
+Let me know if you want:
+	•	A fully working decrypt → unzip utility
+	•	File filtering based on metadata (not just filename)
+	•	Integration with COS bucket listings (if pulling from COS)
+
+We can easily extend this further.
+
+
