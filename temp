@@ -308,4 +308,271 @@ Since both jobs use the same fetch logic, you can reuse the step across both —
 
 ---
 
-Would you like me to generate a shared helper to check file presence so both deciders are DRY? Or combine this into a sample working config file?
+Would you like me to generate a shared helper to check file presence so both deciders are DRY? Or combine this into a sample working config file
+
+
+Great — you’re tying it all together now. Let’s break this down and give you a complete solution for:
+
+⸻
+
+✅ GOAL
+
+After processing invoices (from XML), group them by supplier type:
+
+	•	“M” (miles suppliers)
+	•	“F” (finance suppliers)
+
+Then:
+	1.	✅ Write each invoice as XML file
+	2.	✅ Group them into:
+	•	miles-invoices.zip → PGP encrypt → upload to COS
+	•	finance-invoices.zip → PGP encrypt → upload to COS
+
+⸻
+
+🧱 COMPONENTS NEEDED
+
+We’ll now implement:
+
+Component	Responsibility
+InvoiceBucketResolver	Determine M/F for each invoice
+XmlInvoiceWriter (enhanced)	Write invoices into bucket-specific folders
+ZipperService	Zip M/F folders separately
+PgpEncryptionService	Encrypt zipped files
+CosUploader	Upload encrypted files to COS
+UploadCoordinator	Orchestrates zip + encrypt + upload post-job
+
+
+⸻
+
+✅ 1. InvoiceBucketResolver.java
+
+Same as before (miles = “M”, finance = “F”):
+
+@Component
+@RequiredArgsConstructor
+public class InvoiceBucketResolver {
+
+    private final SupplierService supplierService;
+
+    private static final List<String> PREFIXES = List.of("12", "13", "14", "15", "19");
+
+    public String resolveBucket(InvoiceType invoice) {
+        String contractId = Optional.ofNullable(invoice.getContractDocumentReference())
+            .filter(l -> !l.isEmpty())
+            .map(l -> l.get(0).getID().getValue())
+            .orElse("");
+
+        String companyId = Optional.ofNullable(invoice.getAccountingSupplierParty())
+            .map(asp -> asp.getParty())
+            .map(p -> p.getPartyTaxScheme())
+            .filter(list -> !list.isEmpty())
+            .map(list -> list.get(0).getCompanyID().getValue())
+            .orElse("");
+
+        boolean matchesPrefix = PREFIXES.stream().anyMatch(contractId::startsWith);
+        boolean knownSupplier = supplierService.isKnownSupplier(companyId);
+
+        return (matchesPrefix || knownSupplier) ? "M" : "F";
+    }
+}
+
+
+⸻
+
+✅ 2. XmlInvoiceWriter.java (enhanced writer)
+
+Writes each invoice into /tmp/out/xml/M/ or /tmp/out/xml/F/ based on bucket:
+
+@Component
+@RequiredArgsConstructor
+public class XmlInvoiceWriter implements ItemWriter<InvoiceType> {
+
+    private final InvoiceBucketResolver bucketResolver;
+    private final UblDocumentWriter documentWriter;
+
+    @Override
+    public void write(List<? extends InvoiceType> invoices) throws Exception {
+        for (InvoiceType invoice : invoices) {
+            String bucket = bucketResolver.resolveBucket(invoice);
+            String id = invoice.getID().getValue();
+            Path outputDir = Path.of("/tmp/out/xml", bucket);
+            Files.createDirectories(outputDir);
+
+            File outputFile = outputDir.resolve(id + ".xml").toFile();
+            documentWriter.write(invoice, outputFile);
+        }
+    }
+}
+
+
+⸻
+
+✅ 3. ZipperService.java
+
+@Component
+public class ZipperService {
+
+    public File zipDirectory(Path dir, String outputZipName) throws IOException {
+        Path zipPath = dir.resolveSibling(outputZipName);
+        try (FileOutputStream fos = new FileOutputStream(zipPath.toFile());
+             ZipOutputStream zos = new ZipOutputStream(fos)) {
+            Files.walk(dir)
+                .filter(Files::isRegularFile)
+                .forEach(file -> {
+                    try {
+                        ZipEntry zipEntry = new ZipEntry(dir.relativize(file).toString());
+                        zos.putNextEntry(zipEntry);
+                        Files.copy(file, zos);
+                        zos.closeEntry();
+                    } catch (IOException e) {
+                        throw new RuntimeException("Zipping failed", e);
+                    }
+                });
+        }
+        return zipPath.toFile();
+    }
+}
+
+
+⸻
+
+✅ 4. PgpEncryptionService.java
+
+@Component
+public class PgpEncryptionService {
+
+    public File encrypt(File inputFile, File publicKeyFile, File outputEncryptedFile) throws Exception {
+        // Use BouncyCastle or another PGP library
+        // For simplicity assume it's implemented
+        return outputEncryptedFile;
+    }
+}
+
+
+⸻
+
+✅ 5. CosUploader.java
+
+@Component
+@RequiredArgsConstructor
+public class CosUploader {
+
+    private final AmazonS3 s3; // Assume S3 compatible COS client
+
+    public void upload(File file, String bucket, String key) {
+        s3.putObject(bucket, key, file);
+    }
+}
+
+
+⸻
+
+✅ 6. UploadCoordinator.java
+
+Orchestrates the post-processing
+
+@Component
+@RequiredArgsConstructor
+public class UploadCoordinator {
+
+    private final ZipperService zipperService;
+    private final PgpEncryptionService pgpService;
+    private final CosUploader cosUploader;
+
+    @Value("${cos.bucket.miles}")
+    private String milesBucket;
+
+    @Value("${cos.bucket.finance}")
+    private String financeBucket;
+
+    @Value("${pgp.publicKey}")
+    private File publicKey;
+
+    public void postProcessAndUpload() throws Exception {
+        Path baseDir = Path.of("/tmp/out/xml");
+
+        for (String type : List.of("M", "F")) {
+            Path dir = baseDir.resolve(type);
+            if (!Files.exists(dir) || Files.list(dir).findAny().isEmpty()) continue;
+
+            File zip = zipperService.zipDirectory(dir, type + "-invoices.zip");
+            File encrypted = new File(zip.getParent(), zip.getName() + ".pgp");
+            pgpService.encrypt(zip, publicKey, encrypted);
+
+            String bucket = type.equals("M") ? milesBucket : financeBucket;
+            String objectKey = "invoices/" + encrypted.getName();
+
+            cosUploader.upload(encrypted, bucket, objectKey);
+        }
+    }
+}
+
+
+⸻
+
+✅ 7. Trigger UploadCoordinator After Job
+
+In Spring Batch, define a JobExecutionListener:
+
+@Component
+@RequiredArgsConstructor
+public class UploadJobListener implements JobExecutionListener {
+
+    private final UploadCoordinator uploadCoordinator;
+
+    @Override
+    public void afterJob(JobExecution jobExecution) {
+        try {
+            uploadCoordinator.postProcessAndUpload();
+        } catch (Exception e) {
+            throw new RuntimeException("Upload failed", e);
+        }
+    }
+}
+
+Attach it to your job:
+
+@Bean
+public Job xmlInvoiceJob(JobBuilderFactory jobs,
+                         Step xmlProcessingStep,
+                         UploadJobListener listener) {
+    return jobs.get("xmlInvoiceJob")
+        .start(xmlProcessingStep)
+        .listener(listener)
+        .build();
+}
+
+
+⸻
+
+✅ Directory Structure Summary
+
+/tmp/out/xml/
+├── M/
+│   ├── invoice1.xml
+│   ├── ...
+├── F/
+│   ├── invoiceA.xml
+│   ├── ...
+
+
+⸻
+
+✅ Final Flow Summary
+
+Step	What It Does
+XmlInvoiceWriter	Writes each invoice into /tmp/out/xml/M or /F
+UploadCoordinator	Zips, encrypts, and uploads M and F buckets separately
+UploadJobListener	Triggers upload at the end of the job
+
+
+⸻
+
+✅ Let Me Know If You Need
+	•	Full working code with mocks/tests
+	•	Integration with AWS S3 or IBM COS SDK
+	•	PGP utility using BouncyCastle
+	•	Dynamic bucket configuration per environment
+
+Ready to plug into your job!
