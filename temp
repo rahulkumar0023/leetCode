@@ -772,84 +772,63 @@ public class TempCleanupTasklet implements Tasklet {
     }
 }
 
-
-import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.batch.core.StepContribution;
 import org.springframework.batch.core.scope.context.ChunkContext;
-import org.springframework.batch.core.step.tasklet.Tasklet;
 import org.springframework.batch.repeat.RepeatStatus;
 
-import java.io.IOException;
-import java.nio.file.*;
-import java.util.stream.Stream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
 class TempCleanupTaskletTest {
 
-    private TempCleanupTasklet tasklet;
-    private Path tmpDir;
-    private Path unzippedDir;
-    private Path processedDir;
+    @TempDir
+    Path tmpDir; // Will be used for .zip.pgp cleanup
 
-    @BeforeEach
-    void setUp() throws IOException {
-        // Create temp directories for the test
-        tmpDir = Files.createTempDirectory("tmpDir");
-        unzippedDir = Files.createTempDirectory("unzippedDir");
-        processedDir = Files.createTempDirectory("processedDir");
+    @TempDir
+    Path unzippedDir; // Will be fully deleted
 
-        // Create sample files
-        Files.createFile(tmpDir.resolve("file1.zip.pgp"));
-        Files.createFile(tmpDir.resolve("file2.txt")); // should NOT be deleted
-        Files.createFile(unzippedDir.resolve("fileA.txt"));
-        Files.createFile(processedDir.resolve("fileB.txt"));
-
-        // Init tasklet with test directories
-        tasklet = new TempCleanupTasklet();
-        tasklet.setZipPgpDir(tmpDir.toString());
-        tasklet.setFullDeleteDirs(new String[] {
-                unzippedDir.toString(),
-                processedDir.toString()
-        });
-    }
-
-    @AfterEach
-    void tearDown() throws IOException {
-        try (Stream<Path> files = Files.walk(tmpDir)) {
-            files.sorted((a, b) -> b.compareTo(a))
-                    .forEach(path -> path.toFile().delete());
-        }
-        try (Stream<Path> files = Files.walk(unzippedDir)) {
-            files.sorted((a, b) -> b.compareTo(a))
-                    .forEach(path -> path.toFile().delete());
-        }
-        try (Stream<Path> files = Files.walk(processedDir)) {
-            files.sorted((a, b) -> b.compareTo(a))
-                    .forEach(path -> path.toFile().delete());
-        }
-    }
+    @TempDir
+    Path processedDir; // Will be fully deleted
 
     @Test
     void testCleanupDeletesCorrectFiles() throws Exception {
-        // Run tasklet
+        // Arrange: Create files
+        Files.createFile(tmpDir.resolve("file1.zip.pgp")); // should be deleted
+        Files.createFile(tmpDir.resolve("file2.txt"));     // should remain
+        Files.createFile(unzippedDir.resolve("fileA.txt")); // should be deleted
+        Files.createFile(processedDir.resolve("fileB.txt")); // should be deleted
+
+        TempCleanupTasklet tasklet = new TempCleanupTasklet();
+        tasklet.setZipPgpDir(tmpDir.toString());
+        tasklet.setFullDeleteDirs(new String[]{
+                unzippedDir.toString(),
+                processedDir.toString()
+        });
+
+        // Act
         StepContribution contribution = mock(StepContribution.class);
         ChunkContext chunkContext = mock(ChunkContext.class);
-
         RepeatStatus status = tasklet.execute(contribution, chunkContext);
+
+        // Assert: Tasklet finished
         assertThat(status).isEqualTo(RepeatStatus.FINISHED);
 
-        // Verify only .zip.pgp deleted in tmpDir
+        // Verify .zip.pgp file is gone
         assertThat(Files.exists(tmpDir.resolve("file1.zip.pgp"))).isFalse();
+
+        // Verify .txt file remains
         assertThat(Files.exists(tmpDir.resolve("file2.txt"))).isTrue();
 
-        // Verify unzippedDir is deleted
+        // Verify directories are gone
         assertThat(Files.exists(unzippedDir)).isFalse();
-
-        // Verify processedDir is deleted
         assertThat(Files.exists(processedDir)).isFalse();
     }
 }
+
 
 
