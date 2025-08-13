@@ -830,5 +830,177 @@ class TempCleanupTaskletTest {
     }
 }
 
+You’re seeing two separate issues:
+	1.	the per‑step counter not resetting, and
+	2.	fewer XMLs than CSV rows.
+
+Here’s how to fix & verify both.
+
+⸻
+
+1) Counter doesn’t reset between steps/runs
+
+Your AtomicInteger lives in a singleton bean, so it keeps its value across step executions. Make the processor step‑scoped and reset the counter at the start of each step.
+
+@Component
+@StepScope
+@RequiredArgsConstructor
+@Slf4j
+public class InvoiceProcessor implements ItemProcessor<CsvInvoiceDto, InvoiceType>, StepExecutionListener {
+
+    private final CsvInvoiceMapper mapper;
+    private int rowIndex;
+
+    @Override
+    public void beforeStep(StepExecution stepExecution) {
+        rowIndex = 0; // reset per step execution
+    }
+
+    @Override
+    public InvoiceType process(CsvInvoiceDto item) {
+        rowIndex++;
+        log.info("Row #{}: {}", rowIndex, item.getInvoiceNumber());
+        return mapper.toInvoiceType(item);
+    }
+
+    @Override
+    public ExitStatus afterStep(StepExecution stepExecution) { return ExitStatus.COMPLETED; }
+}
+
+Tip: you actually don’t need your own counter. Spring Batch already tracks counts:
+
+@Override
+public InvoiceType process(CsvInvoiceDto item) {
+    // If you prefer framework count:
+    // int n = stepExecution.getReadCount() + 1;  // inject via beforeStep
+    return mapper.toInvoiceType(item);
+}
+
+(Use @BeforeStep/beforeStep to grab the StepExecution if you want that.)
+
+⸻
+
+2) 116 CSV rows → only 83 XMLs
+
+In Spring Batch, items are dropped when:
+	•	the processor returns null (item “filtered”), or
+	•	an exception is skipped due to a skip policy (job keeps running), or
+	•	the reader skips lines (blank lines, comment lines, header handling across multiple files).
+
+Do three quick things to pinpoint the loss and fix it:
+
+A) Log filter vs write counts after the step
+
+Add a listener so you can see exactly what happened.
+
+@Component
+@Slf4j
+public class StepTotalsListener implements StepExecutionListener {
+  @Override
+  public void afterStep(StepExecution se) {
+    log.info("Totals — read: {}, processed: {}, filtered: {}, written: {}, readSkip: {}, processSkip: {}, writeSkip: {}",
+      se.getReadCount(), se.getReadCount() - se.getFilterCount(), se.getFilterCount(),
+      se.getWriteCount(), se.getReadSkipCount(), se.getProcessSkipCount(), se.getWriteSkipCount());
+  }
+}
+
+Wire it into your step:
+
+.stepBuilderFactory.get("csvToXmlStep")
+  // ...
+  .listener(stepTotalsListener)
+
+If filtered > 0, your processor returned null for some rows.
+If readSkip/processSkip/writeSkip > 0, something was skipped due to an exception.
+
+B) Make the processor shout when it returns null
+
+Just for debugging:
+
+@Override
+public InvoiceType process(CsvInvoiceDto item) {
+  InvoiceType out = mapper.toInvoiceType(item);
+  if (out == null) {
+    log.warn("Filtered (mapper returned null) for invoiceNumber={}", item.getInvoiceNumber());
+  }
+  return out;
+}
+
+C) Tighten your CSV reader for multi‑file + blank lines
+
+Two very common causes of “missing” rows:
+	•	Header handling across multiple CSVs: if you reuse the same FlatFileItemReader via MultiResourceItemReader, make sure the header (and any per‑file state) resets for each resource.
+	•	Blank lines: by default they can be treated as records and then end up filtered or skipped.
+
+Recommended setup:
+
+@Bean
+@StepScope
+public FlatFileItemReader<CsvInvoiceDto> reader(SmartCsvInvoiceFieldSetMapper mapper) {
+  FlatFileItemReader<CsvInvoiceDto> r = new FlatFileItemReader<>();
+  r.setStrict(false);
+  r.setLinesToSkip(1); // header per file
+  r.setSkippedLinesCallback(line -> mapper.captureHeader(line)); // let mapper refresh header each file
+  r.setLineMapper(lineMapper(mapper));
+  r.setRecordSeparatorPolicy(new DefaultRecordSeparatorPolicy() {
+    @Override public boolean isEndOfRecord(String line) {
+      return super.isEndOfRecord(line);
+    }
+    @Override public String postProcess(String record) {
+      // Drop completely blank lines
+      return (record != null && record.trim().isEmpty()) ? null : super.postProcess(record);
+    }
+  });
+  return r;
+}
+
+private LineMapper<CsvInvoiceDto> lineMapper(SmartCsvInvoiceFieldSetMapper mapper) {
+  DefaultLineMapper<CsvInvoiceDto> lm = new DefaultLineMapper<>();
+  DelimitedLineTokenizer tok = new DelimitedLineTokenizer();
+  tok.setDelimiter(",");
+  tok.setQuoteCharacter('\"');
+  lm.setLineTokenizer(tok);
+  lm.setFieldSetMapper(mapper);
+  return lm;
+}
+
+And in your mapper, reset the header per resource:
+
+@Component
+@StepScope
+public class SmartCsvInvoiceFieldSetMapper implements FieldSetMapper<CsvInvoiceDto>, ResourceAware, ItemStream {
+
+  private volatile String[] header;
+
+  public void captureHeader(String headerLine) {
+    this.header = normalize(headerLine.split(","));
+  }
+
+  @Override public void setResource(Resource resource) { this.header = null; } // new file → reset
+
+  @Override public void open(ExecutionContext ec) { /* no-op */ }
+  @Override public void update(ExecutionContext ec) { /* no-op */ }
+  @Override public void close() { this.header = null; }
+
+  @Override
+  public CsvInvoiceDto mapFieldSet(FieldSet fs) {
+    if (header == null && fs.getNames() != null) header = normalize(fs.getNames());
+    // map using `header` ...
+    return buildDto(fs);
+  }
+
+  private String[] normalize(String[] names) { /* your normalization */ }
+}
+
+
+⸻
+
+What you should see next
+	•	The counter will start at 1 for each step execution.
+	•	The step summary will tell you, e.g., read: 116, filtered: 33, written: 83 (or show skips).
+	•	If filtered/skipped rows exist, your logs will show which invoiceNumbers got filtered and why.
+
+If you paste the step totals line from the logs after a run, I can point to the exact culprit (filtering vs skipping vs reader config).
+
 
 
