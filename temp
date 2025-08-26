@@ -1,173 +1,188 @@
-You’re right—let’s remove the duplication. Both `InvoiceType` and `CreditNoteType` expose **the same UBL types** for what we need: `List<DocumentReferenceType>` (contracts) and `AccountingSupplierPartyType → PartyType` (supplier). So make one core resolver that works off those shared types, and keep only two tiny entry points.
+I see your code in the photo 👍 — right now your `InvoiceBucketResolver` is hard-wired to `InvoiceType` only. The duplication worry you raised earlier comes from writing the same extractors for both `InvoiceType` and `CreditNoteType`.
+
+You can generalize it without copy-pasting by writing helper methods that work on the **common UBL aggregate types** (`List<DocumentReferenceType>`, `AccountingSupplierPartyType` → `PartyType`). Then both `InvoiceType` and `CreditNoteType` can feed into the same resolver.
+
+Here’s how you can refactor your current code:
 
 ```java
 @Service
 @RequiredArgsConstructor
-public class BucketResolver {
+public class InvoiceBucketResolver {
 
-  private final SupplierRepository repository;
-  private static final Set<String> PREFIXES = Set.of("12","13","14","15","19");
+    private final SupplierService supplierService; // or SupplierRepository
+    private static final Set<String> PREFIXES = Set.of("12","13","14","15","19");
 
-  // ---- Tiny type-specific entry points ----
-  public String resolveBucket(InvoiceType inv) {
-    return resolve(inv.getContractDocumentReference(),
-                   partyOf(inv.getAccountingSupplierParty()));
-  }
+    // ---- Public entry points ----
+    public String resolveBucket(InvoiceType invoice) {
+        return resolve(invoice.getContractDocumentReference(),
+                       partyOf(invoice.getAccountingSupplierParty()));
+    }
 
-  public String resolveBucket(CreditNoteType cn) {
-    return resolve(cn.getContractDocumentReference(),
-                   partyOf(cn.getAccountingSupplierParty()));
-  }
+    public String resolveBucket(CreditNoteType creditNote) {
+        return resolve(creditNote.getContractDocumentReference(),
+                       partyOf(creditNote.getAccountingSupplierParty()));
+    }
 
-  // ---- Single core resolver on shared UBL types ----
-  private String resolve(List<DocumentReferenceType> contracts, PartyType party) {
-    String contractId = firstId(contracts);
-    String supplierCompanyId = firstCompanyId(party);
-    boolean prefixMatch = contractId != null && PREFIXES.stream().anyMatch(contractId::startsWith);
-    boolean supplierMatch = supplierCompanyId != null && repository.existsByEnterpriseNumber(supplierCompanyId);
-    return (prefixMatch || supplierMatch) ? "M" : "F";
-  }
+    // ---- Core logic ----
+    private String resolve(List<DocumentReferenceType> contractRefs, PartyType party) {
+        String contractId = firstId(contractRefs);
+        String supplierCompanyId = firstCompanyId(party);
 
-  // ---- Small helpers (shared) ----
-  private PartyType partyOf(AccountingSupplierPartyType asp) {
-    return asp != null ? asp.getParty() : null;
-  }
+        boolean contractMatch = contractId != null && PREFIXES.stream().anyMatch(contractId::startsWith);
+        boolean knownSupplier = supplierCompanyId != null && supplierService.isKnownSupplier(supplierCompanyId);
 
-  private String firstId(List<DocumentReferenceType> refs) {
-    return (refs != null && !refs.isEmpty() && refs.get(0).getID() != null)
-        ? refs.get(0).getID().getValue() : null;
-  }
+        // If either rule applies, go "miles"
+        return (contractMatch || knownSupplier) ? "miles" : "finance";
+    }
 
-  private String firstCompanyId(PartyType party) {
-    if (party == null || party.getPartyTaxScheme() == null || party.getPartyTaxScheme().isEmpty()) return null;
-    var pts = party.getPartyTaxScheme().get(0);
-    return pts.getCompanyID() != null ? pts.getCompanyID().getValue() : null;
-  }
+    // ---- Small helpers ----
+    private PartyType partyOf(AccountingSupplierPartyType asp) {
+        return asp != null ? asp.getParty() : null;
+    }
+
+    private String firstId(List<DocumentReferenceType> refs) {
+        return (refs != null && !refs.isEmpty() && refs.get(0).getID() != null)
+                ? refs.get(0).getID().getValue() : null;
+    }
+
+    private String firstCompanyId(PartyType party) {
+        if (party == null || party.getPartyTaxScheme() == null || party.getPartyTaxScheme().isEmpty()) return null;
+        PartyTaxSchemeType pts = party.getPartyTaxScheme().get(0);
+        return pts.getCompanyID() != null ? pts.getCompanyID().getValue() : null;
+    }
 }
 ```
 
-### Why this is cleaner
+### Key changes compared to your current code
 
-* Only **two** tiny public methods; all logic lives in one place.
-* Uses UBL’s shared types, so no duplication of extraction code.
-* Easy to extend (e.g., add `DebitNoteType` with one-liner entry point).
+* **No duplication**: one `resolve` method that works with UBL common types.
+* **Two tiny overloads**: one for `InvoiceType`, one for `CreditNoteType`.
+* Helper methods (`firstId`, `firstCompanyId`) extract values safely.
+* Logic stays exactly the same (`contract prefix OR known supplier ⇒ "miles"`).
+
+---
+
+👉 Do you want me to also adapt your **JUnit test class** (the one I gave earlier) so it covers both `InvoiceType` and `CreditNoteType` against this new refactored resolver? That would let you drop it straight in and verify both paths.
 
 
 
-
-Here’s a compact JUnit 5 test for the deduplicated `BucketResolver` (using Mockito). Tweak the import package for your generated UBL classes.
+Here’s a compact JUnit 5 test for the refactored `InvoiceBucketResolver` that supports both `InvoiceType` and `CreditNoteType`. It uses Mockito to stub `SupplierService.isKnownSupplier(...)`. Adjust package names for your generated UBL classes if they differ.
 
 ```java
-// Adjust these imports to your generated UBL package names:
+package com.alphacredit.batch.service;
+
 import oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.*;
-import oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.*;
+import oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.CompanyIDType;
+import oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType;
 import oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType;
 import oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType;
-
-import com.alphacredit.batch.service.BucketResolver;
-import com.alphacredit.batch.domain.supplier.SupplierRepository;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.ArgumentMatchers;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-
-import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.*;
 
+/** Tests for InvoiceBucketResolver (InvoiceType + CreditNoteType). */
 @ExtendWith(MockitoExtension.class)
-class BucketResolverTest {
+class InvoiceBucketResolverTest {
 
-    @Mock SupplierRepository repo;
-    BucketResolver resolver;
+    @Mock SupplierService supplierService;
+
+    private InvoiceBucketResolver resolver;
 
     @BeforeEach
     void setUp() {
-        resolver = new BucketResolver(repo);
+        resolver = new InvoiceBucketResolver(supplierService);
     }
 
-    // --- InvoiceType tests ---
+    // ---------- InvoiceType ----------
 
     @Test
-    void invoice_prefixMatch_goesToM() {
+    void invoice_prefixMatch_goesMiles() {
         InvoiceType inv = new InvoiceType();
-        inv.getContractDocumentReference().add(docRef("12-ABC")); // prefix 12
-        inv.setAccountingSupplierParty(asp(null));                 // no supplier match
+        inv.getContractDocumentReference().add(docRef("12-ABC")); // prefix rule
+        inv.setAccountingSupplierParty(asp(null));                 // no supplier id
 
         String bucket = resolver.resolveBucket(inv);
 
-        assertThat(bucket).isEqualTo("M");
-        verify(repo, never()).existsByEnterpriseNumber(anyString());
+        assertThat(bucket).isEqualTo("miles");
+        verifyNoInteractions(supplierService);
     }
 
     @Test
-    void invoice_supplierMatch_goesToM() {
-        when(repo.existsByEnterpriseNumber("BE0123")).thenReturn(true);
+    void invoice_supplierKnown_goesMiles() {
+        when(supplierService.isKnownSupplier("BE0123")).thenReturn(true);
 
         InvoiceType inv = new InvoiceType();
-        inv.getContractDocumentReference().add(docRef("99-XYZ")); // no prefix match
-        inv.setAccountingSupplierParty(asp("BE0123"));            // supplier match
+        inv.getContractDocumentReference().add(docRef("99-NOPE")); // no prefix
+        inv.setAccountingSupplierParty(asp("BE0123"));             // supplier match
 
         String bucket = resolver.resolveBucket(inv);
 
-        assertThat(bucket).isEqualTo("M");
-        verify(repo).existsByEnterpriseNumber("BE0123");
+        assertThat(bucket).isEqualTo("miles");
+        verify(supplierService).isKnownSupplier("BE0123");
     }
 
     @Test
-    void invoice_noMatch_goesToF() {
-        when(repo.existsByEnterpriseNumber("BE999")).thenReturn(false);
+    void invoice_noMatch_goesFinance() {
+        when(supplierService.isKnownSupplier("BE999")).thenReturn(false);
 
         InvoiceType inv = new InvoiceType();
         inv.getContractDocumentReference().add(docRef("77-XYZ")); // no prefix
-        inv.setAccountingSupplierParty(asp("BE999"));             // repo says false
+        inv.setAccountingSupplierParty(asp("BE999"));             // not known
 
-        String bucket = resolver.resolveBucket(inv);
-
-        assertThat(bucket).isEqualTo("F");
-        verify(repo).existsByEnterpriseNumber("BE999");
+        assertThat(resolver.resolveBucket(inv)).isEqualTo("finance");
+        verify(supplierService).isKnownSupplier("BE999");
     }
 
     @Test
-    void invoice_nullSafe_emptyLists_goesToF() {
-        InvoiceType inv = new InvoiceType();
-        // no contract refs, no supplier party
-
-        String bucket = resolver.resolveBucket(inv);
-
-        assertThat(bucket).isEqualTo("F");
-        verify(repo, never()).existsByEnterpriseNumber(anyString());
+    void invoice_nullSafe_emptyData_goesFinance() {
+        InvoiceType inv = new InvoiceType(); // no refs, no party
+        assertThat(resolver.resolveBucket(inv)).isEqualTo("finance");
+        verifyNoInteractions(supplierService);
     }
 
-    // --- CreditNoteType tests ---
+    // ---------- CreditNoteType ----------
 
     @Test
-    void creditNote_prefixMatch_goesToM() {
+    void creditNote_prefixMatch_goesMiles() {
         CreditNoteType cn = new CreditNoteType();
         cn.getContractDocumentReference().add(docRef("15-HELLO"));
         cn.setAccountingSupplierParty(asp(null));
 
-        assertThat(resolver.resolveBucket(cn)).isEqualTo("M");
-        verify(repo, never()).existsByEnterpriseNumber(anyString());
+        assertThat(resolver.resolveBucket(cn)).isEqualTo("miles");
+        verifyNoInteractions(supplierService);
     }
 
     @Test
-    void creditNote_supplierMatch_goesToM() {
-        when(repo.existsByEnterpriseNumber("BE777")).thenReturn(true);
+    void creditNote_supplierKnown_goesMiles() {
+        when(supplierService.isKnownSupplier("BE777")).thenReturn(true);
 
         CreditNoteType cn = new CreditNoteType();
         cn.getContractDocumentReference().add(docRef("88-NOPE"));
         cn.setAccountingSupplierParty(asp("BE777"));
 
-        assertThat(resolver.resolveBucket(cn)).isEqualTo("M");
-        verify(repo).existsByEnterpriseNumber("BE777");
+        assertThat(resolver.resolveBucket(cn)).isEqualTo("miles");
+        verify(supplierService).isKnownSupplier("BE777");
     }
 
-    // --- Helpers ---
+    @Test
+    void creditNote_noMatch_goesFinance() {
+        when(supplierService.isKnownSupplier("BE000")).thenReturn(false);
+
+        CreditNoteType cn = new CreditNoteType();
+        cn.getContractDocumentReference().add(docRef("91-OTHER"));
+        cn.setAccountingSupplierParty(asp("BE000"));
+
+        assertThat(resolver.resolveBucket(cn)).isEqualTo("finance");
+        verify(supplierService).isKnownSupplier("BE000");
+    }
+
+    // ---------- Helpers ----------
 
     private static DocumentReferenceType docRef(String idValue) {
         DocumentReferenceType dr = new DocumentReferenceType();
@@ -180,7 +195,6 @@ class BucketResolverTest {
     private static AccountingSupplierPartyType asp(String companyId) {
         AccountingSupplierPartyType asp = new AccountingSupplierPartyType();
         PartyType party = new PartyType();
-
         if (companyId != null) {
             PartyTaxSchemeType tax = new PartyTaxSchemeType();
             CompanyIDType cid = new CompanyIDType();
@@ -194,8 +208,16 @@ class BucketResolverTest {
 }
 ```
 
-**Notes**
+If you’re not using AssertJ, replace:
 
-* Uses AssertJ for crisp assertions; switch to `org.junit.jupiter.api.Assertions` if you prefer.
-* If your generated classes live under different packages (e.g., `eu.peppol.ubl...`), update the import lines accordingly.
-* This covers: prefix rule, supplier DB match, no-match fallback, null-safety, and both `InvoiceType` & `CreditNoteType`.
+```java
+import static org.assertj.core.api.Assertions.assertThat;
+```
+
+with JUnit assertions:
+
+```java
+import static org.junit.jupiter.api.Assertions.assertEquals;
+```
+
+and change `assertThat(x).isEqualTo("miles")` → `assertEquals("miles", x)`.
