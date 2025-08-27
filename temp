@@ -1,77 +1,286 @@
-Perfect—since you already have **XMLInvoiceWriter** and **XMLCreditNoteWriter**, just route items to the right writer at runtime.
+Absolutely—here are focused, drop-in **JUnit 5** test classes to cover:
 
-## 1) Processor: CSV → either `InvoiceType` or `CreditNoteType`
+1. the **processor** (CSV → `InvoiceType` or `CreditNoteType`)
+2. the **classifier writer** (routes to your two writers)
+3. an **end-to-end step test** (reader → processor → classifier writer) proving items are routed correctly
+
+Assumptions:
+
+* Package names for UBL classes are the standard ones (adjust if yours differ).
+* You have `spring-boot-starter-test`, `spring-batch-test`, and `mockito` on the classpath.
+
+---
+
+# 1) Processor test
 
 ```java
-@Component
-@StepScope
-@RequiredArgsConstructor
-public class CsvToUblProcessor implements ItemProcessor<CsvInvoiceDto, Object> {
-  private final CsvInvoiceMapper mapper; // add toCreditNoteType() if not present
+package com.alphacredit.batch.processing;
 
-  @Override
-  public Object process(CsvInvoiceDto dto) {
-    return "381".equals(dto.getInvoiceTypeCode())
-        ? mapper.toCreditNoteType(dto)
-        : mapper.toInvoiceType(dto); // default 380
+import com.alphacredit.batch.domain.CsvInvoiceDto;
+import com.alphacredit.batch.mapping.CsvInvoiceMapper;
+import com.alphacredit.batch.processing.CsvToUblProcessor;
+import oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType;
+import oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class CsvToUblProcessorTest {
+
+  @Mock CsvInvoiceMapper mapper;
+  @InjectMocks CsvToUblProcessor processor;
+
+  @Test
+  void returnsCreditNote_whenTypeCode381() throws Exception {
+    var dto = new CsvInvoiceDto();
+    dto.setInvoiceTypeCode("381");
+    var cn = new CreditNoteType();
+    when(mapper.toCreditNoteType(dto)).thenReturn(cn);
+
+    Object out = processor.process(dto);
+
+    assertTrue(out instanceof CreditNoteType);
+    verify(mapper).toCreditNoteType(dto);
+    verify(mapper, never()).toInvoiceType(any());
+  }
+
+  @Test
+  void returnsInvoice_otherwise() throws Exception {
+    var dto = new CsvInvoiceDto();
+    dto.setInvoiceTypeCode("380");
+    var inv = new InvoiceType();
+    when(mapper.toInvoiceType(dto)).thenReturn(inv);
+
+    Object out = processor.process(dto);
+
+    assertTrue(out instanceof InvoiceType);
+    verify(mapper).toInvoiceType(dto);
+    verify(mapper, never()).toCreditNoteType(any());
   }
 }
 ```
 
-## 2) Classifier writer: delegate to your two writers
+---
+
+# 2) Classifier writer test
+
+This verifies that objects are dispatched to the correct writer.
 
 ```java
-@Configuration
-public class WriterConfig {
+package com.alphacredit.batch.writer;
 
-  @Bean
-  @StepScope
+import oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType;
+import oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.springframework.batch.item.ItemWriter;
+import org.springframework.batch.item.support.ClassifierCompositeItemWriter;
+
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+class UblClassifierWriterTest {
+
   @SuppressWarnings("unchecked")
-  public ClassifierCompositeItemWriter<Object> ublClassifierWriter(
-      XMLInvoiceWriter invoiceWriter,           // ItemWriter<InvoiceType>
-      XMLCreditNoteWriter creditNoteWriter) {   // ItemWriter<CreditNoteType>
+  @Test
+  void routesToCorrectDelegate() throws Exception {
+    // Arrange: two concrete writers
+    ItemWriter<InvoiceType> invoiceWriter = mock(ItemWriter.class);
+    ItemWriter<CreditNoteType> creditWriter = mock(ItemWriter.class);
 
-    ClassifierCompositeItemWriter<Object> cw = new ClassifierCompositeItemWriter<>();
-    cw.setClassifier(item -> {
-      if (item instanceof oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType) {
-        return (ItemWriter<Object>) (ItemWriter<?>) invoiceWriter;
-      } else if (item instanceof oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType) {
-        return (ItemWriter<Object>) (ItemWriter<?>) creditNoteWriter;
-      } else {
-        throw new IllegalArgumentException("Unsupported type: " + item.getClass());
-      }
+    // Build the classifier writer just like in your WriterConfig
+    ClassifierCompositeItemWriter<Object> classifier = new ClassifierCompositeItemWriter<>();
+    classifier.setClassifier(item -> {
+      if (item instanceof InvoiceType) return (ItemWriter<Object>)(ItemWriter<?>)invoiceWriter;
+      if (item instanceof CreditNoteType) return (ItemWriter<Object>)(ItemWriter<?>)creditWriter;
+      throw new IllegalArgumentException("Unsupported: " + item.getClass());
     });
-    return cw;
+
+    // Input batch: 2 invoices + 1 credit note
+    var inv1 = new InvoiceType();
+    var inv2 = new InvoiceType();
+    var cn1  = new CreditNoteType();
+
+    // Act
+    classifier.write(List.of(inv1, cn1, inv2));
+
+    // Assert: each delegate got only the items of its type
+    ArgumentCaptor<List<InvoiceType>> invCap = ArgumentCaptor.forClass(List.class);
+    verify(invoiceWriter, times(2)).write(invCap.capture());
+    // Because ClassifierCompositeItemWriter calls delegate per-item, we expect multiple single-item lists
+    assertEquals(2, invCap.getAllValues().size());
+    assertTrue(invCap.getAllValues().stream().allMatch(l -> l.size() == 1 && l.get(0) instanceof InvoiceType));
+
+    ArgumentCaptor<List<CreditNoteType>> cnCap = ArgumentCaptor.forClass(List.class);
+    verify(creditWriter, times(1)).write(cnCap.capture());
+    assertEquals(1, cnCap.getAllValues().size());
+    assertEquals(1, cnCap.getValue().size());
+    assertTrue(cnCap.getValue().get(0) instanceof CreditNoteType);
+
+    verifyNoMoreInteractions(invoiceWriter, creditWriter);
   }
 }
 ```
 
-> No changes needed inside your existing `XMLInvoiceWriter` / `XMLCreditNoteWriter`.
+---
 
-## 3) Step wiring: make the chunk polymorphic
+# 3) End-to-end step test (Spring Batch)
+
+This spins up a minimal Spring context and proves that:
+
+* the **processor** converts based on `InvoiceTypeCode`
+* the **classifier** routes to the right writer
+* both writers get called the expected number of times
+
+We’ll use **stub writers** that just record what they saw.
 
 ```java
-@Bean
-public Step csvToXmlStep(MultiResourceItemReader<CsvInvoiceDto> reader,
-                         CsvToUblProcessor processor,
-                         ClassifierCompositeItemWriter<Object> ublClassifierWriter) {
-  return new StepBuilder("csvToXmlStep", jobRepository)
-      .<CsvInvoiceDto, Object>chunk(50, transactionManager)
-      .reader(reader)
-      .processor(processor)
-      .writer(ublClassifierWriter)
-      .build();
+package com.alphacredit.batch.step;
+
+import com.alphacredit.batch.domain.CsvInvoiceDto;
+import com.alphacredit.batch.mapping.CsvInvoiceMapper;
+import com.alphacredit.batch.processing.CsvToUblProcessor;
+import oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType;
+import oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType;
+import org.junit.jupiter.api.Test;
+import org.springframework.batch.core.*;
+import org.springframework.batch.core.configuration.annotation.EnableBatchProcessing;
+import org.springframework.batch.core.job.builder.JobBuilder;
+import org.springframework.batch.core.launch.JobLauncher;
+import org.springframework.batch.core.repository.JobRepository;
+import org.springframework.batch.core.step.builder.StepBuilder;
+import org.springframework.batch.item.*;
+import org.springframework.batch.item.support.ClassifierCompositeItemWriter;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.annotation.*;
+import org.springframework.transaction.PlatformTransactionManager;
+
+import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+@SpringBootTest(classes = CsvToXmlStepTest.Config.class)
+class CsvToXmlStepTest {
+
+  @Autowired JobLauncher launcher;
+  @Autowired Job job;
+  @Autowired Config.RecordingInvoiceWriter invWriter;
+  @Autowired Config.RecordingCreditWriter cnWriter;
+
+  @Test
+  void routesInvoicesAndCreditNotes() throws Exception {
+    JobExecution exec = launcher.run(job, new JobParameters());
+    assertEquals(BatchStatus.COMPLETED, exec.getStatus());
+
+    // We fed 2 invoices + 1 creditnote (see reader below)
+    assertEquals(2, invWriter.items.size());
+    assertEquals(1, cnWriter.items.size());
+  }
+
+  // ---- Test configuration ----
+  @Configuration
+  @EnableBatchProcessing
+  static class Config {
+
+    // Simple reader that returns 3 DTOs: 2 invoices (380) + 1 credit (381)
+    @Bean
+    ItemReader<CsvInvoiceDto> reader() {
+      List<CsvInvoiceDto> list = new ArrayList<>();
+      list.add(dto("INV-1", "380"));
+      list.add(dto("INV-2", "380"));
+      list.add(dto("CN-1",  "381"));
+      return new ListItemReader<>(list);
+    }
+
+    private static CsvInvoiceDto dto(String id, String typeCode) {
+      CsvInvoiceDto d = new CsvInvoiceDto();
+      d.setInvoiceNumber(id);
+      d.setInvoiceTypeCode(typeCode);
+      return d;
+    }
+
+    // Mapper stub that makes minimal UBL objects
+    @Bean
+    CsvInvoiceMapper mapper() {
+      return new CsvInvoiceMapper() {
+        @Override public InvoiceType toInvoiceType(CsvInvoiceDto src) {
+          InvoiceType inv = new InvoiceType();
+          var id = new oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType();
+          id.setValue(src.getInvoiceNumber());
+          inv.setID(id);
+          return inv;
+        }
+        @Override public CreditNoteType toCreditNoteType(CsvInvoiceDto src) {
+          CreditNoteType cn = new CreditNoteType();
+          var id = new oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType();
+          id.setValue(src.getInvoiceNumber());
+          cn.setID(id);
+          return cn;
+        }
+      };
+    }
+
+    @Bean CsvToUblProcessor processor(CsvInvoiceMapper mapper) { return new CsvToUblProcessor(mapper); }
+
+    // Recording writers (stand-ins for your XMLInvoiceWriter / XMLCreditNoteWriter)
+    @Bean RecordingInvoiceWriter invoiceWriter() { return new RecordingInvoiceWriter(); }
+    @Bean RecordingCreditWriter creditWriter()   { return new RecordingCreditWriter(); }
+
+    @Bean
+    @SuppressWarnings("unchecked")
+    ClassifierCompositeItemWriter<Object> classifierWriter(RecordingInvoiceWriter inv, RecordingCreditWriter cn) {
+      ClassifierCompositeItemWriter<Object> cw = new ClassifierCompositeItemWriter<>();
+      cw.setClassifier(item -> {
+        if (item instanceof InvoiceType)     return (ItemWriter<Object>)(ItemWriter<?>) inv;
+        if (item instanceof CreditNoteType)  return (ItemWriter<Object>)(ItemWriter<?>) cn;
+        throw new IllegalArgumentException("Unsupported: " + item);
+      });
+      return cw;
+    }
+
+    @Bean
+    Job job(JobRepository repo, PlatformTransactionManager tx,
+            ItemReader<CsvInvoiceDto> reader,
+            CsvToUblProcessor processor,
+            ClassifierCompositeItemWriter<Object> writer) {
+      Step step = new StepBuilder("csvToXmlStep", repo)
+          .<CsvInvoiceDto, Object>chunk(10, tx)
+          .reader(reader)
+          .processor(processor)
+          .writer(writer)
+          .build();
+      return new JobBuilder("testJob", repo).start(step).build();
+    }
+
+    // --- recording writers
+    static class RecordingInvoiceWriter implements ItemWriter<InvoiceType> {
+      final List<InvoiceType> items = new CopyOnWriteArrayList<>();
+      @Override public void write(List<? extends InvoiceType> items) { this.items.addAll(items); }
+    }
+    static class RecordingCreditWriter implements ItemWriter<CreditNoteType> {
+      final List<CreditNoteType> items = new CopyOnWriteArrayList<>();
+      @Override public void write(List<? extends CreditNoteType> items) { this.items.addAll(items); }
+    }
+  }
 }
 ```
 
-## 4) Mapper interface (MapStruct)
+---
 
-```java
-@Mapper(componentModel = "spring", builder = @Builder(disableBuilder = true))
-public interface CsvInvoiceMapper {
-  InvoiceType toInvoiceType(CsvInvoiceDto src);
-  CreditNoteType toCreditNoteType(CsvInvoiceDto src);
-}
-```
+## What these tests give you
 
-That’s it. Now rows with `InvoiceTypeCode == "381"` go to **XMLCreditNoteWriter**, everything else goes to **XMLInvoiceWriter**—clean, type-safe, and keeps your writers separate.
+* ✅ **Processor logic**: confidently flips to `CreditNoteType` when `InvoiceTypeCode == 381`.
+* ✅ **Routing**: classifier sends each object to the correct concrete writer.
+* ✅ **Step integration**: with a real Batch step, confirms two invoices + one credit note end up in the expected writers.
+
+If you want, I can also add quick tests for your `BucketResolver` on both `InvoiceType` and `CreditNoteType` using your latest implementation, but since you already validated that earlier, these three should cover your CSV→polymorphic UBL flow end-to-end.
