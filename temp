@@ -1,68 +1,109 @@
+Ah—that’s almost certainly macOS’s old Bash (3.2) biting us. The earlier script used `mapfile` and associative arrays (`declare -A`), which don’t exist in Bash 3.2—hence the “line 41: command not found”.
 
-#!/usr/bin/env bash
-# Usage: ./match_open_hosts.sh hosts.txt firewall.csv > open_hosts.csv
-# hosts.txt       : lines like   host.example.com:443
-# firewall.csv    : CSV with header: ip,port,status  (status e.g. "open")
+Here’s a **mac-friendly, POSIX-style** version that:
 
-set -euo pipefail
+* works with the default macOS shell,
+* supports **multiple ports per host** (comma / space / semicolon / slash separated),
+* preserves your **host order**,
+* outputs only entries where the firewall CSV says **open**.
 
-if [[ $# -ne 2 ]]; then
+### `match_open_hosts_multi_posix.sh`
+
+```sh
+#!/bin/sh
+# Usage: ./match_open_hosts_multi_posix.sh hosts.txt firewall.csv > open_hosts.csv
+# hosts.txt lines can be:
+#   host.example.com:443
+#   host.example.com:443,8443   (also space/;/ slash separated)
+# firewall.csv header: ip,port,status   (status: open/closed)
+
+set -eu
+
+if [ "$#" -ne 2 ]; then
   echo "Usage: $0 hosts.txt firewall.csv" >&2
   exit 1
 fi
 
-hosts_file="$1"
-csv_file="$2"
+hosts_file=$1
+csv_file=$2
 
-# Build a set of OPEN ip:port from the CSV (case-insensitive match on "open")
-tmp_open="$(mktemp)"
+# Build a set of OPEN ip:port pairs from the CSV
+open_set="$(mktemp)"
 awk -F',' '
   BEGIN{IGNORECASE=1}
-  NR==1 { next }  # skip header
+  NR==1 { next }                   # skip header
   {
     ip=$1; port=$2; status=$3
     gsub(/^[ \t"]+|[ \t"]+$/,"",ip)
     gsub(/^[ \t"]+|[ \t"]+$/,"",port)
     gsub(/^[ \t"]+|[ \t"]+$/,"",status)
-    if (ip ~ /^\[/) { gsub(/^\[/, "", ip); gsub(/\]$/, "", ip) } # [v6] -> v6
-    if (status == "open") print ip ":" port
-  }' "$csv_file" | sort -u > "$tmp_open"
-
-in_open_set() { grep -qx -- "$1:$2" "$tmp_open"; }
+    if (ip ~ /^\[/) { gsub(/^\[/,"",ip); gsub(/\]$/,"",ip) }  # [v6] -> v6
+    if (tolower(status)=="open") print ip ":" port
+  }' "$csv_file" | sort -u > "$open_set"
 
 echo "hostname,port,matched_ip,status"
 
-while IFS= read -r line || [[ -n "$line" ]]; do
-  [[ -z "$line" || "$line" =~ ^# ]] && continue
-  host="${line%:*}"
-  port="${line##*:}"
+# Read hosts.txt in order
+while IFS= read -r line || [ -n "$line" ]; do
+  case "$line" in ''|\#*) continue ;; esac
+  host=${line%%:*}
+  ports_raw=${line#*:}
 
-  matched=""
-  # Resolve A and AAAA (don’t sort; DNS order doesn’t matter—we check membership)
-  mapfile -t A < <(dig +short A "$host")
-  mapfile -t AAAA < <(dig +short AAAA "$host")
-  # Dedup while preserving order
-  seen=""
-  for ip in "${A[@]}" "${AAAA[@]}"; do
-    [[ -z "$ip" ]] && continue
-    case ",$seen," in
-      *,"$ip",*) ;; # already seen
-      *)
-        seen="$seen,$ip"
-        if in_open_set "$ip" "$port"; then
-          matched="$ip"
-          break
-        fi
-        ;;
-    esac
+  # Expand multiple ports: split on comma/space/semicolon/slash
+  PORTS=$(printf '%s' "$ports_raw" | tr ',;/ ' '\n' | sed '/^$/d')
+  for port in $PORTS; do
+    case "$port" in ''|*[!0-9]*) continue ;; esac
+
+    # Resolve A and AAAA, de-dup while preserving order
+    addrs=$(
+      { dig +short A "$host"; dig +short AAAA "$host"; } 2>/dev/null \
+      | awk 'NF{gsub(/\r/,""); if(!seen[$0]++){print $0}}'
+    )
+
+    matched_ip=""
+    for ip in $addrs; do
+      if grep -qx -- "$ip:$port" "$open_set"; then
+        matched_ip=$ip
+        break
+      fi
+    done
+
+    if [ -n "$matched_ip" ]; then
+      printf '%s,%s,%s,open\n' "$host" "$port" "$matched_ip"
+    fi
   done
-
-  if [[ -n "$matched" ]]; then
-    echo "$host,$port,$matched,open"
-  fi
 done < "$hosts_file"
 
-rm -f "$tmp_open"
+rm -f "$open_set"
+```
+
+### Run it
+
+```bash
+chmod +x match_open_hosts_multi_posix.sh
+# (Optional: avoid weird clipboard/encoding issues)
+export LC_ALL=C LANG=C
+./match_open_hosts_multi_posix.sh hosts.txt firewall.csv > open_hosts.csv
+```
+
+### Notes
+
+* Requires `dig` (usually present on macOS). If not: `brew install bind`.
+* If you created files on Windows and see odd errors, normalize line endings:
+
+  ```bash
+  perl -pi -e 's/\r$//' hosts.txt firewall.csv
+  ```
+* Your **hosts.txt** can have multi-ports per line, e.g.:
+
+  ```
+  app1.example.com:443,8443
+  api.example.net:80 8080
+  ```
+* Output `open_hosts.csv` includes only host\:port pairs that resolve to an IP\:port marked **open** in `firewall.csv`, and keeps your **host list order**.
+
+If you’d rather print **all** host\:port pairs and mark non-matches as `closed`, say the word and I’ll drop that variant too.
+
 
 Absolutely—here are focused, drop-in **JUnit 5** test classes to cover:
 
