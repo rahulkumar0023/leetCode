@@ -1,3 +1,69 @@
+
+#!/usr/bin/env bash
+# Usage: ./match_open_hosts.sh hosts.txt firewall.csv > open_hosts.csv
+# hosts.txt       : lines like   host.example.com:443
+# firewall.csv    : CSV with header: ip,port,status  (status e.g. "open")
+
+set -euo pipefail
+
+if [[ $# -ne 2 ]]; then
+  echo "Usage: $0 hosts.txt firewall.csv" >&2
+  exit 1
+fi
+
+hosts_file="$1"
+csv_file="$2"
+
+# Build a set of OPEN ip:port from the CSV (case-insensitive match on "open")
+tmp_open="$(mktemp)"
+awk -F',' '
+  BEGIN{IGNORECASE=1}
+  NR==1 { next }  # skip header
+  {
+    ip=$1; port=$2; status=$3
+    gsub(/^[ \t"]+|[ \t"]+$/,"",ip)
+    gsub(/^[ \t"]+|[ \t"]+$/,"",port)
+    gsub(/^[ \t"]+|[ \t"]+$/,"",status)
+    if (ip ~ /^\[/) { gsub(/^\[/, "", ip); gsub(/\]$/, "", ip) } # [v6] -> v6
+    if (status == "open") print ip ":" port
+  }' "$csv_file" | sort -u > "$tmp_open"
+
+in_open_set() { grep -qx -- "$1:$2" "$tmp_open"; }
+
+echo "hostname,port,matched_ip,status"
+
+while IFS= read -r line || [[ -n "$line" ]]; do
+  [[ -z "$line" || "$line" =~ ^# ]] && continue
+  host="${line%:*}"
+  port="${line##*:}"
+
+  matched=""
+  # Resolve A and AAAA (don’t sort; DNS order doesn’t matter—we check membership)
+  mapfile -t A < <(dig +short A "$host")
+  mapfile -t AAAA < <(dig +short AAAA "$host")
+  # Dedup while preserving order
+  seen=""
+  for ip in "${A[@]}" "${AAAA[@]}"; do
+    [[ -z "$ip" ]] && continue
+    case ",$seen," in
+      *,"$ip",*) ;; # already seen
+      *)
+        seen="$seen,$ip"
+        if in_open_set "$ip" "$port"; then
+          matched="$ip"
+          break
+        fi
+        ;;
+    esac
+  done
+
+  if [[ -n "$matched" ]]; then
+    echo "$host,$port,$matched,open"
+  fi
+done < "$hosts_file"
+
+rm -f "$tmp_open"
+
 Absolutely—here are focused, drop-in **JUnit 5** test classes to cover:
 
 1. the **processor** (CSV → `InvoiceType` or `CreditNoteType`)
