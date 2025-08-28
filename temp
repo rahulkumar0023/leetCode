@@ -1,3 +1,208 @@
+You’re spot on: CreditNoteType isn’t a drop-in for InvoiceType. A few property names differ (most notably creditNoteLine vs invoiceLine), and if your MapStruct mappings/ helpers all return Invoice* aggregates (e.g., InvoiceLineType), MapStruct will quietly skip them for CreditNoteType. That’s why your credit note XML ends up almost empty (even ID if you accidentally targeted the wrong path).
+
+Here’s a clean way to fix it.
+
+What to change
+	1.	Have two top-level mapping methods: one to InvoiceType, one to CreditNoteType.
+	2.	Share helpers that return common UBL CAC/CBC types (ID, Party, TaxTotal, LegalMonetaryTotal, etc.).
+	3.	Provide two separate line mappers:
+	•	List<InvoiceLineType> for invoices
+	•	List<CreditNoteLineType> for credit notes
+(Their element types differ, so MapStruct can’t reuse one.)
+	4.	Make sure targets use the correct property names for each root:
+	•	InvoiceType.invoiceLine
+	•	CreditNoteType.creditNoteLine
+
+Reference MapStruct mapper (trimmed but working)
+
+Adjust names/DTO fields to yours; pay attention to the targets on each method.
+
+@Mapper(
+    componentModel = "spring",
+    builder = @Builder(disableBuilder = true),
+    nullValueCheckStrategy = NullValueCheckStrategy.ALWAYS
+)
+public interface CsvInvoiceMapper {
+
+  // ---- Invoice ----
+  @Mappings({
+      @Mapping(target = "ID", source = "invoiceNumber", qualifiedByName = "toID"),
+      @Mapping(target = "DocumentCurrencyCode", source = "currency", qualifiedByName = "toCurrencyCode"),
+      @Mapping(target = "AccountingSupplierParty", source = ".", qualifiedByName = "toSupplierParty"),
+      @Mapping(target = "AccountingCustomerParty", source = ".", qualifiedByName = "toCustomerParty"),
+      @Mapping(target = "LegalMonetaryTotal", source = ".", qualifiedByName = "toLegalMonetaryTotal"),
+      @Mapping(target = "TaxTotal", source = ".", qualifiedByName = "toTaxTotals"),
+      @Mapping(target = "ContractDocumentReference", source = ".", qualifiedByName = "toContractRefs"),
+      @Mapping(target = "InvoiceLine", source = "lines", qualifiedByName = "toInvoiceLines")
+  })
+  oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType toInvoiceType(CsvInvoiceDto dto);
+
+  // ---- Credit Note ----
+  @Mappings({
+      @Mapping(target = "ID", source = "invoiceNumber", qualifiedByName = "toID"),
+      @Mapping(target = "DocumentCurrencyCode", source = "currency", qualifiedByName = "toCurrencyCode"),
+      @Mapping(target = "AccountingSupplierParty", source = ".", qualifiedByName = "toSupplierParty"),
+      @Mapping(target = "AccountingCustomerParty", source = ".", qualifiedByName = "toCustomerParty"),
+      @Mapping(target = "LegalMonetaryTotal", source = ".", qualifiedByName = "toLegalMonetaryTotal"),
+      @Mapping(target = "TaxTotal", source = ".", qualifiedByName = "toTaxTotals"),
+      @Mapping(target = "ContractDocumentReference", source = ".", qualifiedByName = "toContractRefs"),
+      // IMPORTANT: property name differs on CreditNote
+      @Mapping(target = "CreditNoteLine", source = "lines", qualifiedByName = "toCreditNoteLines")
+  })
+  oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType toCreditNoteType(CsvInvoiceDto dto);
+
+  // ===== Shared CBC helpers =====
+
+  @Named("toID")
+  default oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType toID(String value) {
+    if (value == null || value.isBlank()) return null;
+    var id = new oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType();
+    id.setValue(value);
+    return id;
+  }
+
+  @Named("toCurrencyCode")
+  default oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.DocumentCurrencyCodeType toCurrencyCode(String code) {
+    if (code == null || code.isBlank()) return null;
+    var c = new oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.DocumentCurrencyCodeType();
+    c.setValue(code);
+    return c;
+  }
+
+  // ===== Shared CAC helpers =====
+
+  @Named("toSupplierParty")
+  default oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.AccountingSupplierPartyType toSupplierParty(CsvInvoiceDto dto) {
+    // build Party with PartyTaxScheme.CompanyID etc.
+    var asp = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.AccountingSupplierPartyType();
+    var party = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.PartyType();
+    // ... fill party from dto (enterprise number, names, addresses, contacts)
+    asp.setParty(party);
+    return asp;
+  }
+
+  @Named("toCustomerParty")
+  default oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.AccountingCustomerPartyType toCustomerParty(CsvInvoiceDto dto) {
+    var acp = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.AccountingCustomerPartyType();
+    var party = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.PartyType();
+    // ... fill party from dto
+    acp.setParty(party);
+    return acp;
+  }
+
+  @Named("toLegalMonetaryTotal")
+  default oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.LegalMonetaryTotalType toLegalMonetaryTotal(CsvInvoiceDto dto) {
+    var t = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.LegalMonetaryTotalType();
+    // ... set PayableAmount, LineExtensionAmount, etc.
+    return t;
+  }
+
+  @Named("toTaxTotals")
+  default java.util.List<oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.TaxTotalType> toTaxTotals(CsvInvoiceDto dto) {
+    var tax = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.TaxTotalType();
+    // ... set TaxAmount and subtotals
+    return java.util.List.of(tax);
+  }
+
+  @Named("toContractRefs")
+  default java.util.List<oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.DocumentReferenceType> toContractRefs(CsvInvoiceDto dto) {
+    if (dto.getContractDocumentReferenceId() == null) return java.util.List.of();
+    var dr = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.DocumentReferenceType();
+    var id = new oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType();
+    id.setValue(dto.getContractDocumentReferenceId());
+    dr.setID(id);
+    return java.util.List.of(dr);
+  }
+
+  // ===== Lines: two separate helpers =====
+
+  @Named("toInvoiceLines")
+  default java.util.List<oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.InvoiceLineType>
+  toInvoiceLines(java.util.List<CsvInvoiceDto.Line> lines) {
+    if (lines == null || lines.isEmpty()) return java.util.List.of();
+    var out = new java.util.ArrayList<oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.InvoiceLineType>();
+    for (var l : lines) {
+      var il = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.InvoiceLineType();
+      // ... set line ID, InvoicedQuantity, LineExtensionAmount, Item, Price, etc.
+      out.add(il);
+    }
+    return out;
+  }
+
+  @Named("toCreditNoteLines")
+  default java.util.List<oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.CreditNoteLineType>
+  toCreditNoteLines(java.util.List<CsvInvoiceDto.Line> lines) {
+    if (lines == null || lines.isEmpty()) return java.util.List.of();
+    var out = new java.util.ArrayList<oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.CreditNoteLineType>();
+    for (var l : lines) {
+      var cl = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.CreditNoteLineType();
+      // ... set line ID, CreditedQuantity, LineExtensionAmount, Item, Price, etc.
+      out.add(cl);
+    }
+    return out;
+  }
+}
+
+Subtle but critical: CreditNoteLineType uses CreditedQuantity (vs InvoicedQuantity). Make sure to set the right field in each line helper.
+
+Quick JUnit tests (mapper level)
+
+These prove ID and lines are present for both types. Replace field access with your actual DTO fields.
+
+@ExtendWith(MockitoExtension.class)
+class CsvInvoiceMapperCreditNoteTest {
+
+  // If you use MapStruct with componentModel="spring", you can instantiate the impl directly in tests:
+  private final CsvInvoiceMapper mapper = new CsvInvoiceMapperImpl();
+
+  @Test
+  void mapsInvoice_ok() {
+    CsvInvoiceDto dto = sampleDto("INV-1", "EUR", "380");
+    var inv = mapper.toInvoiceType(dto);
+
+    assertNotNull(inv.getID());
+    assertEquals("INV-1", inv.getID().getValue());
+    assertEquals("EUR", inv.getDocumentCurrencyCode().getValue());
+    assertNotNull(inv.getInvoiceLine());
+    assertFalse(inv.getInvoiceLine().isEmpty());
+  }
+
+  @Test
+  void mapsCreditNote_ok() {
+    CsvInvoiceDto dto = sampleDto("CN-1", "EUR", "381");
+    var cn = mapper.toCreditNoteType(dto);
+
+    assertNotNull(cn.getID());
+    assertEquals("CN-1", cn.getID().getValue());
+    assertEquals("EUR", cn.getDocumentCurrencyCode().getValue());
+    assertNotNull(cn.getCreditNoteLine());        // different collection name
+    assertFalse(cn.getCreditNoteLine().isEmpty());
+  }
+
+  private CsvInvoiceDto sampleDto(String id, String ccy, String type) {
+    CsvInvoiceDto d = new CsvInvoiceDto();
+    d.setInvoiceNumber(id);
+    d.setDocumentCurrencyCode(ccy);
+    d.setInvoiceTypeCode(type);
+    // add one line
+    var line = new CsvInvoiceDto.Line();
+    line.setQuantity("1");
+    line.setPrice("10.00");
+    d.setLines(java.util.List.of(line));
+    d.setContractDocumentReferenceId("12-ABC");
+    return d;
+  }
+}
+
+Common gotchas checklist
+	•	✅ Property names: CreditNoteType.creditNoteLine vs InvoiceType.invoiceLine.
+	•	✅ Line element names: CreditedQuantity vs InvoicedQuantity.
+	•	✅ Helpers’ return types: Don’t reuse InvoiceLineType helpers for credit notes.
+	•	✅ Marshaller context: include both root types in your JAXBContext.
+	•	✅ Null checks: MapStruct with nullValueCheckStrategy = ALWAYS avoids NPEs in generated code.
+
+If you wire the above, your toCreditNoteType(...) will produce a fully populated credit note XML with all children present, and your existing bucket resolver + classifier writer will work unchanged.
+
 Perfect — understood 👌
 If your boss is presenting this to management, the text should be:
 	•	Concise (no long paragraphs)
