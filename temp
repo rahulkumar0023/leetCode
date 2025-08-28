@@ -1,3 +1,154 @@
+Gotcha—when you use MapStruct with target = ... + expression = "java(...)" for UBL, two very easy gotchas cause “empty CreditNote XML”:
+	1.	Wrong target property names (they differ between InvoiceType and CreditNoteType)
+	2.	Helpers returning the wrong aggregate type (e.g., InvoiceLineType instead of CreditNoteLineType)
+
+Here’s a minimal, safe pattern that works with expression for both roots.
+
+MapStruct: targets + expressions that actually bind
+
+@Mapper(
+  componentModel = "spring",
+  builder = @Builder(disableBuilder = true),
+  nullValueCheckStrategy = NullValueCheckStrategy.ALWAYS
+)
+public interface CsvInvoiceMapper {
+
+  // ---------- Invoice ----------
+  @Mappings({
+    // IMPORTANT: property name is "iD" (because getter is getID())
+    @Mapping(target = "iD", expression = "java(toID(dto.getInvoiceNumber()))"),
+    @Mapping(target = "documentCurrencyCode", expression = "java(toDocCurrency(dto.getDocumentCurrencyCode()))"),
+    @Mapping(target = "accountingSupplierParty", expression = "java(toSupplierParty(dto))"),
+    @Mapping(target = "accountingCustomerParty", expression = "java(toCustomerParty(dto))"),
+    @Mapping(target = "contractDocumentReference", expression = "java(toContractRefs(dto))"),
+    // property is invoiceLine on InvoiceType
+    @Mapping(target = "invoiceLine", expression = "java(toInvoiceLines(dto))")
+  })
+  oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType toInvoiceType(CsvInvoiceDto dto);
+
+  // ---------- Credit Note ----------
+  @Mappings({
+    // same CBC/CAC, but targets must match CreditNoteType properties
+    @Mapping(target = "iD", expression = "java(toID(dto.getInvoiceNumber()))"),
+    @Mapping(target = "documentCurrencyCode", expression = "java(toDocCurrency(dto.getDocumentCurrencyCode()))"),
+    @Mapping(target = "accountingSupplierParty", expression = "java(toSupplierParty(dto))"),
+    @Mapping(target = "accountingCustomerParty", expression = "java(toCustomerParty(dto))"),
+    @Mapping(target = "contractDocumentReference", expression = "java(toContractRefs(dto))"),
+    // property is creditNoteLine on CreditNoteType  ✅
+    @Mapping(target = "creditNoteLine", expression = "java(toCreditNoteLines(dto))")
+  })
+  oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType toCreditNoteType(CsvInvoiceDto dto);
+
+  // ---------- CBC helpers ----------
+  default oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType toID(String val) {
+    if (val == null || val.isBlank()) return null;
+    var id = new oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType();
+    id.setValue(val);
+    return id;
+  }
+  default oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.DocumentCurrencyCodeType toDocCurrency(String code) {
+    if (code == null || code.isBlank()) return null;
+    var c = new oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.DocumentCurrencyCodeType();
+    c.setValue(code);
+    return c;
+  }
+
+  // ---------- CAC helpers (shared) ----------
+  default oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.AccountingSupplierPartyType toSupplierParty(CsvInvoiceDto dto) {
+    var asp = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.AccountingSupplierPartyType();
+    var party = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.PartyType();
+    // fill party (tax scheme, company id, names...) from dto
+    asp.setParty(party);
+    return asp;
+  }
+  default oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.AccountingCustomerPartyType toCustomerParty(CsvInvoiceDto dto) {
+    var acp = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.AccountingCustomerPartyType();
+    var party = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.PartyType();
+    acp.setParty(party);
+    return acp;
+  }
+  default java.util.List<oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.DocumentReferenceType> toContractRefs(CsvInvoiceDto dto) {
+    if (dto.getContractDocumentReferenceId() == null) return java.util.List.of();
+    var dr = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.DocumentReferenceType();
+    var id = new oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType();
+    id.setValue(dto.getContractDocumentReferenceId());
+    dr.setID(id);
+    return java.util.List.of(dr);
+  }
+
+  // ---------- Lines (different element types!) ----------
+  default java.util.List<oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.InvoiceLineType>
+  toInvoiceLines(CsvInvoiceDto dto) {
+    if (dto.getLines() == null || dto.getLines().isEmpty()) return java.util.List.of();
+    var out = new java.util.ArrayList<oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.InvoiceLineType>();
+    for (var l : dto.getLines()) {
+      var il = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.InvoiceLineType();
+      // set il.setID(...), il.setInvoicedQuantity(...), il.setLineExtensionAmount(...), Item, Price, etc.
+      out.add(il);
+    }
+    return out;
+  }
+
+  default java.util.List<oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.CreditNoteLineType>
+  toCreditNoteLines(CsvInvoiceDto dto) {
+    if (dto.getLines() == null || dto.getLines().isEmpty()) return java.util.List.of();
+    var out = new java.util.ArrayList<oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.CreditNoteLineType>();
+    for (var l : dto.getLines()) {
+      var cl = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.CreditNoteLineType();
+      // set cl.setID(...), cl.setCreditedQuantity(...), cl.setLineExtensionAmount(...), Item, Price, etc.
+      out.add(cl);
+    }
+    return out;
+  }
+}
+
+Key fixes vs common pitfalls
+	•	Use target = "iD" for the ID field. MapStruct follows Bean naming (getID() → property iD). Using "ID" often does nothing.
+	•	For credit notes, target = "creditNoteLine" (not invoiceLine).
+	•	Your expression methods must return CreditNoteLineType for credit notes (not InvoiceLineType) or MapStruct drops them.
+	•	If you prefer @Mapping(source="...", target="...") over expressions, keep helpers as @Named and switch to qualifiedByName = .... Expressions are fine too.
+
+⸻
+
+Tiny JUnit to prove children appear for CreditNote
+
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
+
+class CsvInvoiceMapperCreditNoteSmokeTest {
+
+  // If using componentModel="spring", instantiate impl directly in tests:
+  private final CsvInvoiceMapper mapper = new CsvInvoiceMapperImpl();
+
+  @Test
+  void creditNote_hasId_and_lines() {
+    var dto = new CsvInvoiceDto();
+    dto.setInvoiceNumber("CN-123");
+    dto.setDocumentCurrencyCode("EUR");
+    dto.setContractDocumentReferenceId("12-ABC");
+    // add one line in whatever structure your DTO uses
+    var line = new CsvInvoiceDto.Line();
+    line.setQuantity("1");
+    line.setPrice("10.00");
+    dto.setLines(java.util.List.of(line));
+
+    var cn = mapper.toCreditNoteType(dto);
+
+    assertNotNull(cn.getID());
+    assertEquals("CN-123", cn.getID().getValue());
+    assertNotNull(cn.getDocumentCurrencyCode());
+    assertEquals("EUR", cn.getDocumentCurrencyCode().getValue());
+    assertNotNull(cn.getCreditNoteLine());
+    assertFalse(cn.getCreditNoteLine().isEmpty());
+  }
+}
+
+
+⸻
+
+If you paste your exact @Mapping(target=..., expression=...) lines that are currently no-ops, I can point out the precise property name that’s off. Nine times out of ten it’s "ID" vs "iD" or "invoiceLine" vs "creditNoteLine".
+
+
 You’re spot on: CreditNoteType isn’t a drop-in for InvoiceType. A few property names differ (most notably creditNoteLine vs invoiceLine), and if your MapStruct mappings/ helpers all return Invoice* aggregates (e.g., InvoiceLineType), MapStruct will quietly skip them for CreditNoteType. That’s why your credit note XML ends up almost empty (even ID if you accidentally targeted the wrong path).
 
 Here’s a clean way to fix it.
