@@ -1,193 +1,188 @@
-Totally doable with **minimal changes**. Since your reader already implements `ResourceAwareItemReaderItemStream<...>` and captures the current `Resource` in `setResource(...)`, just stash the **current base filename** into the step’s `ExecutionContext` there. Then, in the writers, read that value and pass it to `SplitPDFMover`.
+Short answer: yes—if you only keep a single `"currentResourceBaseName"` in the `ExecutionContext`, it gets overwritten when `MultiResourceItemReader` switches to the next file. A chunk can straddle two resources, so items from file A could be written while the context already holds file B’s name. Result: wrong PDF name.
 
-You don’t need to change chunk types or wrap items.
+## Minimal, safe fix (no pipeline type changes)
 
----
+Keep your reader as `ResourceAwareItemReaderItemStream<InvoiceType|CreditNoteType>`, but add a tiny per-item registry + a read listener:
 
-# 1) Reader: record the current resource base name
-
-Where you already have:
+### 1) Per-item registry (maps each read object → its source base name)
 
 ```java
-public class XmlInvoiceReader implements ResourceAwareItemReaderItemStream<InvoiceType> {
-    private Resource resource;
-    @Override
-    public void setResource(Resource resource) {
-        this.resource = resource; // you already do this
-    }
-    // ...
-}
-```
+@Service
+public class SourceNameRegistry {
+  // weak keys so GC can collect after write; thread-safe wrapper
+  private final Map<Object, String> map = Collections.synchronizedMap(new WeakHashMap<>());
 
-Make this tiny tweak:
-
-```java
-import org.springframework.batch.core.scope.context.StepSynchronizationManager;
-import org.springframework.core.io.Resource;
-
-public class XmlInvoiceReader implements ResourceAwareItemReaderItemStream<InvoiceType> {
-    private Resource resource;
-
-    @Override
-    public void setResource(Resource resource) {
-        this.resource = resource;
-
-        // NEW: save "<name-without-.xml>" into the Step ExecutionContext
-        String base = resource.getFilename();
-        if (base != null && base.toLowerCase().endsWith(".xml")) {
-            base = base.substring(0, base.length() - 4);
-        }
-        var ctx = StepSynchronizationManager.getContext();
-        if (ctx != null) {
-            ctx.getStepExecution().getExecutionContext().putString("currentResourceBaseName", base);
-        }
-    }
-    // the rest of your reader stays the same
-}
-```
-
-> This is called every time Spring switches to a new file in `MultiResourceItemReader`, so the context always reflects the **current** XML file name.
-
-Why `ResourceAwareItemReaderItemStream`? Because `MultiResourceItemReader` uses it to **propagate the currently-open `Resource`** to your delegate reader. That’s how you can (a) reset per-file state, and (b) know the source filename—as we’re doing here.
-
----
-
-# 2) Writers: use the base name from the context
-
-Just look up the value and use it for the PDF move (and optionally for the XML filename when UBL ID is missing). No other code changes needed.
-
-### Invoice writer
-
-```java
-import org.springframework.batch.core.scope.context.StepSynchronizationManager;
-
-@Override
-public void write(List<? extends InvoiceType> items) throws Exception {
-  for (InvoiceType inv : items) {
-    String bucket = "xmlInvoiceJob".equals(jobName) ? bucketResolver.resolveBucket(inv) : "default";
-    Path dir = outputDir.resolve(bucket);
-    Files.createDirectories(dir);
-
-    String baseFromId = inv.getID() != null && inv.getID().getValue() != null && !inv.getID().getValue().isBlank()
-        ? inv.getID().getValue()
-        : null;
-
-    // NEW: read the current resource base name from the step context
-    String baseFromResource = currentResourceBaseName();
-
-    // Prefer UBL ID; fall back to source filename base if ID is absent
-    String base = (baseFromId != null) ? baseFromId : (baseFromResource != null ? baseFromResource : UUID.randomUUID().toString());
-
-    Path xml = dir.resolve(base + ".xml");
-    ublWriter.write(inv, xml);
-
-    // Move/copy the same-named PDF alongside the XML
-    pdfMover.moveIfPresent(base, dir);
+  public void bind(Object item, String baseName) {
+    if (item != null && baseName != null) map.put(item, baseName);
+  }
+  public @Nullable String lookup(Object item) {
+    return map.get(item);
   }
 }
-
-private String currentResourceBaseName() {
-  var ctx = StepSynchronizationManager.getContext();
-  return (ctx != null)
-      ? ctx.getStepExecution().getExecutionContext().getString("currentResourceBaseName", null)
-      : null;
-}
 ```
 
-### Credit note writer
-
-Do the exact same lookup:
+### 2) Reader: still set the current resource into the Step context (you already do this)
 
 ```java
 @Override
-public void write(List<? extends CreditNoteType> items) throws Exception {
-  for (CreditNoteType cn : items) {
-    String bucket = "xmlInvoiceJob".equals(jobName) ? bucketResolver.resolveBucket(cn) : "default";
-    Path dir = outputDir.resolve(bucket);
-    Files.createDirectories(dir);
-
-    String baseFromId = cn.getID() != null && cn.getID().getValue() != null && !cn.getID().getValue().isBlank()
-        ? cn.getID().getValue()
-        : null;
-    String baseFromResource = currentResourceBaseName();
-    String base = (baseFromId != null) ? baseFromId : (baseFromResource != null ? baseFromResource : UUID.randomUUID().toString());
-
-    Path xml = dir.resolve(base + ".xml");
-    ublWriter.write(cn, xml);
-
-    pdfMover.moveIfPresent(base, dir);
-  }
-}
-
-private String currentResourceBaseName() {
+public void setResource(Resource resource) {
+  this.resource = resource;
+  String base = resource.getFilename();
+  if (base != null && base.toLowerCase().endsWith(".xml")) base = base.substring(0, base.length() - 4);
   var ctx = StepSynchronizationManager.getContext();
-  return (ctx != null)
-      ? ctx.getStepExecution().getExecutionContext().getString("currentResourceBaseName", null)
-      : null;
+  if (ctx != null) ctx.getStepExecution().getExecutionContext().putString("currentResourceBaseName", base);
 }
 ```
 
-That’s it—**no processor changes, no new wrapper objects, no step rewiring**.
+### 3) Read listener: bind each item to the current resource name
+
+```java
+@Component
+@StepScope
+@RequiredArgsConstructor
+public class SourceBindingReadListener implements ItemReadListener<Object> {
+  private final SourceNameRegistry registry;
+
+  @Override public void afterRead(Object item) {
+    var stepCtx = StepSynchronizationManager.getContext();
+    String base = (stepCtx != null)
+        ? stepCtx.getStepExecution().getExecutionContext().getString("currentResourceBaseName", null)
+        : null;
+    registry.bind(item, base);
+  }
+}
+```
+
+Register it on your XML→XML step:
+
+```java
+.stepBuilderFactory.get("xmlToXmlStep")
+  .<InvoiceType, InvoiceType>chunk(50)   // or CreditNoteType / Object, whatever you have
+  .reader(xmlReader)
+  .listener(sourceBindingReadListener)    // <-- add this
+  .processor(...)
+  .writer(...)
+  .build();
+```
+
+*(If you have separate steps for invoices and credit notes, add the listener on both.)*
+
+### 4) Writers: use the bound name for the PDF (fallback to UBL ID)
+
+#### Invoice writer
+
+```java
+@RequiredArgsConstructor
+public class XMLInvoiceWriter implements ItemWriter<InvoiceType> {
+  private final UblDocumentWriter ublWriter;
+  private final BucketResolver bucketResolver;
+  private final SplitPDFMover pdfMover;
+  private final SourceNameRegistry registry;
+
+  @Value("#{jobParameters['jobName']}") private String jobName;
+  @Value("${work.output}") private Path outputDir;
+
+  @Override
+  public void write(List<? extends InvoiceType> items) throws Exception {
+    for (InvoiceType inv : items) {
+      String bucket = "xmlInvoiceJob".equals(jobName) ? bucketResolver.resolveBucket(inv) : "default";
+      Path dir = outputDir.resolve(bucket);
+      Files.createDirectories(dir);
+
+      String id = inv.getID() != null ? inv.getID().getValue() : null;
+      String baseFromReader = registry.lookup(inv);
+      String base = (id != null && !id.isBlank())
+          ? id
+          : (baseFromReader != null ? baseFromReader : UUID.randomUUID().toString());
+
+      ublWriter.write(inv, dir.resolve(base + ".xml"));
+      pdfMover.moveIfPresent(base, dir);
+    }
+  }
+}
+```
+
+#### Credit note writer (same idea)
+
+```java
+@RequiredArgsConstructor
+public class XMLCreditNoteWriter implements ItemWriter<CreditNoteType> {
+  private final UblDocumentWriter ublWriter;
+  private final BucketResolver bucketResolver;
+  private final SplitPDFMover pdfMover;
+  private final SourceNameRegistry registry;
+
+  @Value("#{jobParameters['jobName']}") private String jobName;
+  @Value("${work.output}") private Path outputDir;
+
+  @Override
+  public void write(List<? extends CreditNoteType> items) throws Exception {
+    for (CreditNoteType cn : items) {
+      String bucket = "xmlInvoiceJob".equals(jobName) ? bucketResolver.resolveBucket(cn) : "default";
+      Path dir = outputDir.resolve(bucket);
+      Files.createDirectories(dir);
+
+      String id = cn.getID() != null ? cn.getID().getValue() : null;
+      String baseFromReader = registry.lookup(cn);
+      String base = (id != null && !id.isBlank())
+          ? id
+          : (baseFromReader != null ? baseFromReader : UUID.randomUUID().toString());
+
+      ublWriter.write(cn, dir.resolve(base + ".xml"));
+      pdfMover.moveIfPresent(base, dir);
+    }
+  }
+}
+```
+
+This approach avoids changing your item types or step generics. It guarantees each item carries its own source filename—even if the step switches resources mid-chunk.
 
 ---
 
-# 3) Quick JUnit to prove the wiring
+## Why `ResourceAwareItemReaderItemStream`?
 
-### Reader sets the base name
+Because `MultiResourceItemReader` calls `setResource(resource)` on your delegate each time it moves to the next file. You leverage that hook to know *which file* the next items are coming from. The listener then binds that filename to each item as it’s read, fixing the “last file overwrites the name” problem.
+
+---
+
+## Tiny tests (optional)
+
+* **Registry binding works**
 
 ```java
 @Test
-void reader_puts_baseName_in_context() {
-  // simulate a step context
-  var se = new org.springframework.batch.core.StepExecution("s", new org.springframework.batch.core.JobExecution(1L));
-  StepSynchronizationManager.register(new org.springframework.batch.core.scope.context.StepContext(se));
-
-  var reader = new XmlInvoiceReader();
-  reader.setResource(new org.springframework.core.io.FileSystemResource("/tmp/unzipped/INV-42.xml"));
-
-  assertEquals("INV-42", se.getExecutionContext().getString("currentResourceBaseName"));
-
-  StepSynchronizationManager.close(); // cleanup
+void registry_binds_and_looks_up() {
+  var reg = new SourceNameRegistry();
+  Object item = new Object();
+  reg.bind(item, "INV-42");
+  assertEquals("INV-42", reg.lookup(item));
 }
 ```
 
-### Writer uses it when ID is missing
+* **Read listener uses context base name**
 
 ```java
 @Test
-void writer_uses_resourceBase_when_id_missing() throws Exception {
-  // prepare context key
-  var se = new org.springframework.batch.core.StepExecution("s", new org.springframework.batch.core.JobExecution(1L));
+void listener_binds_name_from_context() {
+  var reg = new SourceNameRegistry();
+  var listener = new SourceBindingReadListener(reg);
+  var se = new StepExecution("s", new JobExecution(1L));
   se.getExecutionContext().putString("currentResourceBaseName", "CN-9");
-  StepSynchronizationManager.register(new org.springframework.batch.core.scope.context.StepContext(se));
-
-  var ubl = mock(UblDocumentWriter.class);
-  var resolver = mock(BucketResolver.class);
-  when(resolver.resolveBucket(any(CreditNoteType.class))).thenReturn("finance");
-
-  var mover = mock(SplitPDFMover.class);
-
-  var writer = new XMLCreditNoteWriter(ubl, resolver, mover);
-  set(writer, "jobName", "xmlInvoiceJob");
-  set(writer, "outputDir", Files.createTempDirectory("out"));
-
-  var cn = new CreditNoteType(); // no ID
-  writer.write(List.of(cn));
-
-  // XML written with base from resource
-  verify(ubl).write(eq(cn), argThat(p -> p.getFileName().toString().equals("CN-9.xml")));
-  // PDF moved using the same base
-  verify(mover).moveIfPresent(eq("CN-9"), any());
-
+  StepSynchronizationManager.register(new StepContext(se));
+  Object item = new Object();
+  listener.afterRead(item);
+  assertEquals("CN-9", reg.lookup(item));
   StepSynchronizationManager.close();
 }
-
-private static void set(Object bean, String field, Object value) throws Exception {
-  var f = bean.getClass().getDeclaredField(field);
-  f.setAccessible(true);
-  f.set(bean, value);
-}
 ```
+
+---
+
+### TL;DR
+
+* A single key in `ExecutionContext` will indeed be overwritten.
+* Bind the **source base name per item** using a tiny `SourceNameRegistry` + `ItemReadListener`.
+* Writers look up the base for each specific item and hand it to `SplitPDFMover`.
 
 ---
 
