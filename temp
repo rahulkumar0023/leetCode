@@ -1,3 +1,438 @@
+
+awesome — here’s a tight, production-ready bundle:
+
+* `SplitPDFMover` service
+* Integration into your existing `XMLInvoiceWriter` and `XMLCreditNoteWriter`
+* JUnit tests for the mover and both writers
+
+I’m assuming:
+
+* PDFs live in `work.unzipped` after fetch/unzip
+* Writers already decide **miles/finance** via your `BucketResolver`
+* `UblDocumentWriter` marshals any UBL root you pass (you already have the 2 writers, so it’s fine)
+
+---
+
+# 1) SplitPDFMover
+
+```java
+package com.alphacredit.batch.service;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+import java.io.IOException;
+import java.nio.file.*;
+import java.util.Locale;
+
+@Service
+public class SplitPDFMover {
+
+  @Value("${work.unzipped:/tmp/unzipped}")
+  private Path sourceDir;
+
+  /**
+   * Copy (or move) a PDF named <baseId>.pdf from sourceDir into targetDir, if present (case-insensitive).
+   * Use Files.move(...) instead of copy if you want to remove the original.
+   */
+  public void moveIfPresent(String baseId, Path targetDir) {
+    if (baseId == null || baseId.isBlank()) return;
+
+    Path candidate = sourceDir.resolve(baseId + ".pdf");
+    Path found = findCaseInsensitive(candidate);
+    if (found == null || !Files.isRegularFile(found)) return;
+
+    try {
+      Files.createDirectories(targetDir);
+      Path dest = uniqueIfExists(targetDir.resolve(found.getFileName()));
+      // choose copy vs move here (copy keeps source; move removes it)
+      Files.copy(found, dest);
+    } catch (IOException ignore) {
+      // optionally log
+    }
+  }
+
+  private Path uniqueIfExists(Path dest) throws IOException {
+    if (!Files.exists(dest)) return dest;
+    String name = dest.getFileName().toString(); // e.g. INV-123.pdf
+    int dot = name.toLowerCase(Locale.ROOT).lastIndexOf(".pdf");
+    String base = dot > 0 ? name.substring(0, dot) : name;
+    Path dir = dest.getParent();
+    int n = 2;
+    Path alt;
+    do {
+      alt = dir.resolve(base + "-" + n + ".pdf");
+      n++;
+    } while (Files.exists(alt));
+    return alt;
+  }
+
+  private Path findCaseInsensitive(Path path) {
+    Path dir = path.getParent();
+    if (dir == null || !Files.isDirectory(dir)) return null;
+    String target = path.getFileName().toString();
+    try (var stream = Files.list(dir)) {
+      return stream
+          .filter(Files::isRegularFile)
+          .filter(p -> p.getFileName().toString().equalsIgnoreCase(target))
+          .findFirst().orElse(null);
+    } catch (IOException e) {
+      return null;
+    }
+  }
+}
+```
+
+---
+
+# 2) Integration — XML writers
+
+## 2a) XMLInvoiceWriter
+
+```java
+package com.alphacredit.batch.writer;
+
+import com.alphacredit.batch.service.BucketResolver;
+import com.alphacredit.batch.service.SplitPDFMover;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType;
+import oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType;
+import org.springframework.batch.item.ItemWriter;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Scope;
+import org.springframework.stereotype.Component;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.UUID;
+
+@Component
+@Scope("step") // same as @StepScope but without SpEL fields; use @StepScope if you prefer
+@RequiredArgsConstructor
+@Slf4j
+public class XMLInvoiceWriter implements ItemWriter<InvoiceType> {
+
+  private final UblDocumentWriter ublWriter;
+  private final BucketResolver bucketResolver;
+  private final SplitPDFMover pdfMover;
+
+  @Value("#{jobParameters['jobName']}") private String jobName;
+  @Value("${work.output}") private Path outputDir;
+
+  @Override
+  public void write(List<? extends InvoiceType> items) throws Exception {
+    for (InvoiceType inv : items) {
+      String bucket = "xmlInvoiceJob".equals(jobName) ? bucketResolver.resolveBucket(inv) : "default";
+      Path dir = outputDir.resolve(bucket);
+      Files.createDirectories(dir);
+
+      String baseId = resolveBaseId(inv.getID());
+      Path xml = dir.resolve(baseId + ".xml");
+      ublWriter.write(inv, xml);
+
+      // keep PDF in the same split folder if present
+      pdfMover.moveIfPresent(baseId, dir);
+    }
+  }
+
+  private String resolveBaseId(IDType id) {
+    return (id != null && id.getValue() != null && !id.getValue().isBlank())
+        ? id.getValue() : UUID.randomUUID().toString();
+  }
+}
+```
+
+## 2b) XMLCreditNoteWriter
+
+```java
+package com.alphacredit.batch.writer;
+
+import com.alphacredit.batch.service.BucketResolver;
+import com.alphacredit.batch.service.SplitPDFMover;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType;
+import oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType;
+import org.springframework.batch.item.ItemWriter;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Scope;
+import org.springframework.stereotype.Component;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.UUID;
+
+@Component
+@Scope("step")
+@RequiredArgsConstructor
+@Slf4j
+public class XMLCreditNoteWriter implements ItemWriter<CreditNoteType> {
+
+  private final UblDocumentWriter ublWriter;
+  private final BucketResolver bucketResolver;
+  private final SplitPDFMover pdfMover;
+
+  @Value("#{jobParameters['jobName']}") private String jobName;
+  @Value("${work.output}") private Path outputDir;
+
+  @Override
+  public void write(List<? extends CreditNoteType> items) throws Exception {
+    for (CreditNoteType cn : items) {
+      String bucket = "xmlInvoiceJob".equals(jobName) ? bucketResolver.resolveBucket(cn) : "default";
+      Path dir = outputDir.resolve(bucket);
+      Files.createDirectories(dir);
+
+      String baseId = resolveBaseId(cn.getID());
+      Path xml = dir.resolve(baseId + ".xml");
+      ublWriter.write(cn, xml);
+
+      // keep PDF in the same split folder if present
+      pdfMover.moveIfPresent(baseId, dir);
+    }
+  }
+
+  private String resolveBaseId(IDType id) {
+    return (id != null && id.getValue() != null && !id.getValue().isBlank())
+        ? id.getValue() : UUID.randomUUID().toString();
+  }
+}
+```
+
+> If you need unique-name handling for duplicate IDs, reuse your suffix logic from earlier — it works the same; just pass the chosen `baseId` to `moveIfPresent(...)`.
+
+---
+
+# 3) JUnit tests
+
+## 3a) SplitPDFMoverTest
+
+```java
+package com.alphacredit.batch.service;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.lang.reflect.Field;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class SplitPDFMoverTest {
+
+  @TempDir Path source;
+  @TempDir Path target;
+
+  private SplitPDFMover moverWithSource(Path src) throws Exception {
+    SplitPDFMover mover = new SplitPDFMover();
+    Field f = SplitPDFMover.class.getDeclaredField("sourceDir");
+    f.setAccessible(true);
+    f.set(mover, src);
+    return mover;
+  }
+
+  @Test
+  void copiesExactCase() throws Exception {
+    Files.writeString(source.resolve("INV-1.pdf"), "pdf");
+    SplitPDFMover mover = moverWithSource(source);
+
+    mover.moveIfPresent("INV-1", target);
+
+    assertTrue(Files.exists(target.resolve("INV-1.pdf")));
+  }
+
+  @Test
+  void copiesCaseInsensitive_andAvoidsOverwrite() throws Exception {
+    Files.writeString(source.resolve("cn-9.pdf"), "pdf");
+    Files.writeString(target.resolve("CN-9.pdf"), "existing");
+    SplitPDFMover mover = moverWithSource(source);
+
+    mover.moveIfPresent("CN-9", target);
+
+    // original remains, copy gets a suffix
+    assertTrue(Files.exists(target.resolve("CN-9.pdf")));
+    assertTrue(Files.exists(target.resolve("CN-9-2.pdf")));
+  }
+
+  @Test
+  void noCrashWhenMissing() throws Exception {
+    SplitPDFMover mover = moverWithSource(source);
+    mover.moveIfPresent("DOES_NOT_EXIST", target);
+    assertEquals(0, Files.list(target).count());
+  }
+}
+```
+
+## 3b) XMLInvoiceWriterTest (verifies XML write + PDF moved)
+
+```java
+package com.alphacredit.batch.writer;
+
+import com.alphacredit.batch.service.BucketResolver;
+import com.alphacredit.batch.service.SplitPDFMover;
+import oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType;
+import oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.lang.reflect.Field;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+
+import static org.mockito.Mockito.*;
+
+class XMLInvoiceWriterTest {
+
+  @TempDir Path out;
+  @TempDir Path unzipped;
+
+  UblDocumentWriter ubl = mock(UblDocumentWriter.class);
+  BucketResolver resolver = mock(BucketResolver.class);
+  SplitPDFMover mover = new SplitPDFMover();
+
+  XMLInvoiceWriter writer;
+
+  @BeforeEach
+  void setUp() throws Exception {
+    // wire mover's sourceDir
+    var f = SplitPDFMover.class.getDeclaredField("sourceDir");
+    f.setAccessible(true);
+    f.set(mover, unzipped);
+
+    writer = new XMLInvoiceWriter(ubl, resolver, mover);
+
+    // inject fields
+    set(writer, "jobName", "xmlInvoiceJob");
+    set(writer, "outputDir", out);
+
+    when(resolver.resolveBucket(any(InvoiceType.class))).thenReturn("miles");
+  }
+
+  @Test
+  void writesXml_andMovesPdf() throws Exception {
+    // given a PDF with same baseId in unzipped
+    Files.writeString(unzipped.resolve("INV-42.pdf"), "pdf");
+
+    var inv = new InvoiceType();
+    var id = new IDType(); id.setValue("INV-42"); inv.setID(id);
+
+    writer.write(List.of(inv));
+
+    // XML writer called
+    verify(ubl).write(eq(inv), any(Path.class));
+    // PDF appeared under output/miles/
+    Path targetPdf = out.resolve("miles/INV-42.pdf");
+    assertTrue(Files.exists(targetPdf));
+  }
+
+  // helper to set private fields
+  private static void set(Object bean, String field, Object value) throws Exception {
+    Field f = bean.getClass().getDeclaredField(field);
+    f.setAccessible(true);
+    f.set(bean, value);
+  }
+}
+```
+
+## 3c) XMLCreditNoteWriterTest (same idea)
+
+```java
+package com.alphacredit.batch.writer;
+
+import com.alphacredit.batch.service.BucketResolver;
+import com.alphacredit.batch.service.SplitPDFMover;
+import oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType;
+import oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.lang.reflect.Field;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+
+import static org.mockito.Mockito.*;
+
+class XMLCreditNoteWriterTest {
+
+  @TempDir Path out;
+  @TempDir Path unzipped;
+
+  UblDocumentWriter ubl = mock(UblDocumentWriter.class);
+  BucketResolver resolver = mock(BucketResolver.class);
+  SplitPDFMover mover = new SplitPDFMover();
+
+  XMLCreditNoteWriter writer;
+
+  @BeforeEach
+  void setUp() throws Exception {
+    var f = SplitPDFMover.class.getDeclaredField("sourceDir");
+    f.setAccessible(true);
+    f.set(mover, unzipped);
+
+    writer = new XMLCreditNoteWriter(ubl, resolver, mover);
+
+    set(writer, "jobName", "xmlInvoiceJob");
+    set(writer, "outputDir", out);
+
+    when(resolver.resolveBucket(any(CreditNoteType.class))).thenReturn("finance");
+  }
+
+  @Test
+  void writesXml_andMovesPdf() throws Exception {
+    Files.writeString(unzipped.resolve("CN-7.pdf"), "pdf");
+
+    var cn = new CreditNoteType();
+    var id = new IDType(); id.setValue("CN-7"); cn.setID(id);
+
+    writer.write(List.of(cn));
+
+    verify(ubl).write(eq(cn), any(Path.class));
+    Path targetPdf = out.resolve("finance/CN-7.pdf");
+    assertTrue(Files.exists(targetPdf));
+  }
+
+  private static void set(Object bean, String field, Object value) throws Exception {
+    Field f = bean.getClass().getDeclaredField(field);
+    f.setAccessible(true);
+    f.set(bean, value);
+  }
+}
+```
+
+---
+
+# 4) Properties
+
+```properties
+work.unzipped=/tmp/unzipped
+work.output=/tmp/output
+```
+
+---
+
+## Notes / options
+
+* If you’d rather **move** the PDF (remove from `unzipped`), swap `Files.copy(found, dest)` → `Files.move(found, dest, StandardCopyOption.REPLACE_EXISTING)`.
+* If your `baseId` naming sometimes includes prefixes (`INV-`, `CN-`), you can adjust the lookup to try both forms; right now it looks for exactly `<baseId>.pdf` (case-insensitive).
+* If you have the duplicate-file suffix logic in your XML writers, keep using that `baseId` for `moveIfPresent(baseId, dir)` so the PDF follows the chosen base name (the actual PDF filename is preserved; we only suffix on collision in the destination).
+
+This should wire straight into your project and replace the old `pdfInvoiceStep` entirely.
+
+
+
+
+
+
+
+
+
 Gotcha—when you use MapStruct with target = ... + expression = "java(...)" for UBL, two very easy gotchas cause “empty CreditNote XML”:
 	1.	Wrong target property names (they differ between InvoiceType and CreditNoteType)
 	2.	Helpers returning the wrong aggregate type (e.g., InvoiceLineType instead of CreditNoteLineType)
