@@ -1,24 +1,16 @@
-perfect — let’s lock down **batch/csv** first. from your screenshots, these are the coverage gaps:
+great—thanks for the code shots. here are ready-to-drop JUnit 5 tests for the three classes you shared. they avoid MapStruct/JAXB complexity by using Mockito and Spring Batch primitives, but still exercise real behavior/branches.
 
-* `CsvFilePresenceDecider` → **0%**
-* `CsvXmlWriterConfig` → **0%**
-* `CsvInvoiceProcessor` → **50% / 75%**
-* (others already strong: `CsvInvoiceReader` 100%, `SmartCsvInvoiceFieldSetMapper` 100%, `CsvInvoiceMapper` \~90%+, `CsvInvoiceDto` \~90%)
+⸻
 
-below are **drop-in tests** that will push csv/package comfortably over 85–90% on their own.
+1) CsvFilePresenceDeciderTest
 
----
+Covers: hasCsv=true → CONTINUE, false/null → SKIP.
 
-# 1) CsvFilePresenceDeciderTest
-
-Covers: “no files”, “1+ files”, and “parameter absent”.
-Adjust the expected `FlowExecutionStatus` names to your constants (e.g., `"CONTINUE"`, `"NO_FILES"`, `"FAILED"`).
-
-```java
 package com.bnpp.pf.einvoice.connect.batch.csv;
 
 import org.junit.jupiter.api.Test;
-import org.springframework.batch.core.*;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.StepExecution;
 import org.springframework.batch.core.job.flow.FlowExecutionStatus;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -27,191 +19,212 @@ class CsvFilePresenceDeciderTest {
 
   private final CsvFilePresenceDecider decider = new CsvFilePresenceDecider();
 
-  private StepExecution step(JobParameters params) {
-    JobExecution je = new JobExecution(1L);
-    je.setJobParameters(params);
-    return new StepExecution("testStep", je);
+  private StepExecution newStepExecution() {
+    JobExecution jobExecution = new JobExecution(1L);
+    return new StepExecution("testStep", jobExecution);
   }
 
   @Test
-  void returnsNoFilesWhenParamEmpty() {
-    var params = new JobParametersBuilder()
-        .addString("inputFiles", "") // or null case below
-        .toJobParameters();
+  void decide_returnsContinue_whenHasCsvTrue() {
+    StepExecution step = newStepExecution();
+    step.getJobExecution().getExecutionContext().put("hasCsv", Boolean.TRUE);
 
-    FlowExecutionStatus status = decider.decide(step(params).getJobExecution(), null);
-    assertThat(status.getName()).isIn("NO_FILES", "STOP", "SKIP"); // adapt to your impl
+    FlowExecutionStatus status = decider.decide(step.getJobExecution(), step);
+    assertThat(status.getName()).isEqualTo("CONTINUE");
   }
 
   @Test
-  void returnsNoFilesWhenParamMissing() {
-    var params = new JobParameters(); // no inputFiles
-    FlowExecutionStatus status = decider.decide(step(params).getJobExecution(), null);
-    assertThat(status.getName()).isIn("NO_FILES", "STOP", "SKIP"); // adapt
+  void decide_returnsSkip_whenHasCsvFalse() {
+    StepExecution step = newStepExecution();
+    step.getJobExecution().getExecutionContext().put("hasCsv", Boolean.FALSE);
+
+    FlowExecutionStatus status = decider.decide(step.getJobExecution(), step);
+    assertThat(status.getName()).isEqualTo("SKIP");
   }
 
   @Test
-  void continuesWhenAtLeastOneFileIsPresent() {
-    var params = new JobParametersBuilder()
-        .addString("inputFiles", "/tmp/a.csv,/tmp/b.csv")
-        .toJobParameters();
+  void decide_returnsSkip_whenHasCsvMissing() {
+    StepExecution step = newStepExecution(); // no key in EC
 
-    FlowExecutionStatus status = decider.decide(step(params).getJobExecution(), null);
-    assertThat(status.getName()).isIn("CONTINUE", "COMPLETED", "HAS_FILES"); // adapt
+    FlowExecutionStatus status = decider.decide(step.getJobExecution(), step);
+    assertThat(status.getName()).isEqualTo("SKIP");
   }
 }
-```
 
-> If your decider checks actual filesystem existence, replace `/tmp/a.csv` with files created via `@TempDir`.
 
----
+⸻
 
-# 2) CsvXmlWriterConfigTest (bean wiring)
+2) CsvInvoiceProcessorTest
 
-Goal: hit the `@Configuration` class by loading the context and asserting beans exist (and minimal behavior). This alone will move `CsvXmlWriterConfig` from 0% to \~70–90%, depending on method count.
+Covers:
+	•	beforeStep (reset path) and afterStep (COMPLETED).
+	•	Branching: "381" → credit note, anything else → invoice.
+	•	Verifies the correct mapper method is invoked.
 
-```java
-package com.bnpp.pf.einvoice.connect.batch.csv;
-
-import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.context.ApplicationContext;
-
-import static org.assertj.core.api.Assertions.assertThat;
-
-@SpringBootTest
-class CsvXmlWriterConfigTest {
-
-  @Autowired
-  ApplicationContext ctx;
-
-  @Test
-  void exposesXmlWriterBeans() {
-    // adapt types/names to your config
-    Object writer = ctx.getBean("xmlInvoiceWriter");
-    Object marshaller = ctx.getBean("ublMarshaller");      // or Jaxb2Marshaller
-    Object namespaceMapper = ctx.getBean("ublNamespaceMapper");
-
-    assertThat(writer).isNotNull();
-    assertThat(marshaller).isNotNull();
-    assertThat(namespaceMapper).isNotNull();
-  }
-}
-```
-
-> If your config needs job params (`@StepScope`), add a minimal `JobParameters` via a `@SpringBatchTest` + `JobLauncherTestUtils` context, or set defaults in `application-test.yml`.
-
----
-
-# 3) CsvInvoiceProcessorTest
-
-Covers: happy path + minimal/edge dto. This should take the processor to \~90%+.
-
-```java
 package com.bnpp.pf.einvoice.connect.batch.csv;
 
 import com.bnpp.pf.einvoice.connect.batch.csv.dto.CsvInvoiceDto;
+import oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType;
 import oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
+import org.springframework.batch.core.ExitStatus;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.StepExecution;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.*;
 
 class CsvInvoiceProcessorTest {
 
-  private final CsvInvoiceMapper mapper = new CsvInvoiceMapperImpl(); // MapStruct impl
-  private final CsvInvoiceProcessor processor = new CsvInvoiceProcessor(mapper);
-
   @Test
-  void mapsPopulatedDtoToInvoice() throws Exception {
-    var dto = new CsvInvoiceDto();
-    dto.setInvoiceId("INV-42");
-    dto.setIssueDate("2025-01-15");
-    dto.setCurrency("EUR");
-    dto.setSupplierName("Alpha");
-    dto.setCustomerName("Beta");
-    dto.setLine1Description("Item X");
-    dto.setLine1Quantity("2");
-    dto.setLine1Price("10.00");
-    dto.setTotalPayable("20.00");
+  void beforeAndAfterStep_areSafe() {
+    CsvInvoiceMapper mapper = mock(CsvInvoiceMapper.class);
+    CsvInvoiceProcessor processor = new CsvInvoiceProcessor(mapper);
 
-    InvoiceType invoice = processor.process(dto);
-
-    assertThat(invoice.getID().getValue()).isEqualTo("INV-42");
-    assertThat(invoice.getDocumentCurrencyCode().getValue()).isEqualTo("EUR");
-    assertThat(invoice.getInvoiceLine()).hasSizeGreaterThanOrEqualTo(1);
+    StepExecution step = new StepExecution("s", new JobExecution(1L));
+    processor.beforeStep(step);
+    assertThat(processor.afterStep(step)).isEqualTo(ExitStatus.COMPLETED);
   }
 
   @Test
-  void toleratesSparseDto() throws Exception {
-    var dto = new CsvInvoiceDto(); // lots of nulls
-    InvoiceType invoice = processor.process(dto);
-    assertThat(invoice).isNotNull();
+  void process_routesToInvoice_whenTypeIsNot381() throws Exception {
+    CsvInvoiceMapper mapper = mock(CsvInvoiceMapper.class);
+    CsvInvoiceProcessor processor = new CsvInvoiceProcessor(mapper);
+
+    CsvInvoiceDto dto = new CsvInvoiceDto();
+    dto.setInvoiceTypeCode("380"); // ordinary invoice
+
+    InvoiceType expected = new InvoiceType();
+    when(mapper.toInvoiceType(ArgumentMatchers.same(dto))).thenReturn(expected);
+
+    Object result = processor.process(dto);
+
+    assertThat(result).isSameAs(expected);
+    verify(mapper, times(1)).toInvoiceType(dto);
+    verify(mapper, never()).toCreditNoteType(any());
+  }
+
+  @Test
+  void process_routesToCreditNote_whenTypeIs381() throws Exception {
+    CsvInvoiceMapper mapper = mock(CsvInvoiceMapper.class);
+    CsvInvoiceProcessor processor = new CsvInvoiceProcessor(mapper);
+
+    CsvInvoiceDto dto = new CsvInvoiceDto();
+    dto.setInvoiceTypeCode("381"); // credit note
+
+    CreditNoteType expected = new CreditNoteType();
+    when(mapper.toCreditNoteType(ArgumentMatchers.same(dto))).thenReturn(expected);
+
+    Object result = processor.process(dto);
+
+    assertThat(result).isSameAs(expected);
+    verify(mapper, times(1)).toCreditNoteType(dto);
+    verify(mapper, never()).toInvoiceType(any());
+  }
+
+  @Test
+  void process_defaultsToInvoice_whenTypeNull() throws Exception {
+    CsvInvoiceMapper mapper = mock(CsvInvoiceMapper.class);
+    CsvInvoiceProcessor processor = new CsvInvoiceProcessor(mapper);
+
+    CsvInvoiceDto dto = new CsvInvoiceDto(); // invoiceTypeCode null
+    when(mapper.toInvoiceType(dto)).thenReturn(new InvoiceType());
+
+    Object result = processor.process(dto);
+
+    assertThat(result).isInstanceOf(InvoiceType.class);
+    verify(mapper).toInvoiceType(dto);
   }
 }
-```
 
-> If your processor performs validation and may throw, add an extra test asserting the expected exception for invalid input.
 
----
+⸻
 
-# 4) CsvInvoiceMapper edge cases (top-up)
+3) CsvXmlWriterConfigTest
 
-You’re already \~90% there; these two add branch coverage around **additional properties** and **date/amount coercion**.
+Covers:
+	•	Delegation to invoice writer when item is InvoiceType.
+	•	Delegation to credit note writer when item is CreditNoteType.
+	•	Unsupported type throws IllegalArgumentException.
 
-```java
 package com.bnpp.pf.einvoice.connect.batch.csv;
 
-import com.bnpp.pf.einvoice.connect.batch.csv.dto.CsvInvoiceDto;
+import oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType;
+import oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.springframework.batch.item.ItemWriter;
 
-import static org.assertj.core.api.Assertions.assertThat;
+import java.util.List;
 
-class CsvInvoiceMapperEdgeTest {
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.*;
 
-  private final CsvInvoiceMapper mapper = new CsvInvoiceMapperImpl();
+class CsvXmlWriterConfigTest {
 
+  @SuppressWarnings("unchecked")
   @Test
-  void additionalItemPropsEmptyAreIgnored() {
-    var dto = new CsvInvoiceDto();
-    dto.setAdditionalProperty1Name(null);
-    dto.setAdditionalProperty1Value("x");
-    var props = mapper.toAdditionalItemProperties(dto);
-    assertThat(props).isEmpty(); // or size 0 depending on your helper logic
+  void classifierDelegatesToInvoiceWriter() throws Exception {
+    var config = new CsvXmlWriterConfig();
+
+    ItemWriter<Object> invoiceWriter = mock(ItemWriter.class);
+    ItemWriter<Object> creditWriter  = mock(ItemWriter.class);
+
+    var cw = config.ublClassifierWriter(invoiceWriter, creditWriter);
+
+    InvoiceType invoice = new InvoiceType();
+    cw.write(List.of(invoice));
+
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<List<Object>> cap = ArgumentCaptor.forClass(List.class);
+    verify(invoiceWriter, times(1)).write(cap.capture());
+    verify(creditWriter, never()).write(any());
+
+    // ensure the same item reached the delegate
+    assertThat(cap.getValue()).containsExactly(invoice);
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  void classifierDelegatesToCreditNoteWriter() throws Exception {
+    var config = new CsvXmlWriterConfig();
+
+    ItemWriter<Object> invoiceWriter = mock(ItemWriter.class);
+    ItemWriter<Object> creditWriter  = mock(ItemWriter.class);
+
+    var cw = config.ublClassifierWriter(invoiceWriter, creditWriter);
+
+    CreditNoteType credit = new CreditNoteType();
+    cw.write(List.of(credit));
+
+    verify(creditWriter, times(1)).write(any());
+    verify(invoiceWriter, never()).write(any());
   }
 
   @Test
-  void parsesAmountsWithScale() {
-    var dto = new CsvInvoiceDto();
-    dto.setTotalPayable("121.00");
-    var inv = mapper.toInvoice(dto);
-    assertThat(inv.getLegalMonetaryTotal().getPayableAmount().getValue())
-        .isEqualByComparingTo("121.00");
+  void classifierThrowsForUnsupportedType() {
+    var config = new CsvXmlWriterConfig();
+    @SuppressWarnings("unchecked")
+    ItemWriter<Object> invoiceWriter = mock(ItemWriter.class);
+    @SuppressWarnings("unchecked")
+    ItemWriter<Object> creditWriter  = mock(ItemWriter.class);
+
+    var cw = config.ublClassifierWriter(invoiceWriter, creditWriter);
+
+    assertThatThrownBy(() -> cw.write(List.of("not-a-ubl-type")))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Unsupported type:");
   }
 }
-```
 
----
 
-## Where to place these
+⸻
 
-```
-src/test/java/com/bnpp/pf/einvoice/connect/batch/csv/
-  CsvFilePresenceDeciderTest.java
-  CsvXmlWriterConfigTest.java
-  CsvInvoiceProcessorTest.java
-  CsvInvoiceMapperEdgeTest.java
-```
+notes / tweaks
+	•	Package names match your screenshots: com.bnpp.pf.einvoice.connect.batch.csv. Adjust if needed.
+	•	These tests use only JUnit 5, Mockito, and Spring Batch core; no Spring context is required (fast!).
+	•	If your CsvInvoiceMapper is in a different package, update imports. We’re mocking it, so no MapStruct impl is required at test time.
+	•	If your build enforces strict generics, change ItemWriter<Object> mocks to the concrete types your bean method accepts (e.g., XmlInvoiceWriter, XmlCreditNoteWriter) but they still implement ItemWriter<?>, so Mockito works either way.
 
----
-
-## Quick wins checklist for this package
-
-* [ ] `CsvFilePresenceDecider` covered for: missing param, empty list, valid list, (optional) non-existent files.
-* [ ] `CsvXmlWriterConfig` bean presence test (covers all `@Bean` methods).
-* [ ] `CsvInvoiceProcessor` happy + sparse + (optional) invalid input exception.
-* [ ] `CsvInvoiceMapper` a couple extra branches (props, numbers/dates).
-* [ ] Keep `CsvInvoiceReader`/`SmartCsvInvoiceFieldSetMapper` as-is (already excellent).
-
-If you drop these in, **batch/csv** should jump into the green.
-Want me to tailor the expectations to the exact `FlowExecutionStatus` strings and bean names in your code? Paste the two classes (`CsvFilePresenceDecider`, `CsvXmlWriterConfig`) and I’ll align the tests precisely.
+Drop these in and re-run tests—csv should jump to high 80s/90s coverage, and those previously 0% classes will be green. Want the next batch (PDF writer/reader or scheduler)?
