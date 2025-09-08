@@ -1,3 +1,90 @@
+You’re using Apache CXF (`JaxWsProxyFactoryBean`). Add the proxy on the CXF **HTTPConduit** of the created client.
+
+### 1) Properties (application.yml)
+
+```yaml
+soap:
+  proxy:
+    enabled: true
+    host: proxy.mycorp.net
+    port: 8080
+    # optional:
+    username: ""
+    password: ""
+    nonProxyHosts: "localhost|127.*|[::1]"
+```
+
+### 2) Inject those and set the proxy after `factoryBean.create()`
+
+```java
+import org.apache.cxf.endpoint.Client;
+import org.apache.cxf.frontend.ClientProxy;
+import org.apache.cxf.transport.http.HTTPConduit;
+import org.apache.cxf.transports.http.configuration.HTTPClientPolicy;
+import org.apache.cxf.configuration.security.ProxyAuthorizationPolicy;
+
+@Value("${soap.proxy.enabled:false}") private boolean proxyEnabled;
+@Value("${soap.proxy.host:}")        private String proxyHost;
+@Value("${soap.proxy.port:0}")       private int proxyPort;
+@Value("${soap.proxy.username:}")    private String proxyUser;
+@Value("${soap.proxy.password:}")    private String proxyPass;
+@Value("${soap.proxy.nonProxyHosts:}") private String nonProxyHosts;
+
+@Bean
+public IcrIndividualConsultationFacade soapService() {
+    var factoryBean = new JaxWsProxyFactoryBean();
+    factoryBean.setServiceClass(IcrIndividualConsultationFacade.class);
+    factoryBean.setAddress(baseUrl);
+    factoryBean.setBindingId(getBindingConfiguration());
+    factoryBean.getFeatures().add(loggingFeature());
+
+    IcrIndividualConsultationFacade svc =
+        (IcrIndividualConsultationFacade) factoryBean.create();
+
+    Client client = ClientProxy.getClient(svc);
+
+    // add OAuth interceptor (you already had this)
+    if (isOauth) {
+        client.getOutInterceptors().add(
+            new OAuthHeaderInterceptor(oauthServiceUrl, clientId, clientSecret, scope));
+    }
+
+    // --- proxy config ---
+    if (proxyEnabled && proxyHost != null && !proxyHost.isBlank()) {
+        HTTPConduit conduit = (HTTPConduit) client.getConduit();
+        HTTPClientPolicy policy = conduit.getClient();
+        if (policy == null) policy = new HTTPClientPolicy();
+
+        policy.setProxyServer(proxyHost);
+        if (proxyPort > 0) policy.setProxyServerPort(proxyPort);
+        if (nonProxyHosts != null && !nonProxyHosts.isBlank()) {
+            policy.setNonProxyHosts(nonProxyHosts); // '|' separated
+        }
+        conduit.setClient(policy);
+
+        if (proxyUser != null && !proxyUser.isBlank()) {
+            ProxyAuthorizationPolicy auth = new ProxyAuthorizationPolicy();
+            auth.setUserName(proxyUser);
+            auth.setPassword(proxyPass);
+            conduit.setProxyAuthorization(auth); // optional auth
+        }
+    }
+    // ---------------------
+
+    return svc;
+}
+```
+
+That’s it—this sets a per-client HTTP proxy (with optional auth).
+If you prefer a global proxy instead, you can also run the JVM with:
+
+```
+-Dhttp.proxyHost=... -Dhttp.proxyPort=...
+-Dhttps.proxyHost=... -Dhttps.proxyPort=...
+-Dhttp.nonProxyHosts="localhost|127.*|[::1]|*.mycorp.local"
+```
+
+
 You’re instantiating the helpers yourself (`new ResponseHelper(...)`, `new RequestHelper()`), so Spring isn’t managing them.
 When a class isn’t a Spring bean, `@Value` (and `@Autowired`) won’t run—those fields stay `null`/`0`. That’s why the properties aren’t being read inside your helpers.
 
