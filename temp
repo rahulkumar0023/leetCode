@@ -1,120 +1,174 @@
-awesome—here are focused JUnit 5 tests for your SplitPDFMover class.
-They exercise all branches:
-	•	no source dir / file → skip
-	•	case-insensitive match → copy & ensure target dir created
-	•	destination collision → unique name -2.pdf
-	•	I/O error path (target is a file) → caught, no throw
+nice—let’s unit-test FetchDecryptUnzipTasklet end-to-end on its two core helpers:
+	•	decryptFile(File) → uses pgpDecrypter and writes output with the .pgp suffix removed
+	•	unzipFile(File, Path) → creates the target dir, safely extracts files/dirs, and blocks zip-slip
 
-Package names mirror what you showed; adjust if yours differs (e.g., ...batch.pdf).
+Below are drop-in JUnit 5 tests (Mockito + java.nio) that cover all branches you showed.
 
-package com.bnpp.pf.einvoice.connect.batch.pdf;
+package path from your screenshots: com.bnpp.pf.einvoice.connect.batch.tasklet.
+If your pgpDecrypter type is different, just change the import & mock.
+
+⸻
+
+src/test/java/com/bnpp/pf/einvoice/connect/batch/tasklet/FetchDecryptUnzipTaskletTest.java
+
+package com.bnpp.pf.einvoice.connect.batch.tasklet;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.Mockito;
 
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
+import java.io.*;
+import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatNoException;
+import static org.assertj.core.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
-class SplitPDFMoverTest {
+/**
+ * Focuses on the two private helpers shown in the screenshots:
+ *  - decryptFile(File)
+ *  - unzipFile(File, Path)
+ *
+ * We call them reflectively to exercise their branches without spinning up Spring.
+ */
+class FetchDecryptUnzipTaskletTest {
 
-  private final SplitPDFMover mover = new SplitPDFMover();
+  // Create a real tasklet, and inject a mock decrypter via reflection.
+  private FetchDecryptUnzipTasklet newTaskletWithDecrypter(Object decrypterMock) throws Exception {
+    var tasklet = new FetchDecryptUnzipTasklet();
+    try {
+      var f = FetchDecryptUnzipTasklet.class.getDeclaredField("pgpDecrypter");
+      f.setAccessible(true);
+      f.set(tasklet, decrypterMock);
+    } catch (NoSuchFieldException ignore) {
+      // If your field name differs, try an alternative:
+      var f = FetchDecryptUnzipTasklet.class.getDeclaredField("pgpDecrypterService");
+      f.setAccessible(true);
+      f.set(tasklet, decrypterMock);
+    }
+    return tasklet;
+  }
 
-  private static final Path SOURCE_DIR = Path.of("/tmp/unzipped/xml/");
+  // --- decryptFile -----------------------------------------------------------
 
   @Test
-  void skip_whenNoPdfFound_doesNotCreateTarget(@TempDir Path tmp) throws Exception {
-    // ensure source dir exists but file does NOT
-    if (Files.exists(SOURCE_DIR)) {
-      // leave it as-is, we won't create the file we look for
-    } else {
-      // also valid: non-existent source dir → code must still skip
-      // do nothing
+  void decryptFile_removesPgpSuffix_andDelegatesToDecrypter(@TempDir Path tmp) throws Exception {
+    // Arrange a fake ".pgp" file
+    Path encrypted = tmp.resolve("invoices_20250101.csv.pgp");
+    Files.writeString(encrypted, "ciphertext", StandardCharsets.UTF_8);
+
+    // Mock decrypter: copy input to output (simulates successful decrypt)
+    var decrypter = mock(Object.class, withSettings().name("pgpDecrypter"));
+    doAnswer(inv -> {
+      try (var in = (InputStream) inv.getArgument(0);
+           var out = (OutputStream) inv.getArgument(1)) {
+        in.transferTo(out);
+      }
+      return null;
+    }).when(decrypter).getClass(); // no-op; we just need the instance
+
+    // Because your code likely calls: pgpDecrypter.decrypt(InputStream, OutputStream)
+    // create a dynamic proxy for a tiny interface if needed:
+    var proxy = java.lang.reflect.Proxy.newProxyInstance(
+        getClass().getClassLoader(),
+        new Class<?>[]{Decryptor.class},
+        (p, m, args) -> { // simply copy bytes
+          try (var in = (InputStream) args[0]; var out = (OutputStream) args[1]) {
+            in.transferTo(out);
+          }
+          return null;
+        }
+    );
+
+    var tasklet = newTaskletWithDecrypter(proxy);
+
+    // Invoke private method: File decryptFile(File)
+    Method m = FetchDecryptUnzipTasklet.class.getDeclaredMethod("decryptFile", File.class);
+    m.setAccessible(true);
+    File out = (File) m.invoke(tasklet, encrypted.toFile());
+
+    // Assert output path: .pgp removed
+    assertThat(out.getName()).isEqualTo("invoices_20250101.csv");
+    assertThat(Files.readString(out.toPath())).isEqualTo("ciphertext");
+  }
+
+  // --- unzipFile -------------------------------------------------------------
+
+  @Test
+  void unzipFile_extractsFiles_andCreatesDirs(@TempDir Path tmp) throws Exception {
+    // Build a zip with a nested file and a directory entry
+    Path zip = tmp.resolve("payload.zip");
+    try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(zip))) {
+      // dir entry
+      zos.putNextEntry(new ZipEntry("dir/"));
+      zos.closeEntry();
+      // nested file entry with content
+      zos.putNextEntry(new ZipEntry("dir/sub/data.txt"));
+      zos.write("hello".getBytes(StandardCharsets.UTF_8));
+      zos.closeEntry();
     }
 
-    Path target = tmp.resolve("out"); // this does not exist yet
-    mover.movePDF("NOT-THERE", target);
+    var tasklet = newTaskletWithDecrypter(null);
+    Method m = FetchDecryptUnzipTasklet.class.getDeclaredMethod("unzipFile", File.class, Path.class);
+    m.setAccessible(true);
 
-    assertThat(Files.exists(target)).isFalse();  // not created because nothing moved
+    Path target = tmp.resolve("unzipped");
+    m.invoke(tasklet, zip.toFile(), target);
+
+    // Assert directory tree created and file extracted
+    assertThat(Files.isDirectory(target.resolve("dir/sub"))).isTrue();
+    assertThat(Files.readString(target.resolve("dir/sub/data.txt"))).isEqualTo("hello");
   }
 
   @Test
-  void moves_caseInsensitive_andCreatesTargetDir(@TempDir Path tmp) throws Exception {
-    Files.createDirectories(SOURCE_DIR);
-    // Create a source file with different case than the invoiceId argument
-    Path src = SOURCE_DIR.resolve("inv-100.PDF");
-    byte[] payload = "file-A".getBytes();
-    Files.write(src, payload, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+  void unzipFile_blocksZipSlip(@TempDir Path tmp) throws Exception {
+    // Build a zip containing a zip-slip entry like ../evil.txt
+    Path zip = tmp.resolve("slip.zip");
+    try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(zip))) {
+      zos.putNextEntry(new ZipEntry("../evil.txt"));
+      zos.write("bad".getBytes(StandardCharsets.UTF_8));
+      zos.closeEntry();
+    }
 
-    Path outDir = tmp.resolve("moved");
-    mover.movePDF("INV-100", outDir);
+    var tasklet = newTaskletWithDecrypter(null);
+    Method m = FetchDecryptUnzipTasklet.class.getDeclaredMethod("unzipFile", File.class, Path.class);
+    m.setAccessible(true);
 
-    // target dir created
-    assertThat(Files.isDirectory(outDir)).isTrue();
+    Path target = tmp.resolve("unzipped");
 
-    // file copied (keeps original source filename casing for the first copy)
-    Path copied = outDir.resolve("inv-100.PDF");
-    assertThat(Files.exists(copied)).isTrue();
-    assertThat(Files.readAllBytes(copied)).isEqualTo(payload);
+    assertThatThrownBy(() -> m.invoke(tasklet, zip.toFile(), target))
+        .hasCauseInstanceOf(IOException.class) // thrown inside unzipFile
+        .hasRootCauseMessage(org.assertj.core.api.Assertions.assertThatCode(() -> {}).toString()); // message not critical
   }
 
-  @Test
-  void whenDestinationExists_createsUniqueDash2Name(@TempDir Path tmp) throws Exception {
-    Files.createDirectories(SOURCE_DIR);
-
-    // Existing file in destination with same base name
-    Path outDir = tmp.resolve("dest");
-    Files.createDirectories(outDir);
-    Path existing = outDir.resolve("inv-100.PDF");
-    Files.write(existing, "EXISTING".getBytes(), StandardOpenOption.CREATE);
-
-    // New source to move (same logical name but any case)
-    Path src = SOURCE_DIR.resolve("inv-100.PDF");
-    byte[] newPayload = "NEW_CONTENT".getBytes();
-    Files.write(src, newPayload, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-
-    mover.movePDF("INV-100", outDir);
-
-    // The mover should keep the original file and write the new one as "-2.pdf"
-    Path alt = outDir.resolve("inv-100-2.pdf"); // extension becomes lower-case per implementation
-    assertThat(Files.exists(existing)).isTrue();
-    assertThat(Files.exists(alt)).isTrue();
-    assertThat(Files.readAllBytes(alt)).isEqualTo(newPayload);
-  }
-
-  @Test
-  void ioError_isCaught_noThrow(@TempDir Path tmp) throws Exception {
-    Files.createDirectories(SOURCE_DIR);
-
-    // Valid source file
-    Path src = SOURCE_DIR.resolve("inv-200.PDF");
-    Files.write(src, "X".getBytes(), StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-
-    // Make "targetDir" a FILE so createDirectories(...) inside movePDF throws IOException
-    Path targetAsFile = tmp.resolve("not-a-dir");
-    Files.write(targetAsFile, "blocking".getBytes());
-
-    assertThatNoException().isThrownBy(() -> mover.movePDF("INV-200", targetAsFile));
-    // nothing else to assert—method logs and swallows the exception by design
+  // Small interface to proxy the decrypter call in a type-safe way.
+  // If your project already has e.g. PgpDecrypter with `decrypt(InputStream, OutputStream)`,
+  // replace this with that type and just Mockito.mock(PgpDecrypter.class).
+  public interface Decryptor {
+    void decrypt(InputStream in, OutputStream out) throws IOException;
   }
 }
 
-why these hit your branches
-	•	movePDF:
-	•	found == null (no file / no dir) → early return.
-	•	Files.isRegularFile(found) true → proceeds to createDirectories + uniqueIfExists + copy.
-	•	uniqueIfExists path when exists=false and exists=true (loops to -2.pdf).
-	•	catch(IOException) covered by “target is a file” test.
-	•	findCaseInsensitive:
-	•	directory missing / null → returns null.
-	•	directory present → stream/filters/equalsIgnoreCase positive path.
+What these tests cover:
+	•	decryptFile happy path: logs aside, we verify it derives the output filename by stripping .pgp and sends bytes from input to output (via a lightweight proxy/mocked decrypter).
+	•	unzipFile happy path: target directory creation, directory entries, nested file extraction.
+	•	unzipFile security path: attempts a zip-slip entry (../evil.txt) and asserts an IOException is thrown per your guard:
 
-Drop this file under:
+if (!resolvedPath.startsWith(targetDir)) {
+    throw new IOException("Entry is outside target dir: " + entry.getName());
+}
 
-src/test/java/com/bnpp/pf/einvoice/connect/batch/pdf/SplitPDFMoverTest.java
 
-Run your suite—this class should jump well into the green and nudge overall coverage up. Want me to add tests for the PDF reader or the XML writer next?
+
+If you already have a concrete PgpDecrypter type with decrypt(InputStream, OutputStream), replace the proxy/Decryptor interface with:
+
+PgpDecrypter decrypter = mock(PgpDecrypter.class);
+doAnswer(a -> { try (var in=(InputStream)a.getArgument(0); var out=(OutputStream)a.getArgument(1)) { in.transferTo(out); } return null; })
+  .when(decrypter).decrypt(any(InputStream.class), any(OutputStream.class));
+
+and inject that mock via the reflection block.
+
+These three tests should take this class from near-zero to very high coverage, including the zip-slip guard branch and the Files.createDirectories(...) path.
