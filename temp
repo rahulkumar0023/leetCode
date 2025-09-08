@@ -1,1962 +1,217 @@
-You’re using Apache CXF (`JaxWsProxyFactoryBean`). Add the proxy on the CXF **HTTPConduit** of the created client.
+perfect — let’s lock down **batch/csv** first. from your screenshots, these are the coverage gaps:
 
-### 1) Properties (application.yml)
+* `CsvFilePresenceDecider` → **0%**
+* `CsvXmlWriterConfig` → **0%**
+* `CsvInvoiceProcessor` → **50% / 75%**
+* (others already strong: `CsvInvoiceReader` 100%, `SmartCsvInvoiceFieldSetMapper` 100%, `CsvInvoiceMapper` \~90%+, `CsvInvoiceDto` \~90%)
 
-```yaml
-soap:
-  proxy:
-    enabled: true
-    host: proxy.mycorp.net
-    port: 8080
-    # optional:
-    username: ""
-    password: ""
-    nonProxyHosts: "localhost|127.*|[::1]"
-```
-
-### 2) Inject those and set the proxy after `factoryBean.create()`
-
-```java
-import org.apache.cxf.endpoint.Client;
-import org.apache.cxf.frontend.ClientProxy;
-import org.apache.cxf.transport.http.HTTPConduit;
-import org.apache.cxf.transports.http.configuration.HTTPClientPolicy;
-import org.apache.cxf.configuration.security.ProxyAuthorizationPolicy;
-
-@Value("${soap.proxy.enabled:false}") private boolean proxyEnabled;
-@Value("${soap.proxy.host:}")        private String proxyHost;
-@Value("${soap.proxy.port:0}")       private int proxyPort;
-@Value("${soap.proxy.username:}")    private String proxyUser;
-@Value("${soap.proxy.password:}")    private String proxyPass;
-@Value("${soap.proxy.nonProxyHosts:}") private String nonProxyHosts;
-
-@Bean
-public IcrIndividualConsultationFacade soapService() {
-    var factoryBean = new JaxWsProxyFactoryBean();
-    factoryBean.setServiceClass(IcrIndividualConsultationFacade.class);
-    factoryBean.setAddress(baseUrl);
-    factoryBean.setBindingId(getBindingConfiguration());
-    factoryBean.getFeatures().add(loggingFeature());
-
-    IcrIndividualConsultationFacade svc =
-        (IcrIndividualConsultationFacade) factoryBean.create();
-
-    Client client = ClientProxy.getClient(svc);
-
-    // add OAuth interceptor (you already had this)
-    if (isOauth) {
-        client.getOutInterceptors().add(
-            new OAuthHeaderInterceptor(oauthServiceUrl, clientId, clientSecret, scope));
-    }
-
-    // --- proxy config ---
-    if (proxyEnabled && proxyHost != null && !proxyHost.isBlank()) {
-        HTTPConduit conduit = (HTTPConduit) client.getConduit();
-        HTTPClientPolicy policy = conduit.getClient();
-        if (policy == null) policy = new HTTPClientPolicy();
-
-        policy.setProxyServer(proxyHost);
-        if (proxyPort > 0) policy.setProxyServerPort(proxyPort);
-        if (nonProxyHosts != null && !nonProxyHosts.isBlank()) {
-            policy.setNonProxyHosts(nonProxyHosts); // '|' separated
-        }
-        conduit.setClient(policy);
-
-        if (proxyUser != null && !proxyUser.isBlank()) {
-            ProxyAuthorizationPolicy auth = new ProxyAuthorizationPolicy();
-            auth.setUserName(proxyUser);
-            auth.setPassword(proxyPass);
-            conduit.setProxyAuthorization(auth); // optional auth
-        }
-    }
-    // ---------------------
-
-    return svc;
-}
-```
-
-That’s it—this sets a per-client HTTP proxy (with optional auth).
-If you prefer a global proxy instead, you can also run the JVM with:
-
-```
--Dhttp.proxyHost=... -Dhttp.proxyPort=...
--Dhttps.proxyHost=... -Dhttps.proxyPort=...
--Dhttp.nonProxyHosts="localhost|127.*|[::1]|*.mycorp.local"
-```
-
-
-You’re instantiating the helpers yourself (`new ResponseHelper(...)`, `new RequestHelper()`), so Spring isn’t managing them.
-When a class isn’t a Spring bean, `@Value` (and `@Autowired`) won’t run—those fields stay `null`/`0`. That’s why the properties aren’t being read inside your helpers.
-
-## Fix (minimal + robust)
-
-1. **Make the helpers Spring beans.**
-2. **Inject them into your service (constructor injection).**
-3. **Do NOT `new` them.**
-   If the helper really needs to call back into the service, inject the *specific* collaborators it needs (preferable), or use `@Lazy` to break a circular dependency.
-
-### ResponseHelper.java
-
-```java
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Component;
-
-@Component
-public class ResponseHelper {
-
-    // read from application.yml
-    @Value("${consultationReq.byNumber.cachePeriod}")
-    private int byNumberCachePeriod;
-
-    @Value("${consultationReq.byName.cachePeriod}")
-    private int byNameCachePeriod;
-
-    @Value("${allowNbdbConsultation:false}")   // example boolean with default
-    private boolean allowNbdbConsultation;
-
-    // ... your methods
-}
-```
-
-### RequestHelper.java
-
-```java
-import org.springframework.stereotype.Component;
-
-@Component
-public class RequestHelper {
-   // helper methods
-}
-```
-
-### KafkaMessageProcessorService.java
-
-```java
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Service;
-import lombok.RequiredArgsConstructor;
-
-@Service
-@RequiredArgsConstructor
-public class KafkaMessageProcessorService {
-
-    @Value("${consultationReq.dbMode:false}")
-    private boolean isDbMode;
-
-    private final CachingService cachingService;
-    private final SoapClient<ConsultationRequest> soapClient;
-    private final ResponseHelper responseHelper;   // injected bean
-    private final RequestHelper requestHelper;     // injected bean
-
-    public ConsultNaturalPersonResponse process(Object object, String flowId) {
-        // use responseHelper / requestHelper here
-    }
-}
-```
-
-### If you *must* reference the service from the helper
-
-(try to avoid this—inject just what you need)
-
-```java
-@Component
-@RequiredArgsConstructor
-public class ResponseHelper {
-    private final @Lazy KafkaMessageProcessorService kafkaMessageProcessorService;
-    // ... @Value fields as above
-}
-```
-
-## Quick checklist
-
-* Helpers annotated with `@Component` (or `@Service`) and in a package scanned by Spring.
-* No `new ResponseHelper(...)` / `new RequestHelper()` anywhere.
-* Property keys in `application.yml` match exactly, e.g.:
-
-  ```yaml
-  consultationReq:
-    dbMode: false
-    byNumber:
-      cachePeriod: 300
-    byName:
-      cachePeriod: 300
-  allowNbdbConsultation: true
-  ```
-
-Do the above and your `@Value` fields inside the helpers will populate again.
-
-
-
-Short answer: yes—if you only keep a single `"currentResourceBaseName"` in the `ExecutionContext`, it gets overwritten when `MultiResourceItemReader` switches to the next file. A chunk can straddle two resources, so items from file A could be written while the context already holds file B’s name. Result: wrong PDF name.
-
-## Minimal, safe fix (no pipeline type changes)
-
-Keep your reader as `ResourceAwareItemReaderItemStream<InvoiceType|CreditNoteType>`, but add a tiny per-item registry + a read listener:
-
-### 1) Per-item registry (maps each read object → its source base name)
-
-```java
-@Service
-public class SourceNameRegistry {
-  // weak keys so GC can collect after write; thread-safe wrapper
-  private final Map<Object, String> map = Collections.synchronizedMap(new WeakHashMap<>());
-
-  public void bind(Object item, String baseName) {
-    if (item != null && baseName != null) map.put(item, baseName);
-  }
-  public @Nullable String lookup(Object item) {
-    return map.get(item);
-  }
-}
-```
-
-### 2) Reader: still set the current resource into the Step context (you already do this)
-
-```java
-@Override
-public void setResource(Resource resource) {
-  this.resource = resource;
-  String base = resource.getFilename();
-  if (base != null && base.toLowerCase().endsWith(".xml")) base = base.substring(0, base.length() - 4);
-  var ctx = StepSynchronizationManager.getContext();
-  if (ctx != null) ctx.getStepExecution().getExecutionContext().putString("currentResourceBaseName", base);
-}
-```
-
-### 3) Read listener: bind each item to the current resource name
-
-```java
-@Component
-@StepScope
-@RequiredArgsConstructor
-public class SourceBindingReadListener implements ItemReadListener<Object> {
-  private final SourceNameRegistry registry;
-
-  @Override public void afterRead(Object item) {
-    var stepCtx = StepSynchronizationManager.getContext();
-    String base = (stepCtx != null)
-        ? stepCtx.getStepExecution().getExecutionContext().getString("currentResourceBaseName", null)
-        : null;
-    registry.bind(item, base);
-  }
-}
-```
-
-Register it on your XML→XML step:
-
-```java
-.stepBuilderFactory.get("xmlToXmlStep")
-  .<InvoiceType, InvoiceType>chunk(50)   // or CreditNoteType / Object, whatever you have
-  .reader(xmlReader)
-  .listener(sourceBindingReadListener)    // <-- add this
-  .processor(...)
-  .writer(...)
-  .build();
-```
-
-*(If you have separate steps for invoices and credit notes, add the listener on both.)*
-
-### 4) Writers: use the bound name for the PDF (fallback to UBL ID)
-
-#### Invoice writer
-
-```java
-@RequiredArgsConstructor
-public class XMLInvoiceWriter implements ItemWriter<InvoiceType> {
-  private final UblDocumentWriter ublWriter;
-  private final BucketResolver bucketResolver;
-  private final SplitPDFMover pdfMover;
-  private final SourceNameRegistry registry;
-
-  @Value("#{jobParameters['jobName']}") private String jobName;
-  @Value("${work.output}") private Path outputDir;
-
-  @Override
-  public void write(List<? extends InvoiceType> items) throws Exception {
-    for (InvoiceType inv : items) {
-      String bucket = "xmlInvoiceJob".equals(jobName) ? bucketResolver.resolveBucket(inv) : "default";
-      Path dir = outputDir.resolve(bucket);
-      Files.createDirectories(dir);
-
-      String id = inv.getID() != null ? inv.getID().getValue() : null;
-      String baseFromReader = registry.lookup(inv);
-      String base = (id != null && !id.isBlank())
-          ? id
-          : (baseFromReader != null ? baseFromReader : UUID.randomUUID().toString());
-
-      ublWriter.write(inv, dir.resolve(base + ".xml"));
-      pdfMover.moveIfPresent(base, dir);
-    }
-  }
-}
-```
-
-#### Credit note writer (same idea)
-
-```java
-@RequiredArgsConstructor
-public class XMLCreditNoteWriter implements ItemWriter<CreditNoteType> {
-  private final UblDocumentWriter ublWriter;
-  private final BucketResolver bucketResolver;
-  private final SplitPDFMover pdfMover;
-  private final SourceNameRegistry registry;
-
-  @Value("#{jobParameters['jobName']}") private String jobName;
-  @Value("${work.output}") private Path outputDir;
-
-  @Override
-  public void write(List<? extends CreditNoteType> items) throws Exception {
-    for (CreditNoteType cn : items) {
-      String bucket = "xmlInvoiceJob".equals(jobName) ? bucketResolver.resolveBucket(cn) : "default";
-      Path dir = outputDir.resolve(bucket);
-      Files.createDirectories(dir);
-
-      String id = cn.getID() != null ? cn.getID().getValue() : null;
-      String baseFromReader = registry.lookup(cn);
-      String base = (id != null && !id.isBlank())
-          ? id
-          : (baseFromReader != null ? baseFromReader : UUID.randomUUID().toString());
-
-      ublWriter.write(cn, dir.resolve(base + ".xml"));
-      pdfMover.moveIfPresent(base, dir);
-    }
-  }
-}
-```
-
-This approach avoids changing your item types or step generics. It guarantees each item carries its own source filename—even if the step switches resources mid-chunk.
+below are **drop-in tests** that will push csv/package comfortably over 85–90% on their own.
 
 ---
 
-## Why `ResourceAwareItemReaderItemStream`?
+# 1) CsvFilePresenceDeciderTest
 
-Because `MultiResourceItemReader` calls `setResource(resource)` on your delegate each time it moves to the next file. You leverage that hook to know *which file* the next items are coming from. The listener then binds that filename to each item as it’s read, fixing the “last file overwrites the name” problem.
-
----
-
-## Tiny tests (optional)
-
-* **Registry binding works**
+Covers: “no files”, “1+ files”, and “parameter absent”.
+Adjust the expected `FlowExecutionStatus` names to your constants (e.g., `"CONTINUE"`, `"NO_FILES"`, `"FAILED"`).
 
 ```java
-@Test
-void registry_binds_and_looks_up() {
-  var reg = new SourceNameRegistry();
-  Object item = new Object();
-  reg.bind(item, "INV-42");
-  assertEquals("INV-42", reg.lookup(item));
-}
-```
+package com.bnpp.pf.einvoice.connect.batch.csv;
 
-* **Read listener uses context base name**
+import org.junit.jupiter.api.Test;
+import org.springframework.batch.core.*;
+import org.springframework.batch.core.job.flow.FlowExecutionStatus;
 
-```java
-@Test
-void listener_binds_name_from_context() {
-  var reg = new SourceNameRegistry();
-  var listener = new SourceBindingReadListener(reg);
-  var se = new StepExecution("s", new JobExecution(1L));
-  se.getExecutionContext().putString("currentResourceBaseName", "CN-9");
-  StepSynchronizationManager.register(new StepContext(se));
-  Object item = new Object();
-  listener.afterRead(item);
-  assertEquals("CN-9", reg.lookup(item));
-  StepSynchronizationManager.close();
-}
-```
+import static org.assertj.core.api.Assertions.assertThat;
 
----
+class CsvFilePresenceDeciderTest {
 
-### TL;DR
+  private final CsvFilePresenceDecider decider = new CsvFilePresenceDecider();
 
-* A single key in `ExecutionContext` will indeed be overwritten.
-* Bind the **source base name per item** using a tiny `SourceNameRegistry` + `ItemReadListener`.
-* Writers look up the base for each specific item and hand it to `SplitPDFMover`.
-
----
-
-## TL;DR
-
-* You used `ResourceAwareItemReaderItemStream` so Spring can tell your reader **which file** it’s on.
-* In `setResource(...)`, save the **basename** (without `.xml`) into the Step `ExecutionContext`.
-* In the writers, read that value and pass it to `SplitPDFMover`.
-* Prefer the UBL ID if present; otherwise use the resource basename so the PDF name matches the original input file.
-
-This keeps changes **surgical** and makes the PDF follow exactly the **same file name** you received.
-
-awesome — here’s a tight, production-ready bundle:
-
-* `SplitPDFMover` service
-* Integration into your existing `XMLInvoiceWriter` and `XMLCreditNoteWriter`
-* JUnit tests for the mover and both writers
-
-I’m assuming:
-
-* PDFs live in `work.unzipped` after fetch/unzip
-* Writers already decide **miles/finance** via your `BucketResolver`
-* `UblDocumentWriter` marshals any UBL root you pass (you already have the 2 writers, so it’s fine)
-
----
-
-# 1) SplitPDFMover
-
-```java
-package com.alphacredit.batch.service;
-
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Service;
-
-import java.io.IOException;
-import java.nio.file.*;
-import java.util.Locale;
-
-@Service
-public class SplitPDFMover {
-
-  @Value("${work.unzipped:/tmp/unzipped}")
-  private Path sourceDir;
-
-  /**
-   * Copy (or move) a PDF named <baseId>.pdf from sourceDir into targetDir, if present (case-insensitive).
-   * Use Files.move(...) instead of copy if you want to remove the original.
-   */
-  public void moveIfPresent(String baseId, Path targetDir) {
-    if (baseId == null || baseId.isBlank()) return;
-
-    Path candidate = sourceDir.resolve(baseId + ".pdf");
-    Path found = findCaseInsensitive(candidate);
-    if (found == null || !Files.isRegularFile(found)) return;
-
-    try {
-      Files.createDirectories(targetDir);
-      Path dest = uniqueIfExists(targetDir.resolve(found.getFileName()));
-      // choose copy vs move here (copy keeps source; move removes it)
-      Files.copy(found, dest);
-    } catch (IOException ignore) {
-      // optionally log
-    }
+  private StepExecution step(JobParameters params) {
+    JobExecution je = new JobExecution(1L);
+    je.setJobParameters(params);
+    return new StepExecution("testStep", je);
   }
 
-  private Path uniqueIfExists(Path dest) throws IOException {
-    if (!Files.exists(dest)) return dest;
-    String name = dest.getFileName().toString(); // e.g. INV-123.pdf
-    int dot = name.toLowerCase(Locale.ROOT).lastIndexOf(".pdf");
-    String base = dot > 0 ? name.substring(0, dot) : name;
-    Path dir = dest.getParent();
-    int n = 2;
-    Path alt;
-    do {
-      alt = dir.resolve(base + "-" + n + ".pdf");
-      n++;
-    } while (Files.exists(alt));
-    return alt;
+  @Test
+  void returnsNoFilesWhenParamEmpty() {
+    var params = new JobParametersBuilder()
+        .addString("inputFiles", "") // or null case below
+        .toJobParameters();
+
+    FlowExecutionStatus status = decider.decide(step(params).getJobExecution(), null);
+    assertThat(status.getName()).isIn("NO_FILES", "STOP", "SKIP"); // adapt to your impl
   }
 
-  private Path findCaseInsensitive(Path path) {
-    Path dir = path.getParent();
-    if (dir == null || !Files.isDirectory(dir)) return null;
-    String target = path.getFileName().toString();
-    try (var stream = Files.list(dir)) {
-      return stream
-          .filter(Files::isRegularFile)
-          .filter(p -> p.getFileName().toString().equalsIgnoreCase(target))
-          .findFirst().orElse(null);
-    } catch (IOException e) {
-      return null;
-    }
+  @Test
+  void returnsNoFilesWhenParamMissing() {
+    var params = new JobParameters(); // no inputFiles
+    FlowExecutionStatus status = decider.decide(step(params).getJobExecution(), null);
+    assertThat(status.getName()).isIn("NO_FILES", "STOP", "SKIP"); // adapt
+  }
+
+  @Test
+  void continuesWhenAtLeastOneFileIsPresent() {
+    var params = new JobParametersBuilder()
+        .addString("inputFiles", "/tmp/a.csv,/tmp/b.csv")
+        .toJobParameters();
+
+    FlowExecutionStatus status = decider.decide(step(params).getJobExecution(), null);
+    assertThat(status.getName()).isIn("CONTINUE", "COMPLETED", "HAS_FILES"); // adapt
   }
 }
 ```
 
+> If your decider checks actual filesystem existence, replace `/tmp/a.csv` with files created via `@TempDir`.
+
 ---
 
-# 2) Integration — XML writers
+# 2) CsvXmlWriterConfigTest (bean wiring)
 
-## 2a) XMLInvoiceWriter
+Goal: hit the `@Configuration` class by loading the context and asserting beans exist (and minimal behavior). This alone will move `CsvXmlWriterConfig` from 0% to \~70–90%, depending on method count.
 
 ```java
-package com.alphacredit.batch.writer;
+package com.bnpp.pf.einvoice.connect.batch.csv;
 
-import com.alphacredit.batch.service.BucketResolver;
-import com.alphacredit.batch.service.SplitPDFMover;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.ApplicationContext;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+@SpringBootTest
+class CsvXmlWriterConfigTest {
+
+  @Autowired
+  ApplicationContext ctx;
+
+  @Test
+  void exposesXmlWriterBeans() {
+    // adapt types/names to your config
+    Object writer = ctx.getBean("xmlInvoiceWriter");
+    Object marshaller = ctx.getBean("ublMarshaller");      // or Jaxb2Marshaller
+    Object namespaceMapper = ctx.getBean("ublNamespaceMapper");
+
+    assertThat(writer).isNotNull();
+    assertThat(marshaller).isNotNull();
+    assertThat(namespaceMapper).isNotNull();
+  }
+}
+```
+
+> If your config needs job params (`@StepScope`), add a minimal `JobParameters` via a `@SpringBatchTest` + `JobLauncherTestUtils` context, or set defaults in `application-test.yml`.
+
+---
+
+# 3) CsvInvoiceProcessorTest
+
+Covers: happy path + minimal/edge dto. This should take the processor to \~90%+.
+
+```java
+package com.bnpp.pf.einvoice.connect.batch.csv;
+
+import com.bnpp.pf.einvoice.connect.batch.csv.dto.CsvInvoiceDto;
 import oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType;
-import org.springframework.batch.item.ItemWriter;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.annotation.Scope;
-import org.springframework.stereotype.Component;
+import org.junit.jupiter.api.Test;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.List;
-import java.util.UUID;
+import static org.assertj.core.api.Assertions.assertThat;
 
-@Component
-@Scope("step") // same as @StepScope but without SpEL fields; use @StepScope if you prefer
-@RequiredArgsConstructor
-@Slf4j
-public class XMLInvoiceWriter implements ItemWriter<InvoiceType> {
+class CsvInvoiceProcessorTest {
 
-  private final UblDocumentWriter ublWriter;
-  private final BucketResolver bucketResolver;
-  private final SplitPDFMover pdfMover;
+  private final CsvInvoiceMapper mapper = new CsvInvoiceMapperImpl(); // MapStruct impl
+  private final CsvInvoiceProcessor processor = new CsvInvoiceProcessor(mapper);
 
-  @Value("#{jobParameters['jobName']}") private String jobName;
-  @Value("${work.output}") private Path outputDir;
+  @Test
+  void mapsPopulatedDtoToInvoice() throws Exception {
+    var dto = new CsvInvoiceDto();
+    dto.setInvoiceId("INV-42");
+    dto.setIssueDate("2025-01-15");
+    dto.setCurrency("EUR");
+    dto.setSupplierName("Alpha");
+    dto.setCustomerName("Beta");
+    dto.setLine1Description("Item X");
+    dto.setLine1Quantity("2");
+    dto.setLine1Price("10.00");
+    dto.setTotalPayable("20.00");
 
-  @Override
-  public void write(List<? extends InvoiceType> items) throws Exception {
-    for (InvoiceType inv : items) {
-      String bucket = "xmlInvoiceJob".equals(jobName) ? bucketResolver.resolveBucket(inv) : "default";
-      Path dir = outputDir.resolve(bucket);
-      Files.createDirectories(dir);
+    InvoiceType invoice = processor.process(dto);
 
-      String baseId = resolveBaseId(inv.getID());
-      Path xml = dir.resolve(baseId + ".xml");
-      ublWriter.write(inv, xml);
-
-      // keep PDF in the same split folder if present
-      pdfMover.moveIfPresent(baseId, dir);
-    }
+    assertThat(invoice.getID().getValue()).isEqualTo("INV-42");
+    assertThat(invoice.getDocumentCurrencyCode().getValue()).isEqualTo("EUR");
+    assertThat(invoice.getInvoiceLine()).hasSizeGreaterThanOrEqualTo(1);
   }
 
-  private String resolveBaseId(IDType id) {
-    return (id != null && id.getValue() != null && !id.getValue().isBlank())
-        ? id.getValue() : UUID.randomUUID().toString();
+  @Test
+  void toleratesSparseDto() throws Exception {
+    var dto = new CsvInvoiceDto(); // lots of nulls
+    InvoiceType invoice = processor.process(dto);
+    assertThat(invoice).isNotNull();
   }
 }
 ```
 
-## 2b) XMLCreditNoteWriter
-
-```java
-package com.alphacredit.batch.writer;
-
-import com.alphacredit.batch.service.BucketResolver;
-import com.alphacredit.batch.service.SplitPDFMover;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType;
-import oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType;
-import org.springframework.batch.item.ItemWriter;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.annotation.Scope;
-import org.springframework.stereotype.Component;
-
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.List;
-import java.util.UUID;
-
-@Component
-@Scope("step")
-@RequiredArgsConstructor
-@Slf4j
-public class XMLCreditNoteWriter implements ItemWriter<CreditNoteType> {
-
-  private final UblDocumentWriter ublWriter;
-  private final BucketResolver bucketResolver;
-  private final SplitPDFMover pdfMover;
-
-  @Value("#{jobParameters['jobName']}") private String jobName;
-  @Value("${work.output}") private Path outputDir;
-
-  @Override
-  public void write(List<? extends CreditNoteType> items) throws Exception {
-    for (CreditNoteType cn : items) {
-      String bucket = "xmlInvoiceJob".equals(jobName) ? bucketResolver.resolveBucket(cn) : "default";
-      Path dir = outputDir.resolve(bucket);
-      Files.createDirectories(dir);
-
-      String baseId = resolveBaseId(cn.getID());
-      Path xml = dir.resolve(baseId + ".xml");
-      ublWriter.write(cn, xml);
-
-      // keep PDF in the same split folder if present
-      pdfMover.moveIfPresent(baseId, dir);
-    }
-  }
-
-  private String resolveBaseId(IDType id) {
-    return (id != null && id.getValue() != null && !id.getValue().isBlank())
-        ? id.getValue() : UUID.randomUUID().toString();
-  }
-}
-```
-
-> If you need unique-name handling for duplicate IDs, reuse your suffix logic from earlier — it works the same; just pass the chosen `baseId` to `moveIfPresent(...)`.
+> If your processor performs validation and may throw, add an extra test asserting the expected exception for invalid input.
 
 ---
 
-# 3) JUnit tests
+# 4) CsvInvoiceMapper edge cases (top-up)
 
-## 3a) SplitPDFMoverTest
-
-```java
-package com.alphacredit.batch.service;
-
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-
-import java.lang.reflect.Field;
-import java.nio.file.Files;
-import java.nio.file.Path;
-
-import static org.junit.jupiter.api.Assertions.*;
-
-class SplitPDFMoverTest {
-
-  @TempDir Path source;
-  @TempDir Path target;
-
-  private SplitPDFMover moverWithSource(Path src) throws Exception {
-    SplitPDFMover mover = new SplitPDFMover();
-    Field f = SplitPDFMover.class.getDeclaredField("sourceDir");
-    f.setAccessible(true);
-    f.set(mover, src);
-    return mover;
-  }
-
-  @Test
-  void copiesExactCase() throws Exception {
-    Files.writeString(source.resolve("INV-1.pdf"), "pdf");
-    SplitPDFMover mover = moverWithSource(source);
-
-    mover.moveIfPresent("INV-1", target);
-
-    assertTrue(Files.exists(target.resolve("INV-1.pdf")));
-  }
-
-  @Test
-  void copiesCaseInsensitive_andAvoidsOverwrite() throws Exception {
-    Files.writeString(source.resolve("cn-9.pdf"), "pdf");
-    Files.writeString(target.resolve("CN-9.pdf"), "existing");
-    SplitPDFMover mover = moverWithSource(source);
-
-    mover.moveIfPresent("CN-9", target);
-
-    // original remains, copy gets a suffix
-    assertTrue(Files.exists(target.resolve("CN-9.pdf")));
-    assertTrue(Files.exists(target.resolve("CN-9-2.pdf")));
-  }
-
-  @Test
-  void noCrashWhenMissing() throws Exception {
-    SplitPDFMover mover = moverWithSource(source);
-    mover.moveIfPresent("DOES_NOT_EXIST", target);
-    assertEquals(0, Files.list(target).count());
-  }
-}
-```
-
-## 3b) XMLInvoiceWriterTest (verifies XML write + PDF moved)
+You’re already \~90% there; these two add branch coverage around **additional properties** and **date/amount coercion**.
 
 ```java
-package com.alphacredit.batch.writer;
+package com.bnpp.pf.einvoice.connect.batch.csv;
 
-import com.alphacredit.batch.service.BucketResolver;
-import com.alphacredit.batch.service.SplitPDFMover;
-import oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType;
-import oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType;
-import org.junit.jupiter.api.BeforeEach;
+import com.bnpp.pf.einvoice.connect.batch.csv.dto.CsvInvoiceDto;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
 
-import java.lang.reflect.Field;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.List;
+import static org.assertj.core.api.Assertions.assertThat;
 
-import static org.mockito.Mockito.*;
+class CsvInvoiceMapperEdgeTest {
 
-class XMLInvoiceWriterTest {
-
-  @TempDir Path out;
-  @TempDir Path unzipped;
-
-  UblDocumentWriter ubl = mock(UblDocumentWriter.class);
-  BucketResolver resolver = mock(BucketResolver.class);
-  SplitPDFMover mover = new SplitPDFMover();
-
-  XMLInvoiceWriter writer;
-
-  @BeforeEach
-  void setUp() throws Exception {
-    // wire mover's sourceDir
-    var f = SplitPDFMover.class.getDeclaredField("sourceDir");
-    f.setAccessible(true);
-    f.set(mover, unzipped);
-
-    writer = new XMLInvoiceWriter(ubl, resolver, mover);
-
-    // inject fields
-    set(writer, "jobName", "xmlInvoiceJob");
-    set(writer, "outputDir", out);
-
-    when(resolver.resolveBucket(any(InvoiceType.class))).thenReturn("miles");
-  }
-
-  @Test
-  void writesXml_andMovesPdf() throws Exception {
-    // given a PDF with same baseId in unzipped
-    Files.writeString(unzipped.resolve("INV-42.pdf"), "pdf");
-
-    var inv = new InvoiceType();
-    var id = new IDType(); id.setValue("INV-42"); inv.setID(id);
-
-    writer.write(List.of(inv));
-
-    // XML writer called
-    verify(ubl).write(eq(inv), any(Path.class));
-    // PDF appeared under output/miles/
-    Path targetPdf = out.resolve("miles/INV-42.pdf");
-    assertTrue(Files.exists(targetPdf));
-  }
-
-  // helper to set private fields
-  private static void set(Object bean, String field, Object value) throws Exception {
-    Field f = bean.getClass().getDeclaredField(field);
-    f.setAccessible(true);
-    f.set(bean, value);
-  }
-}
-```
-
-## 3c) XMLCreditNoteWriterTest (same idea)
-
-```java
-package com.alphacredit.batch.writer;
-
-import com.alphacredit.batch.service.BucketResolver;
-import com.alphacredit.batch.service.SplitPDFMover;
-import oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType;
-import oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-
-import java.lang.reflect.Field;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.List;
-
-import static org.mockito.Mockito.*;
-
-class XMLCreditNoteWriterTest {
-
-  @TempDir Path out;
-  @TempDir Path unzipped;
-
-  UblDocumentWriter ubl = mock(UblDocumentWriter.class);
-  BucketResolver resolver = mock(BucketResolver.class);
-  SplitPDFMover mover = new SplitPDFMover();
-
-  XMLCreditNoteWriter writer;
-
-  @BeforeEach
-  void setUp() throws Exception {
-    var f = SplitPDFMover.class.getDeclaredField("sourceDir");
-    f.setAccessible(true);
-    f.set(mover, unzipped);
-
-    writer = new XMLCreditNoteWriter(ubl, resolver, mover);
-
-    set(writer, "jobName", "xmlInvoiceJob");
-    set(writer, "outputDir", out);
-
-    when(resolver.resolveBucket(any(CreditNoteType.class))).thenReturn("finance");
-  }
-
-  @Test
-  void writesXml_andMovesPdf() throws Exception {
-    Files.writeString(unzipped.resolve("CN-7.pdf"), "pdf");
-
-    var cn = new CreditNoteType();
-    var id = new IDType(); id.setValue("CN-7"); cn.setID(id);
-
-    writer.write(List.of(cn));
-
-    verify(ubl).write(eq(cn), any(Path.class));
-    Path targetPdf = out.resolve("finance/CN-7.pdf");
-    assertTrue(Files.exists(targetPdf));
-  }
-
-  private static void set(Object bean, String field, Object value) throws Exception {
-    Field f = bean.getClass().getDeclaredField(field);
-    f.setAccessible(true);
-    f.set(bean, value);
-  }
-}
-```
-
----
-
-# 4) Properties
-
-```properties
-work.unzipped=/tmp/unzipped
-work.output=/tmp/output
-```
-
----
-
-## Notes / options
-
-* If you’d rather **move** the PDF (remove from `unzipped`), swap `Files.copy(found, dest)` → `Files.move(found, dest, StandardCopyOption.REPLACE_EXISTING)`.
-* If your `baseId` naming sometimes includes prefixes (`INV-`, `CN-`), you can adjust the lookup to try both forms; right now it looks for exactly `<baseId>.pdf` (case-insensitive).
-* If you have the duplicate-file suffix logic in your XML writers, keep using that `baseId` for `moveIfPresent(baseId, dir)` so the PDF follows the chosen base name (the actual PDF filename is preserved; we only suffix on collision in the destination).
-
-This should wire straight into your project and replace the old `pdfInvoiceStep` entirely.
-
-
-
-
-
-
-
-
-
-Gotcha—when you use MapStruct with target = ... + expression = "java(...)" for UBL, two very easy gotchas cause “empty CreditNote XML”:
-	1.	Wrong target property names (they differ between InvoiceType and CreditNoteType)
-	2.	Helpers returning the wrong aggregate type (e.g., InvoiceLineType instead of CreditNoteLineType)
-
-Here’s a minimal, safe pattern that works with expression for both roots.
-
-MapStruct: targets + expressions that actually bind
-
-@Mapper(
-  componentModel = "spring",
-  builder = @Builder(disableBuilder = true),
-  nullValueCheckStrategy = NullValueCheckStrategy.ALWAYS
-)
-public interface CsvInvoiceMapper {
-
-  // ---------- Invoice ----------
-  @Mappings({
-    // IMPORTANT: property name is "iD" (because getter is getID())
-    @Mapping(target = "iD", expression = "java(toID(dto.getInvoiceNumber()))"),
-    @Mapping(target = "documentCurrencyCode", expression = "java(toDocCurrency(dto.getDocumentCurrencyCode()))"),
-    @Mapping(target = "accountingSupplierParty", expression = "java(toSupplierParty(dto))"),
-    @Mapping(target = "accountingCustomerParty", expression = "java(toCustomerParty(dto))"),
-    @Mapping(target = "contractDocumentReference", expression = "java(toContractRefs(dto))"),
-    // property is invoiceLine on InvoiceType
-    @Mapping(target = "invoiceLine", expression = "java(toInvoiceLines(dto))")
-  })
-  oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType toInvoiceType(CsvInvoiceDto dto);
-
-  // ---------- Credit Note ----------
-  @Mappings({
-    // same CBC/CAC, but targets must match CreditNoteType properties
-    @Mapping(target = "iD", expression = "java(toID(dto.getInvoiceNumber()))"),
-    @Mapping(target = "documentCurrencyCode", expression = "java(toDocCurrency(dto.getDocumentCurrencyCode()))"),
-    @Mapping(target = "accountingSupplierParty", expression = "java(toSupplierParty(dto))"),
-    @Mapping(target = "accountingCustomerParty", expression = "java(toCustomerParty(dto))"),
-    @Mapping(target = "contractDocumentReference", expression = "java(toContractRefs(dto))"),
-    // property is creditNoteLine on CreditNoteType  ✅
-    @Mapping(target = "creditNoteLine", expression = "java(toCreditNoteLines(dto))")
-  })
-  oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType toCreditNoteType(CsvInvoiceDto dto);
-
-  // ---------- CBC helpers ----------
-  default oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType toID(String val) {
-    if (val == null || val.isBlank()) return null;
-    var id = new oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType();
-    id.setValue(val);
-    return id;
-  }
-  default oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.DocumentCurrencyCodeType toDocCurrency(String code) {
-    if (code == null || code.isBlank()) return null;
-    var c = new oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.DocumentCurrencyCodeType();
-    c.setValue(code);
-    return c;
-  }
-
-  // ---------- CAC helpers (shared) ----------
-  default oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.AccountingSupplierPartyType toSupplierParty(CsvInvoiceDto dto) {
-    var asp = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.AccountingSupplierPartyType();
-    var party = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.PartyType();
-    // fill party (tax scheme, company id, names...) from dto
-    asp.setParty(party);
-    return asp;
-  }
-  default oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.AccountingCustomerPartyType toCustomerParty(CsvInvoiceDto dto) {
-    var acp = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.AccountingCustomerPartyType();
-    var party = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.PartyType();
-    acp.setParty(party);
-    return acp;
-  }
-  default java.util.List<oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.DocumentReferenceType> toContractRefs(CsvInvoiceDto dto) {
-    if (dto.getContractDocumentReferenceId() == null) return java.util.List.of();
-    var dr = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.DocumentReferenceType();
-    var id = new oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType();
-    id.setValue(dto.getContractDocumentReferenceId());
-    dr.setID(id);
-    return java.util.List.of(dr);
-  }
-
-  // ---------- Lines (different element types!) ----------
-  default java.util.List<oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.InvoiceLineType>
-  toInvoiceLines(CsvInvoiceDto dto) {
-    if (dto.getLines() == null || dto.getLines().isEmpty()) return java.util.List.of();
-    var out = new java.util.ArrayList<oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.InvoiceLineType>();
-    for (var l : dto.getLines()) {
-      var il = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.InvoiceLineType();
-      // set il.setID(...), il.setInvoicedQuantity(...), il.setLineExtensionAmount(...), Item, Price, etc.
-      out.add(il);
-    }
-    return out;
-  }
-
-  default java.util.List<oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.CreditNoteLineType>
-  toCreditNoteLines(CsvInvoiceDto dto) {
-    if (dto.getLines() == null || dto.getLines().isEmpty()) return java.util.List.of();
-    var out = new java.util.ArrayList<oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.CreditNoteLineType>();
-    for (var l : dto.getLines()) {
-      var cl = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.CreditNoteLineType();
-      // set cl.setID(...), cl.setCreditedQuantity(...), cl.setLineExtensionAmount(...), Item, Price, etc.
-      out.add(cl);
-    }
-    return out;
-  }
-}
-
-Key fixes vs common pitfalls
-	•	Use target = "iD" for the ID field. MapStruct follows Bean naming (getID() → property iD). Using "ID" often does nothing.
-	•	For credit notes, target = "creditNoteLine" (not invoiceLine).
-	•	Your expression methods must return CreditNoteLineType for credit notes (not InvoiceLineType) or MapStruct drops them.
-	•	If you prefer @Mapping(source="...", target="...") over expressions, keep helpers as @Named and switch to qualifiedByName = .... Expressions are fine too.
-
-⸻
-
-Tiny JUnit to prove children appear for CreditNote
-
-import org.junit.jupiter.api.Test;
-import static org.junit.jupiter.api.Assertions.*;
-
-class CsvInvoiceMapperCreditNoteSmokeTest {
-
-  // If using componentModel="spring", instantiate impl directly in tests:
   private final CsvInvoiceMapper mapper = new CsvInvoiceMapperImpl();
 
   @Test
-  void creditNote_hasId_and_lines() {
+  void additionalItemPropsEmptyAreIgnored() {
     var dto = new CsvInvoiceDto();
-    dto.setInvoiceNumber("CN-123");
-    dto.setDocumentCurrencyCode("EUR");
-    dto.setContractDocumentReferenceId("12-ABC");
-    // add one line in whatever structure your DTO uses
-    var line = new CsvInvoiceDto.Line();
-    line.setQuantity("1");
-    line.setPrice("10.00");
-    dto.setLines(java.util.List.of(line));
-
-    var cn = mapper.toCreditNoteType(dto);
-
-    assertNotNull(cn.getID());
-    assertEquals("CN-123", cn.getID().getValue());
-    assertNotNull(cn.getDocumentCurrencyCode());
-    assertEquals("EUR", cn.getDocumentCurrencyCode().getValue());
-    assertNotNull(cn.getCreditNoteLine());
-    assertFalse(cn.getCreditNoteLine().isEmpty());
-  }
-}
-
-
-⸻
-
-If you paste your exact @Mapping(target=..., expression=...) lines that are currently no-ops, I can point out the precise property name that’s off. Nine times out of ten it’s "ID" vs "iD" or "invoiceLine" vs "creditNoteLine".
-
-
-You’re spot on: CreditNoteType isn’t a drop-in for InvoiceType. A few property names differ (most notably creditNoteLine vs invoiceLine), and if your MapStruct mappings/ helpers all return Invoice* aggregates (e.g., InvoiceLineType), MapStruct will quietly skip them for CreditNoteType. That’s why your credit note XML ends up almost empty (even ID if you accidentally targeted the wrong path).
-
-Here’s a clean way to fix it.
-
-What to change
-	1.	Have two top-level mapping methods: one to InvoiceType, one to CreditNoteType.
-	2.	Share helpers that return common UBL CAC/CBC types (ID, Party, TaxTotal, LegalMonetaryTotal, etc.).
-	3.	Provide two separate line mappers:
-	•	List<InvoiceLineType> for invoices
-	•	List<CreditNoteLineType> for credit notes
-(Their element types differ, so MapStruct can’t reuse one.)
-	4.	Make sure targets use the correct property names for each root:
-	•	InvoiceType.invoiceLine
-	•	CreditNoteType.creditNoteLine
-
-Reference MapStruct mapper (trimmed but working)
-
-Adjust names/DTO fields to yours; pay attention to the targets on each method.
-
-@Mapper(
-    componentModel = "spring",
-    builder = @Builder(disableBuilder = true),
-    nullValueCheckStrategy = NullValueCheckStrategy.ALWAYS
-)
-public interface CsvInvoiceMapper {
-
-  // ---- Invoice ----
-  @Mappings({
-      @Mapping(target = "ID", source = "invoiceNumber", qualifiedByName = "toID"),
-      @Mapping(target = "DocumentCurrencyCode", source = "currency", qualifiedByName = "toCurrencyCode"),
-      @Mapping(target = "AccountingSupplierParty", source = ".", qualifiedByName = "toSupplierParty"),
-      @Mapping(target = "AccountingCustomerParty", source = ".", qualifiedByName = "toCustomerParty"),
-      @Mapping(target = "LegalMonetaryTotal", source = ".", qualifiedByName = "toLegalMonetaryTotal"),
-      @Mapping(target = "TaxTotal", source = ".", qualifiedByName = "toTaxTotals"),
-      @Mapping(target = "ContractDocumentReference", source = ".", qualifiedByName = "toContractRefs"),
-      @Mapping(target = "InvoiceLine", source = "lines", qualifiedByName = "toInvoiceLines")
-  })
-  oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType toInvoiceType(CsvInvoiceDto dto);
-
-  // ---- Credit Note ----
-  @Mappings({
-      @Mapping(target = "ID", source = "invoiceNumber", qualifiedByName = "toID"),
-      @Mapping(target = "DocumentCurrencyCode", source = "currency", qualifiedByName = "toCurrencyCode"),
-      @Mapping(target = "AccountingSupplierParty", source = ".", qualifiedByName = "toSupplierParty"),
-      @Mapping(target = "AccountingCustomerParty", source = ".", qualifiedByName = "toCustomerParty"),
-      @Mapping(target = "LegalMonetaryTotal", source = ".", qualifiedByName = "toLegalMonetaryTotal"),
-      @Mapping(target = "TaxTotal", source = ".", qualifiedByName = "toTaxTotals"),
-      @Mapping(target = "ContractDocumentReference", source = ".", qualifiedByName = "toContractRefs"),
-      // IMPORTANT: property name differs on CreditNote
-      @Mapping(target = "CreditNoteLine", source = "lines", qualifiedByName = "toCreditNoteLines")
-  })
-  oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType toCreditNoteType(CsvInvoiceDto dto);
-
-  // ===== Shared CBC helpers =====
-
-  @Named("toID")
-  default oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType toID(String value) {
-    if (value == null || value.isBlank()) return null;
-    var id = new oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType();
-    id.setValue(value);
-    return id;
-  }
-
-  @Named("toCurrencyCode")
-  default oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.DocumentCurrencyCodeType toCurrencyCode(String code) {
-    if (code == null || code.isBlank()) return null;
-    var c = new oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.DocumentCurrencyCodeType();
-    c.setValue(code);
-    return c;
-  }
-
-  // ===== Shared CAC helpers =====
-
-  @Named("toSupplierParty")
-  default oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.AccountingSupplierPartyType toSupplierParty(CsvInvoiceDto dto) {
-    // build Party with PartyTaxScheme.CompanyID etc.
-    var asp = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.AccountingSupplierPartyType();
-    var party = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.PartyType();
-    // ... fill party from dto (enterprise number, names, addresses, contacts)
-    asp.setParty(party);
-    return asp;
-  }
-
-  @Named("toCustomerParty")
-  default oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.AccountingCustomerPartyType toCustomerParty(CsvInvoiceDto dto) {
-    var acp = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.AccountingCustomerPartyType();
-    var party = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.PartyType();
-    // ... fill party from dto
-    acp.setParty(party);
-    return acp;
-  }
-
-  @Named("toLegalMonetaryTotal")
-  default oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.LegalMonetaryTotalType toLegalMonetaryTotal(CsvInvoiceDto dto) {
-    var t = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.LegalMonetaryTotalType();
-    // ... set PayableAmount, LineExtensionAmount, etc.
-    return t;
-  }
-
-  @Named("toTaxTotals")
-  default java.util.List<oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.TaxTotalType> toTaxTotals(CsvInvoiceDto dto) {
-    var tax = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.TaxTotalType();
-    // ... set TaxAmount and subtotals
-    return java.util.List.of(tax);
-  }
-
-  @Named("toContractRefs")
-  default java.util.List<oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.DocumentReferenceType> toContractRefs(CsvInvoiceDto dto) {
-    if (dto.getContractDocumentReferenceId() == null) return java.util.List.of();
-    var dr = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.DocumentReferenceType();
-    var id = new oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType();
-    id.setValue(dto.getContractDocumentReferenceId());
-    dr.setID(id);
-    return java.util.List.of(dr);
-  }
-
-  // ===== Lines: two separate helpers =====
-
-  @Named("toInvoiceLines")
-  default java.util.List<oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.InvoiceLineType>
-  toInvoiceLines(java.util.List<CsvInvoiceDto.Line> lines) {
-    if (lines == null || lines.isEmpty()) return java.util.List.of();
-    var out = new java.util.ArrayList<oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.InvoiceLineType>();
-    for (var l : lines) {
-      var il = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.InvoiceLineType();
-      // ... set line ID, InvoicedQuantity, LineExtensionAmount, Item, Price, etc.
-      out.add(il);
-    }
-    return out;
-  }
-
-  @Named("toCreditNoteLines")
-  default java.util.List<oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.CreditNoteLineType>
-  toCreditNoteLines(java.util.List<CsvInvoiceDto.Line> lines) {
-    if (lines == null || lines.isEmpty()) return java.util.List.of();
-    var out = new java.util.ArrayList<oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.CreditNoteLineType>();
-    for (var l : lines) {
-      var cl = new oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.CreditNoteLineType();
-      // ... set line ID, CreditedQuantity, LineExtensionAmount, Item, Price, etc.
-      out.add(cl);
-    }
-    return out;
-  }
-}
-
-Subtle but critical: CreditNoteLineType uses CreditedQuantity (vs InvoicedQuantity). Make sure to set the right field in each line helper.
-
-Quick JUnit tests (mapper level)
-
-These prove ID and lines are present for both types. Replace field access with your actual DTO fields.
-
-@ExtendWith(MockitoExtension.class)
-class CsvInvoiceMapperCreditNoteTest {
-
-  // If you use MapStruct with componentModel="spring", you can instantiate the impl directly in tests:
-  private final CsvInvoiceMapper mapper = new CsvInvoiceMapperImpl();
-
-  @Test
-  void mapsInvoice_ok() {
-    CsvInvoiceDto dto = sampleDto("INV-1", "EUR", "380");
-    var inv = mapper.toInvoiceType(dto);
-
-    assertNotNull(inv.getID());
-    assertEquals("INV-1", inv.getID().getValue());
-    assertEquals("EUR", inv.getDocumentCurrencyCode().getValue());
-    assertNotNull(inv.getInvoiceLine());
-    assertFalse(inv.getInvoiceLine().isEmpty());
+    dto.setAdditionalProperty1Name(null);
+    dto.setAdditionalProperty1Value("x");
+    var props = mapper.toAdditionalItemProperties(dto);
+    assertThat(props).isEmpty(); // or size 0 depending on your helper logic
   }
 
   @Test
-  void mapsCreditNote_ok() {
-    CsvInvoiceDto dto = sampleDto("CN-1", "EUR", "381");
-    var cn = mapper.toCreditNoteType(dto);
-
-    assertNotNull(cn.getID());
-    assertEquals("CN-1", cn.getID().getValue());
-    assertEquals("EUR", cn.getDocumentCurrencyCode().getValue());
-    assertNotNull(cn.getCreditNoteLine());        // different collection name
-    assertFalse(cn.getCreditNoteLine().isEmpty());
-  }
-
-  private CsvInvoiceDto sampleDto(String id, String ccy, String type) {
-    CsvInvoiceDto d = new CsvInvoiceDto();
-    d.setInvoiceNumber(id);
-    d.setDocumentCurrencyCode(ccy);
-    d.setInvoiceTypeCode(type);
-    // add one line
-    var line = new CsvInvoiceDto.Line();
-    line.setQuantity("1");
-    line.setPrice("10.00");
-    d.setLines(java.util.List.of(line));
-    d.setContractDocumentReferenceId("12-ABC");
-    return d;
-  }
-}
-
-Common gotchas checklist
-	•	✅ Property names: CreditNoteType.creditNoteLine vs InvoiceType.invoiceLine.
-	•	✅ Line element names: CreditedQuantity vs InvoicedQuantity.
-	•	✅ Helpers’ return types: Don’t reuse InvoiceLineType helpers for credit notes.
-	•	✅ Marshaller context: include both root types in your JAXBContext.
-	•	✅ Null checks: MapStruct with nullValueCheckStrategy = ALWAYS avoids NPEs in generated code.
-
-If you wire the above, your toCreditNoteType(...) will produce a fully populated credit note XML with all children present, and your existing bucket resolver + classifier writer will work unchanged.
-
-Perfect — understood 👌
-If your boss is presenting this to management, the text should be:
-	•	Concise (no long paragraphs)
-	•	Step-based (clear actions, easy to follow)
-	•	Outcome-oriented (shows results + value of your work)
-
-Here’s a polished playbook version of your flow, ready to present:
-
-⸻
-
-Dev Connectivity & Access Playbook
-
-⸻
-
-0. How Requests Start
-	•	Dev raises issue (email, dev community, or call).
-	•	We categorize request into one of five buckets:
-	1.	Firewall / Connectivity
-	2.	Database Access (SQL/Oracle)
-	3.	API Connectivity
-	4.	SFTP / WinSCP
-	5.	Other Tooling (Liberty, IntelliJ, AS400, etc.)
-
-⸻
-
-1. Firewall / Connectivity
-	1.	Check if request is for Dev/Test → firewall request is enough.
-	2.	If other servers → validate CyberArk ticket.
-	3.	Raise firewall request in tracker → share with infra.
-	4.	Infra implements → we validate.
-	5.	Dev tests → if OK → close request.
-	6.	If not working → escalate for further troubleshooting.
-
-⸻
-
-2. Database Access (SQL/Oracle)
-	1.	Confirm DB must go via CyberArk.
-	2.	Infra configures DB connection in CyberArk.
-	3.	Raise user onboarding request.
-	4.	User validates connection.
-	5.	If OK → close request.
-	6.	Future onboarding → handled via ServiceNow.
-
-⸻
-
-3. API Connectivity (Postman/Bruno)
-	1.	Initially checked via firewall → later found APIs behind proxies.
-	2.	Worked with infra to confirm setup.
-	3.	Dev must configure:
-	•	Proxy settings in Postman/Bruno.
-	•	Certificates in Postman.
-	•	Proxy setup on Mac.
-	4.	We guide devs (calls + docs).
-	5.	If API works via proxy → close request.
-
-⸻
-
-4. SFTP / WinSCP
-	1.	Onboard user to CyberArk.
-	2.	Test login + file access (early phase: we acted as test users, reported permission gaps).
-	3.	Infra adjusts permissions.
-	4.	Verify file access + WinSCP directory mapping.
-	5.	Provide docs:
-	•	CyberArk access from Mac.
-	•	WinSCP upload/download steps.
-	6.	Dev validates → close request.
-
-⸻
-
-5. Other Tooling / Environment
-	1.	Devs often lack time to configure tools.
-	2.	We test, configure, and create step-by-step guides.
-	•	IntelliJ Ultimate → added to self-service (with infra + Mac support).
-	•	AS400 Access → TN5250 client added.
-	•	Liberty Server → configured locally, docs created.
-	3.	Share setup guides with devs.
-	4.	Provide initial support calls if needed.
-	5.	Once confirmed → close request.
-
-⸻
-
-6. Closure & Knowledge Sharing
-	•	Every resolved issue = documented steps.
-	•	Built a library of guides (Postman, CyberArk, WinSCP, Liberty, AS400, IntelliJ).
-	•	Developers can now self-serve for repeat issues.
-
-⸻
-
-👉 This format shows management:
-	•	Clear flows
-	•	Your coordination role with infra + devs
-	•	Deliverables produced (docs, configs, tools)
-	•	Ongoing value (knowledge base for devs)
-
-⸻
-
-Would you like me to also make a 1-page executive summary version (super high-level, for slides), or keep it only as this playbook-style text?
-
-
-————
-
-
-Got it ✅
-Here’s a complete step-based flow that captures how requests start, how you categorize, what you/your team do, how it progresses, and how it closes. I’ve kept it structured but detailed so it reflects your actual work:
-
-⸻
-
-Step-Based Flow for Handling Dev Requests
-
-⸻
-
-0. Entry Point – Issue Reported
-	•	A developer reports an issue (via email, dev community, or call).
-	•	We log the request and start by categorizing the type of issue:
-	•	Firewall / Connectivity (MQ, Kafka, server-to-server)
-	•	Database Access (SQL Server, Oracle)
-	•	API Connectivity (Postman/Bruno, proxy settings)
-	•	SFTP / WinSCP (server login, file transfer)
-	•	Other Tooling / Environment (Liberty, IntelliJ Ultimate, AS400 console, etc.)
-
-⸻
-
-1. Firewall / Connectivity Requests
-	1.	Identify if the request is for Dev/Test environment.
-	•	If yes → opening a firewall rule is usually enough.
-	•	If not → confirm valid CyberArk onboarding and ticket.
-	2.	Create a firewall request in the request tracker.
-	3.	Share request details with infra team.
-	4.	Infra team implements the firewall and notifies us.
-	5.	We validate the connection from our side.
-	6.	If firewall is okay, we ask the developer to test.
-	7.	If dev confirms it works → close request.
-	8.	If not → continue debugging, check logs, troubleshoot further.
-
-⸻
-
-2. Database Access (SQL Server, Oracle)
-	1.	Dev requests DB connection.
-	2.	We ensure DB connection must go through CyberArk.
-	3.	Early phase: we worked with infra team to clarify setup requirements.
-	4.	Infra configures DB connection in CyberArk based on info shared.
-	5.	Once config is ready → raise user onboarding request.
-	6.	After onboarding → requestor is asked to validate DB connection.
-	7.	If connection works → close request.
-	8.	New onboarding requests must now go via ServiceNow (regular process).
-
-⸻
-
-3. API Connectivity (Postman/Bruno)
-	1.	Initially we requested firewall openings, but later found APIs are behind proxies.
-	2.	Worked with Inna + infra team to troubleshoot and confirm proxy setup.
-	3.	Developers need to:
-	•	Adapt proxy settings in Postman or Bruno.
-	•	Add certificates in Postman.
-	•	Configure Postman proxy on Mac (we created docs for this).
-	4.	We often walk devs through initial setups on calls.
-	5.	Once proxy configuration is correct → developer validates API call.
-	6.	If successful → close request.
-	7.	If not → more troubleshooting to see in which scenarios proxy works.
-
-⸻
-
-4. SFTP / WinSCP (Server & File Access)
-	1.	Dev needs server or file access.
-	2.	First step → onboarding user to CyberArk.
-	3.	Early phase: we acted as test users to identify issues (e.g., able to log in but couldn’t see files due to missing permissions).
-	4.	Reported issues back to infra for corrections.
-	5.	Once CyberArk setup works:
-	•	Dev can log in to server.
-	•	File access permissions are verified.
-	•	WinSCP local directory mapping is tested (upload/download).
-	6.	We created documentation for:
-	•	Accessing CyberArk from Mac.
-	•	Steps to use WinSCP for file transfers.
-	7.	After developer validates access → close request.
-
-⸻
-
-5. Other Tooling / Environment Requests
-	1.	Devs sometimes lack time to configure local tools (e.g., Liberty server).
-	•	We experiment, configure, and document step-by-step setup guides.
-	2.	Example achievements:
-	•	IntelliJ Ultimate was not in self-service → we raised it with infra + Mac support → package added.
-	•	AS400 Access: TN5250 client was missing → we got it added, now accessible from Mac.
-	•	Liberty server: we tested locally and created working setup steps for devs.
-	3.	Once tools are ready:
-	•	We share documentation and guides with devs.
-	•	Support devs in initial calls if needed.
-	•	Requests are closed once dev confirms setup works.
-
-⸻
-
-6. Closure & Knowledge Sharing
-	•	After any category request is completed:
-	•	Developer validates → request closed.
-	•	Steps/findings are documented (Mac setup guides, Postman configs, WinSCP usage, Liberty setup, etc.).
-	•	Shared with devs for self-service in future.
-	•	Over time, created a library of troubleshooting docs and how-to guides.
-
-⸻
-
-✅ This is your work summarized as a structured step-based flow:
-	•	Categorize issues
-	•	Drive the technical + coordination steps with infra
-	•	Validate and troubleshoot
-	•	Close requests
-	•	Document for future reuse
-
-⸻
-
-Would you like me to now restructure this into a concise “playbook” format (like numbered flows per category, shorter wording) so it reads more like an official process guide rather than a detailed report?
-
-Absolutely—here are focused, drop-in **JUnit 5** test classes to cover:
-
-1. the **processor** (CSV → `InvoiceType` or `CreditNoteType`)
-2. the **classifier writer** (routes to your two writers)
-3. an **end-to-end step test** (reader → processor → classifier writer) proving items are routed correctly
-
-Assumptions:
-
-* Package names for UBL classes are the standard ones (adjust if yours differ).
-* You have `spring-boot-starter-test`, `spring-batch-test`, and `mockito` on the classpath.
-
----
-
-# 1) Processor test
-
-```java
-package com.alphacredit.batch.processing;
-
-import com.alphacredit.batch.domain.CsvInvoiceDto;
-import com.alphacredit.batch.mapping.CsvInvoiceMapper;
-import com.alphacredit.batch.processing.CsvToUblProcessor;
-import oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType;
-import oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
-
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
-
-@ExtendWith(MockitoExtension.class)
-class CsvToUblProcessorTest {
-
-  @Mock CsvInvoiceMapper mapper;
-  @InjectMocks CsvToUblProcessor processor;
-
-  @Test
-  void returnsCreditNote_whenTypeCode381() throws Exception {
+  void parsesAmountsWithScale() {
     var dto = new CsvInvoiceDto();
-    dto.setInvoiceTypeCode("381");
-    var cn = new CreditNoteType();
-    when(mapper.toCreditNoteType(dto)).thenReturn(cn);
-
-    Object out = processor.process(dto);
-
-    assertTrue(out instanceof CreditNoteType);
-    verify(mapper).toCreditNoteType(dto);
-    verify(mapper, never()).toInvoiceType(any());
-  }
-
-  @Test
-  void returnsInvoice_otherwise() throws Exception {
-    var dto = new CsvInvoiceDto();
-    dto.setInvoiceTypeCode("380");
-    var inv = new InvoiceType();
-    when(mapper.toInvoiceType(dto)).thenReturn(inv);
-
-    Object out = processor.process(dto);
-
-    assertTrue(out instanceof InvoiceType);
-    verify(mapper).toInvoiceType(dto);
-    verify(mapper, never()).toCreditNoteType(any());
+    dto.setTotalPayable("121.00");
+    var inv = mapper.toInvoice(dto);
+    assertThat(inv.getLegalMonetaryTotal().getPayableAmount().getValue())
+        .isEqualByComparingTo("121.00");
   }
 }
 ```
 
 ---
 
-# 2) Classifier writer test
+## Where to place these
 
-This verifies that objects are dispatched to the correct writer.
-
-```java
-package com.alphacredit.batch.writer;
-
-import oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType;
-import oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType;
-import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
-import org.springframework.batch.item.ItemWriter;
-import org.springframework.batch.item.support.ClassifierCompositeItemWriter;
-
-import java.util.List;
-
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
-
-class UblClassifierWriterTest {
-
-  @SuppressWarnings("unchecked")
-  @Test
-  void routesToCorrectDelegate() throws Exception {
-    // Arrange: two concrete writers
-    ItemWriter<InvoiceType> invoiceWriter = mock(ItemWriter.class);
-    ItemWriter<CreditNoteType> creditWriter = mock(ItemWriter.class);
-
-    // Build the classifier writer just like in your WriterConfig
-    ClassifierCompositeItemWriter<Object> classifier = new ClassifierCompositeItemWriter<>();
-    classifier.setClassifier(item -> {
-      if (item instanceof InvoiceType) return (ItemWriter<Object>)(ItemWriter<?>)invoiceWriter;
-      if (item instanceof CreditNoteType) return (ItemWriter<Object>)(ItemWriter<?>)creditWriter;
-      throw new IllegalArgumentException("Unsupported: " + item.getClass());
-    });
-
-    // Input batch: 2 invoices + 1 credit note
-    var inv1 = new InvoiceType();
-    var inv2 = new InvoiceType();
-    var cn1  = new CreditNoteType();
-
-    // Act
-    classifier.write(List.of(inv1, cn1, inv2));
-
-    // Assert: each delegate got only the items of its type
-    ArgumentCaptor<List<InvoiceType>> invCap = ArgumentCaptor.forClass(List.class);
-    verify(invoiceWriter, times(2)).write(invCap.capture());
-    // Because ClassifierCompositeItemWriter calls delegate per-item, we expect multiple single-item lists
-    assertEquals(2, invCap.getAllValues().size());
-    assertTrue(invCap.getAllValues().stream().allMatch(l -> l.size() == 1 && l.get(0) instanceof InvoiceType));
-
-    ArgumentCaptor<List<CreditNoteType>> cnCap = ArgumentCaptor.forClass(List.class);
-    verify(creditWriter, times(1)).write(cnCap.capture());
-    assertEquals(1, cnCap.getAllValues().size());
-    assertEquals(1, cnCap.getValue().size());
-    assertTrue(cnCap.getValue().get(0) instanceof CreditNoteType);
-
-    verifyNoMoreInteractions(invoiceWriter, creditWriter);
-  }
-}
+```
+src/test/java/com/bnpp/pf/einvoice/connect/batch/csv/
+  CsvFilePresenceDeciderTest.java
+  CsvXmlWriterConfigTest.java
+  CsvInvoiceProcessorTest.java
+  CsvInvoiceMapperEdgeTest.java
 ```
 
 ---
 
-# 3) End-to-end step test (Spring Batch)
-
-This spins up a minimal Spring context and proves that:
-
-* the **processor** converts based on `InvoiceTypeCode`
-* the **classifier** routes to the right writer
-* both writers get called the expected number of times
-
-We’ll use **stub writers** that just record what they saw.
-
-```java
-package com.alphacredit.batch.step;
-
-import com.alphacredit.batch.domain.CsvInvoiceDto;
-import com.alphacredit.batch.mapping.CsvInvoiceMapper;
-import com.alphacredit.batch.processing.CsvToUblProcessor;
-import oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType;
-import oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType;
-import org.junit.jupiter.api.Test;
-import org.springframework.batch.core.*;
-import org.springframework.batch.core.configuration.annotation.EnableBatchProcessing;
-import org.springframework.batch.core.job.builder.JobBuilder;
-import org.springframework.batch.core.launch.JobLauncher;
-import org.springframework.batch.core.repository.JobRepository;
-import org.springframework.batch.core.step.builder.StepBuilder;
-import org.springframework.batch.item.*;
-import org.springframework.batch.item.support.ClassifierCompositeItemWriter;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.context.annotation.*;
-import org.springframework.transaction.PlatformTransactionManager;
-
-import java.util.*;
-import java.util.concurrent.CopyOnWriteArrayList;
-
-import static org.junit.jupiter.api.Assertions.*;
-
-@SpringBootTest(classes = CsvToXmlStepTest.Config.class)
-class CsvToXmlStepTest {
-
-  @Autowired JobLauncher launcher;
-  @Autowired Job job;
-  @Autowired Config.RecordingInvoiceWriter invWriter;
-  @Autowired Config.RecordingCreditWriter cnWriter;
-
-  @Test
-  void routesInvoicesAndCreditNotes() throws Exception {
-    JobExecution exec = launcher.run(job, new JobParameters());
-    assertEquals(BatchStatus.COMPLETED, exec.getStatus());
-
-    // We fed 2 invoices + 1 creditnote (see reader below)
-    assertEquals(2, invWriter.items.size());
-    assertEquals(1, cnWriter.items.size());
-  }
-
-  // ---- Test configuration ----
-  @Configuration
-  @EnableBatchProcessing
-  static class Config {
-
-    // Simple reader that returns 3 DTOs: 2 invoices (380) + 1 credit (381)
-    @Bean
-    ItemReader<CsvInvoiceDto> reader() {
-      List<CsvInvoiceDto> list = new ArrayList<>();
-      list.add(dto("INV-1", "380"));
-      list.add(dto("INV-2", "380"));
-      list.add(dto("CN-1",  "381"));
-      return new ListItemReader<>(list);
-    }
-
-    private static CsvInvoiceDto dto(String id, String typeCode) {
-      CsvInvoiceDto d = new CsvInvoiceDto();
-      d.setInvoiceNumber(id);
-      d.setInvoiceTypeCode(typeCode);
-      return d;
-    }
-
-    // Mapper stub that makes minimal UBL objects
-    @Bean
-    CsvInvoiceMapper mapper() {
-      return new CsvInvoiceMapper() {
-        @Override public InvoiceType toInvoiceType(CsvInvoiceDto src) {
-          InvoiceType inv = new InvoiceType();
-          var id = new oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType();
-          id.setValue(src.getInvoiceNumber());
-          inv.setID(id);
-          return inv;
-        }
-        @Override public CreditNoteType toCreditNoteType(CsvInvoiceDto src) {
-          CreditNoteType cn = new CreditNoteType();
-          var id = new oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType();
-          id.setValue(src.getInvoiceNumber());
-          cn.setID(id);
-          return cn;
-        }
-      };
-    }
-
-    @Bean CsvToUblProcessor processor(CsvInvoiceMapper mapper) { return new CsvToUblProcessor(mapper); }
-
-    // Recording writers (stand-ins for your XMLInvoiceWriter / XMLCreditNoteWriter)
-    @Bean RecordingInvoiceWriter invoiceWriter() { return new RecordingInvoiceWriter(); }
-    @Bean RecordingCreditWriter creditWriter()   { return new RecordingCreditWriter(); }
-
-    @Bean
-    @SuppressWarnings("unchecked")
-    ClassifierCompositeItemWriter<Object> classifierWriter(RecordingInvoiceWriter inv, RecordingCreditWriter cn) {
-      ClassifierCompositeItemWriter<Object> cw = new ClassifierCompositeItemWriter<>();
-      cw.setClassifier(item -> {
-        if (item instanceof InvoiceType)     return (ItemWriter<Object>)(ItemWriter<?>) inv;
-        if (item instanceof CreditNoteType)  return (ItemWriter<Object>)(ItemWriter<?>) cn;
-        throw new IllegalArgumentException("Unsupported: " + item);
-      });
-      return cw;
-    }
-
-    @Bean
-    Job job(JobRepository repo, PlatformTransactionManager tx,
-            ItemReader<CsvInvoiceDto> reader,
-            CsvToUblProcessor processor,
-            ClassifierCompositeItemWriter<Object> writer) {
-      Step step = new StepBuilder("csvToXmlStep", repo)
-          .<CsvInvoiceDto, Object>chunk(10, tx)
-          .reader(reader)
-          .processor(processor)
-          .writer(writer)
-          .build();
-      return new JobBuilder("testJob", repo).start(step).build();
-    }
-
-    // --- recording writers
-    static class RecordingInvoiceWriter implements ItemWriter<InvoiceType> {
-      final List<InvoiceType> items = new CopyOnWriteArrayList<>();
-      @Override public void write(List<? extends InvoiceType> items) { this.items.addAll(items); }
-    }
-    static class RecordingCreditWriter implements ItemWriter<CreditNoteType> {
-      final List<CreditNoteType> items = new CopyOnWriteArrayList<>();
-      @Override public void write(List<? extends CreditNoteType> items) { this.items.addAll(items); }
-    }
-  }
-}
-```
-
----
-
-## What these tests give you
-
-* ✅ **Processor logic**: confidently flips to `CreditNoteType` when `InvoiceTypeCode == 381`.
-* ✅ **Routing**: classifier sends each object to the correct concrete writer.
-* ✅ **Step integration**: with a real Batch step, confirms two invoices + one credit note end up in the expected writers.
-
-If you want, I can also add quick tests for your `BucketResolver` on both `InvoiceType` and `CreditNoteType` using your latest implementation, but since you already validated that earlier, these three should cover your CSV→polymorphic UBL flow end-to-end.
-
-
-Absolutely—here are focused, drop-in **JUnit 5** test classes to cover:
-
-1. the **processor** (CSV → `InvoiceType` or `CreditNoteType`)
-2. the **classifier writer** (routes to your two writers)
-3. an **end-to-end step test** (reader → processor → classifier writer) proving items are routed correctly
-
-Assumptions:
-
-* Package names for UBL classes are the standard ones (adjust if yours differ).
-* You have `spring-boot-starter-test`, `spring-batch-test`, and `mockito` on the classpath.
-
----
-
-# 1) Processor test
-
-```java
-package com.alphacredit.batch.processing;
-
-import com.alphacredit.batch.domain.CsvInvoiceDto;
-import com.alphacredit.batch.mapping.CsvInvoiceMapper;
-import com.alphacredit.batch.processing.CsvToUblProcessor;
-import oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType;
-import oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
-
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
-
-@ExtendWith(MockitoExtension.class)
-class CsvToUblProcessorTest {
-
-  @Mock CsvInvoiceMapper mapper;
-  @InjectMocks CsvToUblProcessor processor;
-
-  @Test
-  void returnsCreditNote_whenTypeCode381() throws Exception {
-    var dto = new CsvInvoiceDto();
-    dto.setInvoiceTypeCode("381");
-    var cn = new CreditNoteType();
-    when(mapper.toCreditNoteType(dto)).thenReturn(cn);
-
-    Object out = processor.process(dto);
-
-    assertTrue(out instanceof CreditNoteType);
-    verify(mapper).toCreditNoteType(dto);
-    verify(mapper, never()).toInvoiceType(any());
-  }
-
-  @Test
-  void returnsInvoice_otherwise() throws Exception {
-    var dto = new CsvInvoiceDto();
-    dto.setInvoiceTypeCode("380");
-    var inv = new InvoiceType();
-    when(mapper.toInvoiceType(dto)).thenReturn(inv);
-
-    Object out = processor.process(dto);
-
-    assertTrue(out instanceof InvoiceType);
-    verify(mapper).toInvoiceType(dto);
-    verify(mapper, never()).toCreditNoteType(any());
-  }
-}
-```
-
----
-
-# 2) Classifier writer test
-
-This verifies that objects are dispatched to the correct writer.
-
-```java
-package com.alphacredit.batch.writer;
-
-import oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType;
-import oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType;
-import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
-import org.springframework.batch.item.ItemWriter;
-import org.springframework.batch.item.support.ClassifierCompositeItemWriter;
-
-import java.util.List;
-
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
-
-class UblClassifierWriterTest {
-
-  @SuppressWarnings("unchecked")
-  @Test
-  void routesToCorrectDelegate() throws Exception {
-    // Arrange: two concrete writers
-    ItemWriter<InvoiceType> invoiceWriter = mock(ItemWriter.class);
-    ItemWriter<CreditNoteType> creditWriter = mock(ItemWriter.class);
-
-    // Build the classifier writer just like in your WriterConfig
-    ClassifierCompositeItemWriter<Object> classifier = new ClassifierCompositeItemWriter<>();
-    classifier.setClassifier(item -> {
-      if (item instanceof InvoiceType) return (ItemWriter<Object>)(ItemWriter<?>)invoiceWriter;
-      if (item instanceof CreditNoteType) return (ItemWriter<Object>)(ItemWriter<?>)creditWriter;
-      throw new IllegalArgumentException("Unsupported: " + item.getClass());
-    });
-
-    // Input batch: 2 invoices + 1 credit note
-    var inv1 = new InvoiceType();
-    var inv2 = new InvoiceType();
-    var cn1  = new CreditNoteType();
-
-    // Act
-    classifier.write(List.of(inv1, cn1, inv2));
-
-    // Assert: each delegate got only the items of its type
-    ArgumentCaptor<List<InvoiceType>> invCap = ArgumentCaptor.forClass(List.class);
-    verify(invoiceWriter, times(2)).write(invCap.capture());
-    // Because ClassifierCompositeItemWriter calls delegate per-item, we expect multiple single-item lists
-    assertEquals(2, invCap.getAllValues().size());
-    assertTrue(invCap.getAllValues().stream().allMatch(l -> l.size() == 1 && l.get(0) instanceof InvoiceType));
-
-    ArgumentCaptor<List<CreditNoteType>> cnCap = ArgumentCaptor.forClass(List.class);
-    verify(creditWriter, times(1)).write(cnCap.capture());
-    assertEquals(1, cnCap.getAllValues().size());
-    assertEquals(1, cnCap.getValue().size());
-    assertTrue(cnCap.getValue().get(0) instanceof CreditNoteType);
-
-    verifyNoMoreInteractions(invoiceWriter, creditWriter);
-  }
-}
-```
-
----
-
-# 3) End-to-end step test (Spring Batch)
-
-This spins up a minimal Spring context and proves that:
-
-* the **processor** converts based on `InvoiceTypeCode`
-* the **classifier** routes to the right writer
-* both writers get called the expected number of times
-
-We’ll use **stub writers** that just record what they saw.
-
-```java
-package com.alphacredit.batch.step;
-
-import com.alphacredit.batch.domain.CsvInvoiceDto;
-import com.alphacredit.batch.mapping.CsvInvoiceMapper;
-import com.alphacredit.batch.processing.CsvToUblProcessor;
-import oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType;
-import oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType;
-import org.junit.jupiter.api.Test;
-import org.springframework.batch.core.*;
-import org.springframework.batch.core.configuration.annotation.EnableBatchProcessing;
-import org.springframework.batch.core.job.builder.JobBuilder;
-import org.springframework.batch.core.launch.JobLauncher;
-import org.springframework.batch.core.repository.JobRepository;
-import org.springframework.batch.core.step.builder.StepBuilder;
-import org.springframework.batch.item.*;
-import org.springframework.batch.item.support.ClassifierCompositeItemWriter;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.context.annotation.*;
-import org.springframework.transaction.PlatformTransactionManager;
-
-import java.util.*;
-import java.util.concurrent.CopyOnWriteArrayList;
-
-import static org.junit.jupiter.api.Assertions.*;
-
-@SpringBootTest(classes = CsvToXmlStepTest.Config.class)
-class CsvToXmlStepTest {
-
-  @Autowired JobLauncher launcher;
-  @Autowired Job job;
-  @Autowired Config.RecordingInvoiceWriter invWriter;
-  @Autowired Config.RecordingCreditWriter cnWriter;
-
-  @Test
-  void routesInvoicesAndCreditNotes() throws Exception {
-    JobExecution exec = launcher.run(job, new JobParameters());
-    assertEquals(BatchStatus.COMPLETED, exec.getStatus());
-
-    // We fed 2 invoices + 1 creditnote (see reader below)
-    assertEquals(2, invWriter.items.size());
-    assertEquals(1, cnWriter.items.size());
-  }
-
-  // ---- Test configuration ----
-  @Configuration
-  @EnableBatchProcessing
-  static class Config {
-
-    // Simple reader that returns 3 DTOs: 2 invoices (380) + 1 credit (381)
-    @Bean
-    ItemReader<CsvInvoiceDto> reader() {
-      List<CsvInvoiceDto> list = new ArrayList<>();
-      list.add(dto("INV-1", "380"));
-      list.add(dto("INV-2", "380"));
-      list.add(dto("CN-1",  "381"));
-      return new ListItemReader<>(list);
-    }
-
-    private static CsvInvoiceDto dto(String id, String typeCode) {
-      CsvInvoiceDto d = new CsvInvoiceDto();
-      d.setInvoiceNumber(id);
-      d.setInvoiceTypeCode(typeCode);
-      return d;
-    }
-
-    // Mapper stub that makes minimal UBL objects
-    @Bean
-    CsvInvoiceMapper mapper() {
-      return new CsvInvoiceMapper() {
-        @Override public InvoiceType toInvoiceType(CsvInvoiceDto src) {
-          InvoiceType inv = new InvoiceType();
-          var id = new oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType();
-          id.setValue(src.getInvoiceNumber());
-          inv.setID(id);
-          return inv;
-        }
-        @Override public CreditNoteType toCreditNoteType(CsvInvoiceDto src) {
-          CreditNoteType cn = new CreditNoteType();
-          var id = new oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.IDType();
-          id.setValue(src.getInvoiceNumber());
-          cn.setID(id);
-          return cn;
-        }
-      };
-    }
-
-    @Bean CsvToUblProcessor processor(CsvInvoiceMapper mapper) { return new CsvToUblProcessor(mapper); }
-
-    // Recording writers (stand-ins for your XMLInvoiceWriter / XMLCreditNoteWriter)
-    @Bean RecordingInvoiceWriter invoiceWriter() { return new RecordingInvoiceWriter(); }
-    @Bean RecordingCreditWriter creditWriter()   { return new RecordingCreditWriter(); }
-
-    @Bean
-    @SuppressWarnings("unchecked")
-    ClassifierCompositeItemWriter<Object> classifierWriter(RecordingInvoiceWriter inv, RecordingCreditWriter cn) {
-      ClassifierCompositeItemWriter<Object> cw = new ClassifierCompositeItemWriter<>();
-      cw.setClassifier(item -> {
-        if (item instanceof InvoiceType)     return (ItemWriter<Object>)(ItemWriter<?>) inv;
-        if (item instanceof CreditNoteType)  return (ItemWriter<Object>)(ItemWriter<?>) cn;
-        throw new IllegalArgumentException("Unsupported: " + item);
-      });
-      return cw;
-    }
-
-    @Bean
-    Job job(JobRepository repo, PlatformTransactionManager tx,
-            ItemReader<CsvInvoiceDto> reader,
-            CsvToUblProcessor processor,
-            ClassifierCompositeItemWriter<Object> writer) {
-      Step step = new StepBuilder("csvToXmlStep", repo)
-          .<CsvInvoiceDto, Object>chunk(10, tx)
-          .reader(reader)
-          .processor(processor)
-          .writer(writer)
-          .build();
-      return new JobBuilder("testJob", repo).start(step).build();
-    }
-
-    // --- recording writers
-    static class RecordingInvoiceWriter implements ItemWriter<InvoiceType> {
-      final List<InvoiceType> items = new CopyOnWriteArrayList<>();
-      @Override public void write(List<? extends InvoiceType> items) { this.items.addAll(items); }
-    }
-    static class RecordingCreditWriter implements ItemWriter<CreditNoteType> {
-      final List<CreditNoteType> items = new CopyOnWriteArrayList<>();
-      @Override public void write(List<? extends CreditNoteType> items) { this.items.addAll(items); }
-    }
-  }
-}
-```
-
----
-
-## What these tests give you
-
-* ✅ **Processor logic**: confidently flips to `CreditNoteType` when `InvoiceTypeCode == 381`.
-* ✅ **Routing**: classifier sends each object to the correct concrete writer.
-* ✅ **Step integration**: with a real Batch step, confirms two invoices + one credit note end up in the expected writers.
-
-If you want, I can also add quick tests for your `BucketResolver` on both `InvoiceType` and `CreditNoteType` using your latest implementation, but since you already validated that earlier, these three should cover your CSV→polymorphic UBL flow end-to-end.
+## Quick wins checklist for this package
+
+* [ ] `CsvFilePresenceDecider` covered for: missing param, empty list, valid list, (optional) non-existent files.
+* [ ] `CsvXmlWriterConfig` bean presence test (covers all `@Bean` methods).
+* [ ] `CsvInvoiceProcessor` happy + sparse + (optional) invalid input exception.
+* [ ] `CsvInvoiceMapper` a couple extra branches (props, numbers/dates).
+* [ ] Keep `CsvInvoiceReader`/`SmartCsvInvoiceFieldSetMapper` as-is (already excellent).
+
+If you drop these in, **batch/csv** should jump into the green.
+Want me to tailor the expectations to the exact `FlowExecutionStatus` strings and bean names in your code? Paste the two classes (`CsvFilePresenceDecider`, `CsvXmlWriterConfig`) and I’ll align the tests precisely.
