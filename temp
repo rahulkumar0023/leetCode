@@ -1,3 +1,105 @@
+You’re instantiating the helpers yourself (`new ResponseHelper(...)`, `new RequestHelper()`), so Spring isn’t managing them.
+When a class isn’t a Spring bean, `@Value` (and `@Autowired`) won’t run—those fields stay `null`/`0`. That’s why the properties aren’t being read inside your helpers.
+
+## Fix (minimal + robust)
+
+1. **Make the helpers Spring beans.**
+2. **Inject them into your service (constructor injection).**
+3. **Do NOT `new` them.**
+   If the helper really needs to call back into the service, inject the *specific* collaborators it needs (preferable), or use `@Lazy` to break a circular dependency.
+
+### ResponseHelper.java
+
+```java
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+
+@Component
+public class ResponseHelper {
+
+    // read from application.yml
+    @Value("${consultationReq.byNumber.cachePeriod}")
+    private int byNumberCachePeriod;
+
+    @Value("${consultationReq.byName.cachePeriod}")
+    private int byNameCachePeriod;
+
+    @Value("${allowNbdbConsultation:false}")   // example boolean with default
+    private boolean allowNbdbConsultation;
+
+    // ... your methods
+}
+```
+
+### RequestHelper.java
+
+```java
+import org.springframework.stereotype.Component;
+
+@Component
+public class RequestHelper {
+   // helper methods
+}
+```
+
+### KafkaMessageProcessorService.java
+
+```java
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import lombok.RequiredArgsConstructor;
+
+@Service
+@RequiredArgsConstructor
+public class KafkaMessageProcessorService {
+
+    @Value("${consultationReq.dbMode:false}")
+    private boolean isDbMode;
+
+    private final CachingService cachingService;
+    private final SoapClient<ConsultationRequest> soapClient;
+    private final ResponseHelper responseHelper;   // injected bean
+    private final RequestHelper requestHelper;     // injected bean
+
+    public ConsultNaturalPersonResponse process(Object object, String flowId) {
+        // use responseHelper / requestHelper here
+    }
+}
+```
+
+### If you *must* reference the service from the helper
+
+(try to avoid this—inject just what you need)
+
+```java
+@Component
+@RequiredArgsConstructor
+public class ResponseHelper {
+    private final @Lazy KafkaMessageProcessorService kafkaMessageProcessorService;
+    // ... @Value fields as above
+}
+```
+
+## Quick checklist
+
+* Helpers annotated with `@Component` (or `@Service`) and in a package scanned by Spring.
+* No `new ResponseHelper(...)` / `new RequestHelper()` anywhere.
+* Property keys in `application.yml` match exactly, e.g.:
+
+  ```yaml
+  consultationReq:
+    dbMode: false
+    byNumber:
+      cachePeriod: 300
+    byName:
+      cachePeriod: 300
+  allowNbdbConsultation: true
+  ```
+
+Do the above and your `@Value` fields inside the helpers will populate again.
+
+
+
 Short answer: yes—if you only keep a single `"currentResourceBaseName"` in the `ExecutionContext`, it gets overwritten when `MultiResourceItemReader` switches to the next file. A chunk can straddle two resources, so items from file A could be written while the context already holds file B’s name. Result: wrong PDF name.
 
 ## Minimal, safe fix (no pipeline type changes)
