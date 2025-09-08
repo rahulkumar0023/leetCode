@@ -1,11 +1,7 @@
-nice—let’s unit-test FetchDecryptUnzipTasklet end-to-end on its two core helpers:
-	•	decryptFile(File) → uses pgpDecrypter and writes output with the .pgp suffix removed
-	•	unzipFile(File, Path) → creates the target dir, safely extracts files/dirs, and blocks zip-slip
+perfect — since your tasklet now has CosStorageService and PDPDecrypt fields, here’s a drop-in JUnit 5 test that mocks both, injects them via reflection, and fully covers the two helpers you showed (decryptFile and unzipFile) including the zip-slip guard.
 
-Below are drop-in JUnit 5 tests (Mockito + java.nio) that cover all branches you showed.
-
-package path from your screenshots: com.bnpp.pf.einvoice.connect.batch.tasklet.
-If your pgpDecrypter type is different, just change the import & mock.
+Package paths/names match your screenshots; adjust if yours differ (e.g., …batch.tasklet).
+Replace the imports of PDPDecrypt / CosStorageService with your actual types.
 
 ⸻
 
@@ -13,11 +9,13 @@ src/test/java/com/bnpp/pf/einvoice/connect/batch/tasklet/FetchDecryptUnzipTaskle
 
 package com.bnpp.pf.einvoice.connect.batch.tasklet;
 
+import com.bnpp.pf.einvoice.connect.cos.CosStorageService;   // <-- adjust if package differs
+import com.bnpp.pf.einvoice.connect.pgp.PDPDecrypt;          // <-- adjust if package differs
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import org.mockito.Mockito;
 
 import java.io.*;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
@@ -27,105 +25,87 @@ import java.util.zip.ZipOutputStream;
 import static org.assertj.core.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
-/**
- * Focuses on the two private helpers shown in the screenshots:
- *  - decryptFile(File)
- *  - unzipFile(File, Path)
- *
- * We call them reflectively to exercise their branches without spinning up Spring.
- */
 class FetchDecryptUnzipTaskletTest {
 
-  // Create a real tasklet, and inject a mock decrypter via reflection.
-  private FetchDecryptUnzipTasklet newTaskletWithDecrypter(Object decrypterMock) throws Exception {
-    var tasklet = new FetchDecryptUnzipTasklet();
-    try {
-      var f = FetchDecryptUnzipTasklet.class.getDeclaredField("pgpDecrypter");
+  // ---- helpers --------------------------------------------------------------
+
+  private FetchDecryptUnzipTasklet newTasklet(PDPDecrypt pdpDecrypt, CosStorageService cos) throws Exception {
+    var t = new FetchDecryptUnzipTasklet();
+
+    if (pdpDecrypt != null) {
+      Field f = FetchDecryptUnzipTasklet.class.getDeclaredField("pdpDecrypt"); // exact field name in your class
       f.setAccessible(true);
-      f.set(tasklet, decrypterMock);
-    } catch (NoSuchFieldException ignore) {
-      // If your field name differs, try an alternative:
-      var f = FetchDecryptUnzipTasklet.class.getDeclaredField("pgpDecrypterService");
-      f.setAccessible(true);
-      f.set(tasklet, decrypterMock);
+      f.set(t, pdpDecrypt);
     }
-    return tasklet;
+    if (cos != null) {
+      Field f = FetchDecryptUnzipTasklet.class.getDeclaredField("cosStorageService"); // exact field name
+      f.setAccessible(true);
+      f.set(t, cos);
+    }
+    return t;
   }
 
-  // --- decryptFile -----------------------------------------------------------
+  private static Method privateMethod(String name, Class<?>... sig) throws Exception {
+    Method m = FetchDecryptUnzipTasklet.class.getDeclaredMethod(name, sig);
+    m.setAccessible(true);
+    return m;
+  }
+
+  // ---- decryptFile ----------------------------------------------------------
 
   @Test
-  void decryptFile_removesPgpSuffix_andDelegatesToDecrypter(@TempDir Path tmp) throws Exception {
-    // Arrange a fake ".pgp" file
-    Path encrypted = tmp.resolve("invoices_20250101.csv.pgp");
+  void decryptFile_usesPdpDecrypt_andStripsPgpSuffix(@TempDir Path tmp) throws Exception {
+    // Given an encrypted .pgp file
+    Path encrypted = tmp.resolve("batch_2025.csv.pgp");
     Files.writeString(encrypted, "ciphertext", StandardCharsets.UTF_8);
 
-    // Mock decrypter: copy input to output (simulates successful decrypt)
-    var decrypter = mock(Object.class, withSettings().name("pgpDecrypter"));
+    // PDPDecrypt mock: copy bytes from in -> out
+    PDPDecrypt pdp = mock(PDPDecrypt.class);
     doAnswer(inv -> {
-      try (var in = (InputStream) inv.getArgument(0);
-           var out = (OutputStream) inv.getArgument(1)) {
+      try (InputStream in = inv.getArgument(0); OutputStream out = inv.getArgument(1)) {
         in.transferTo(out);
       }
       return null;
-    }).when(decrypter).getClass(); // no-op; we just need the instance
+    }).when(pdp).decrypt(any(InputStream.class), any(OutputStream.class));
 
-    // Because your code likely calls: pgpDecrypter.decrypt(InputStream, OutputStream)
-    // create a dynamic proxy for a tiny interface if needed:
-    var proxy = java.lang.reflect.Proxy.newProxyInstance(
-        getClass().getClassLoader(),
-        new Class<?>[]{Decryptor.class},
-        (p, m, args) -> { // simply copy bytes
-          try (var in = (InputStream) args[0]; var out = (OutputStream) args[1]) {
-            in.transferTo(out);
-          }
-          return null;
-        }
-    );
+    FetchDecryptUnzipTasklet tasklet = newTasklet(pdp, mock(CosStorageService.class));
 
-    var tasklet = newTaskletWithDecrypter(proxy);
+    // When calling private decryptFile(File)
+    File decrypted = (File) privateMethod("decryptFile", File.class)
+        .invoke(tasklet, encrypted.toFile());
 
-    // Invoke private method: File decryptFile(File)
-    Method m = FetchDecryptUnzipTasklet.class.getDeclaredMethod("decryptFile", File.class);
-    m.setAccessible(true);
-    File out = (File) m.invoke(tasklet, encrypted.toFile());
-
-    // Assert output path: .pgp removed
-    assertThat(out.getName()).isEqualTo("invoices_20250101.csv");
-    assertThat(Files.readString(out.toPath())).isEqualTo("ciphertext");
+    // Then output file has .pgp removed and bytes are written
+    assertThat(decrypted.getName()).isEqualTo("batch_2025.csv");
+    assertThat(Files.readString(decrypted.toPath())).isEqualTo("ciphertext");
+    verify(pdp, times(1)).decrypt(any(InputStream.class), any(OutputStream.class));
   }
 
-  // --- unzipFile -------------------------------------------------------------
+  // ---- unzipFile ------------------------------------------------------------
 
   @Test
-  void unzipFile_extractsFiles_andCreatesDirs(@TempDir Path tmp) throws Exception {
-    // Build a zip with a nested file and a directory entry
+  void unzipFile_extractsDirsAndFiles(@TempDir Path tmp) throws Exception {
+    // Create a zip with a dir entry and a nested file
     Path zip = tmp.resolve("payload.zip");
     try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(zip))) {
-      // dir entry
       zos.putNextEntry(new ZipEntry("dir/"));
       zos.closeEntry();
-      // nested file entry with content
       zos.putNextEntry(new ZipEntry("dir/sub/data.txt"));
       zos.write("hello".getBytes(StandardCharsets.UTF_8));
       zos.closeEntry();
     }
 
-    var tasklet = newTaskletWithDecrypter(null);
-    Method m = FetchDecryptUnzipTasklet.class.getDeclaredMethod("unzipFile", File.class, Path.class);
-    m.setAccessible(true);
-
+    FetchDecryptUnzipTasklet tasklet = newTasklet(mock(PDPDecrypt.class), mock(CosStorageService.class));
     Path target = tmp.resolve("unzipped");
-    m.invoke(tasklet, zip.toFile(), target);
 
-    // Assert directory tree created and file extracted
+    privateMethod("unzipFile", File.class, Path.class).invoke(tasklet, zip.toFile(), target);
+
     assertThat(Files.isDirectory(target.resolve("dir/sub"))).isTrue();
     assertThat(Files.readString(target.resolve("dir/sub/data.txt"))).isEqualTo("hello");
   }
 
   @Test
   void unzipFile_blocksZipSlip(@TempDir Path tmp) throws Exception {
-    // Build a zip containing a zip-slip entry like ../evil.txt
+    // Zip with a malicious entry ../evil.txt
     Path zip = tmp.resolve("slip.zip");
     try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(zip))) {
       zos.putNextEntry(new ZipEntry("../evil.txt"));
@@ -133,42 +113,45 @@ class FetchDecryptUnzipTaskletTest {
       zos.closeEntry();
     }
 
-    var tasklet = newTaskletWithDecrypter(null);
-    Method m = FetchDecryptUnzipTasklet.class.getDeclaredMethod("unzipFile", File.class, Path.class);
-    m.setAccessible(true);
-
+    FetchDecryptUnzipTasklet tasklet = newTasklet(mock(PDPDecrypt.class), mock(CosStorageService.class));
     Path target = tmp.resolve("unzipped");
 
-    assertThatThrownBy(() -> m.invoke(tasklet, zip.toFile(), target))
-        .hasCauseInstanceOf(IOException.class) // thrown inside unzipFile
-        .hasRootCauseMessage(org.assertj.core.api.Assertions.assertThatCode(() -> {}).toString()); // message not critical
+    assertThatThrownBy(() -> privateMethod("unzipFile", File.class, Path.class)
+        .invoke(tasklet, zip.toFile(), target))
+        .hasCauseInstanceOf(IOException.class)  // thrown inside unzipFile
+        .hasMessageContaining("InvocationTargetException"); // reflection wrapper
   }
 
-  // Small interface to proxy the decrypter call in a type-safe way.
-  // If your project already has e.g. PgpDecrypter with `decrypt(InputStream, OutputStream)`,
-  // replace this with that type and just Mockito.mock(PgpDecrypter.class).
-  public interface Decryptor {
-    void decrypt(InputStream in, OutputStream out) throws IOException;
+  @Test
+  void unzipFile_createsTargetDirectory_whenMissing(@TempDir Path tmp) throws Exception {
+    // Minimal zip with one file at root
+    Path zip = tmp.resolve("one.zip");
+    try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(zip))) {
+      zos.putNextEntry(new ZipEntry("a.txt"));
+      zos.write("x".getBytes(StandardCharsets.UTF_8));
+      zos.closeEntry();
+    }
+
+    FetchDecryptUnzipTasklet tasklet = newTasklet(mock(PDPDecrypt.class), mock(CosStorageService.class));
+    Path target = tmp.resolve("brandNewDir"); // doesn't exist yet
+
+    privateMethod("unzipFile", File.class, Path.class).invoke(tasklet, zip.toFile(), target);
+
+    assertThat(Files.exists(target)).isTrue();
+    assertThat(Files.readString(target.resolve("a.txt"))).isEqualTo("x");
   }
 }
 
-What these tests cover:
-	•	decryptFile happy path: logs aside, we verify it derives the output filename by stripping .pgp and sends bytes from input to output (via a lightweight proxy/mocked decrypter).
-	•	unzipFile happy path: target directory creation, directory entries, nested file extraction.
-	•	unzipFile security path: attempts a zip-slip entry (../evil.txt) and asserts an IOException is thrown per your guard:
+Notes
+	•	Injection: we set both pdpDecrypt and cosStorageService via reflection so the tasklet is “fully wired” without Spring. If your field names differ, change them in newTasklet(...).
+	•	PDPDecrypt: the mock implements decrypt(InputStream, OutputStream); if your method signature differs (e.g., additional params), tweak the doAnswer accordingly.
+	•	CosStorageService: not used in these private helpers, but we still inject a mock so construction mirrors production.
+	•	We invoke the private methods with reflection to keep tests fast and isolated. If you prefer, you can expose package-private helpers instead and drop reflection.
 
-if (!resolvedPath.startsWith(targetDir)) {
-    throw new IOException("Entry is outside target dir: " + entry.getName());
-}
+These four tests cover:
+	•	decryption happy path (+ .pgp suffix removal)
+	•	unzip happy path (dir & nested file)
+	•	zip-slip rejection branch
+	•	creation of a missing target directory
 
-
-
-If you already have a concrete PgpDecrypter type with decrypt(InputStream, OutputStream), replace the proxy/Decryptor interface with:
-
-PgpDecrypter decrypter = mock(PgpDecrypter.class);
-doAnswer(a -> { try (var in=(InputStream)a.getArgument(0); var out=(OutputStream)a.getArgument(1)) { in.transferTo(out); } return null; })
-  .when(decrypter).decrypt(any(InputStream.class), any(OutputStream.class));
-
-and inject that mock via the reflection block.
-
-These three tests should take this class from near-zero to very high coverage, including the zip-slip guard branch and the Files.createDirectories(...) path.
+Add them, run your suite, and this class should flip from near-zero to solid green. If you want, we can also add a negative test where PDPDecrypt.decrypt throws (to cover your catch/log branch if present in the caller).
