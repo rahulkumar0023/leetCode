@@ -1,230 +1,120 @@
-great—thanks for the code shots. here are ready-to-drop JUnit 5 tests for the three classes you shared. they avoid MapStruct/JAXB complexity by using Mockito and Spring Batch primitives, but still exercise real behavior/branches.
+awesome—here are focused JUnit 5 tests for your SplitPDFMover class.
+They exercise all branches:
+	•	no source dir / file → skip
+	•	case-insensitive match → copy & ensure target dir created
+	•	destination collision → unique name -2.pdf
+	•	I/O error path (target is a file) → caught, no throw
 
-⸻
+Package names mirror what you showed; adjust if yours differs (e.g., ...batch.pdf).
 
-1) CsvFilePresenceDeciderTest
-
-Covers: hasCsv=true → CONTINUE, false/null → SKIP.
-
-package com.bnpp.pf.einvoice.connect.batch.csv;
+package com.bnpp.pf.einvoice.connect.batch.pdf;
 
 import org.junit.jupiter.api.Test;
-import org.springframework.batch.core.JobExecution;
-import org.springframework.batch.core.StepExecution;
-import org.springframework.batch.core.job.flow.FlowExecutionStatus;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatNoException;
 
-class CsvFilePresenceDeciderTest {
+class SplitPDFMoverTest {
 
-  private final CsvFilePresenceDecider decider = new CsvFilePresenceDecider();
+  private final SplitPDFMover mover = new SplitPDFMover();
 
-  private StepExecution newStepExecution() {
-    JobExecution jobExecution = new JobExecution(1L);
-    return new StepExecution("testStep", jobExecution);
+  private static final Path SOURCE_DIR = Path.of("/tmp/unzipped/xml/");
+
+  @Test
+  void skip_whenNoPdfFound_doesNotCreateTarget(@TempDir Path tmp) throws Exception {
+    // ensure source dir exists but file does NOT
+    if (Files.exists(SOURCE_DIR)) {
+      // leave it as-is, we won't create the file we look for
+    } else {
+      // also valid: non-existent source dir → code must still skip
+      // do nothing
+    }
+
+    Path target = tmp.resolve("out"); // this does not exist yet
+    mover.movePDF("NOT-THERE", target);
+
+    assertThat(Files.exists(target)).isFalse();  // not created because nothing moved
   }
 
   @Test
-  void decide_returnsContinue_whenHasCsvTrue() {
-    StepExecution step = newStepExecution();
-    step.getJobExecution().getExecutionContext().put("hasCsv", Boolean.TRUE);
+  void moves_caseInsensitive_andCreatesTargetDir(@TempDir Path tmp) throws Exception {
+    Files.createDirectories(SOURCE_DIR);
+    // Create a source file with different case than the invoiceId argument
+    Path src = SOURCE_DIR.resolve("inv-100.PDF");
+    byte[] payload = "file-A".getBytes();
+    Files.write(src, payload, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
 
-    FlowExecutionStatus status = decider.decide(step.getJobExecution(), step);
-    assertThat(status.getName()).isEqualTo("CONTINUE");
+    Path outDir = tmp.resolve("moved");
+    mover.movePDF("INV-100", outDir);
+
+    // target dir created
+    assertThat(Files.isDirectory(outDir)).isTrue();
+
+    // file copied (keeps original source filename casing for the first copy)
+    Path copied = outDir.resolve("inv-100.PDF");
+    assertThat(Files.exists(copied)).isTrue();
+    assertThat(Files.readAllBytes(copied)).isEqualTo(payload);
   }
 
   @Test
-  void decide_returnsSkip_whenHasCsvFalse() {
-    StepExecution step = newStepExecution();
-    step.getJobExecution().getExecutionContext().put("hasCsv", Boolean.FALSE);
+  void whenDestinationExists_createsUniqueDash2Name(@TempDir Path tmp) throws Exception {
+    Files.createDirectories(SOURCE_DIR);
 
-    FlowExecutionStatus status = decider.decide(step.getJobExecution(), step);
-    assertThat(status.getName()).isEqualTo("SKIP");
+    // Existing file in destination with same base name
+    Path outDir = tmp.resolve("dest");
+    Files.createDirectories(outDir);
+    Path existing = outDir.resolve("inv-100.PDF");
+    Files.write(existing, "EXISTING".getBytes(), StandardOpenOption.CREATE);
+
+    // New source to move (same logical name but any case)
+    Path src = SOURCE_DIR.resolve("inv-100.PDF");
+    byte[] newPayload = "NEW_CONTENT".getBytes();
+    Files.write(src, newPayload, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+
+    mover.movePDF("INV-100", outDir);
+
+    // The mover should keep the original file and write the new one as "-2.pdf"
+    Path alt = outDir.resolve("inv-100-2.pdf"); // extension becomes lower-case per implementation
+    assertThat(Files.exists(existing)).isTrue();
+    assertThat(Files.exists(alt)).isTrue();
+    assertThat(Files.readAllBytes(alt)).isEqualTo(newPayload);
   }
 
   @Test
-  void decide_returnsSkip_whenHasCsvMissing() {
-    StepExecution step = newStepExecution(); // no key in EC
+  void ioError_isCaught_noThrow(@TempDir Path tmp) throws Exception {
+    Files.createDirectories(SOURCE_DIR);
 
-    FlowExecutionStatus status = decider.decide(step.getJobExecution(), step);
-    assertThat(status.getName()).isEqualTo("SKIP");
+    // Valid source file
+    Path src = SOURCE_DIR.resolve("inv-200.PDF");
+    Files.write(src, "X".getBytes(), StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+
+    // Make "targetDir" a FILE so createDirectories(...) inside movePDF throws IOException
+    Path targetAsFile = tmp.resolve("not-a-dir");
+    Files.write(targetAsFile, "blocking".getBytes());
+
+    assertThatNoException().isThrownBy(() -> mover.movePDF("INV-200", targetAsFile));
+    // nothing else to assert—method logs and swallows the exception by design
   }
 }
 
+why these hit your branches
+	•	movePDF:
+	•	found == null (no file / no dir) → early return.
+	•	Files.isRegularFile(found) true → proceeds to createDirectories + uniqueIfExists + copy.
+	•	uniqueIfExists path when exists=false and exists=true (loops to -2.pdf).
+	•	catch(IOException) covered by “target is a file” test.
+	•	findCaseInsensitive:
+	•	directory missing / null → returns null.
+	•	directory present → stream/filters/equalsIgnoreCase positive path.
 
-⸻
+Drop this file under:
 
-2) CsvInvoiceProcessorTest
+src/test/java/com/bnpp/pf/einvoice/connect/batch/pdf/SplitPDFMoverTest.java
 
-Covers:
-	•	beforeStep (reset path) and afterStep (COMPLETED).
-	•	Branching: "381" → credit note, anything else → invoice.
-	•	Verifies the correct mapper method is invoked.
-
-package com.bnpp.pf.einvoice.connect.batch.csv;
-
-import com.bnpp.pf.einvoice.connect.batch.csv.dto.CsvInvoiceDto;
-import oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType;
-import oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType;
-import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentMatchers;
-import org.springframework.batch.core.ExitStatus;
-import org.springframework.batch.core.JobExecution;
-import org.springframework.batch.core.StepExecution;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.*;
-
-class CsvInvoiceProcessorTest {
-
-  @Test
-  void beforeAndAfterStep_areSafe() {
-    CsvInvoiceMapper mapper = mock(CsvInvoiceMapper.class);
-    CsvInvoiceProcessor processor = new CsvInvoiceProcessor(mapper);
-
-    StepExecution step = new StepExecution("s", new JobExecution(1L));
-    processor.beforeStep(step);
-    assertThat(processor.afterStep(step)).isEqualTo(ExitStatus.COMPLETED);
-  }
-
-  @Test
-  void process_routesToInvoice_whenTypeIsNot381() throws Exception {
-    CsvInvoiceMapper mapper = mock(CsvInvoiceMapper.class);
-    CsvInvoiceProcessor processor = new CsvInvoiceProcessor(mapper);
-
-    CsvInvoiceDto dto = new CsvInvoiceDto();
-    dto.setInvoiceTypeCode("380"); // ordinary invoice
-
-    InvoiceType expected = new InvoiceType();
-    when(mapper.toInvoiceType(ArgumentMatchers.same(dto))).thenReturn(expected);
-
-    Object result = processor.process(dto);
-
-    assertThat(result).isSameAs(expected);
-    verify(mapper, times(1)).toInvoiceType(dto);
-    verify(mapper, never()).toCreditNoteType(any());
-  }
-
-  @Test
-  void process_routesToCreditNote_whenTypeIs381() throws Exception {
-    CsvInvoiceMapper mapper = mock(CsvInvoiceMapper.class);
-    CsvInvoiceProcessor processor = new CsvInvoiceProcessor(mapper);
-
-    CsvInvoiceDto dto = new CsvInvoiceDto();
-    dto.setInvoiceTypeCode("381"); // credit note
-
-    CreditNoteType expected = new CreditNoteType();
-    when(mapper.toCreditNoteType(ArgumentMatchers.same(dto))).thenReturn(expected);
-
-    Object result = processor.process(dto);
-
-    assertThat(result).isSameAs(expected);
-    verify(mapper, times(1)).toCreditNoteType(dto);
-    verify(mapper, never()).toInvoiceType(any());
-  }
-
-  @Test
-  void process_defaultsToInvoice_whenTypeNull() throws Exception {
-    CsvInvoiceMapper mapper = mock(CsvInvoiceMapper.class);
-    CsvInvoiceProcessor processor = new CsvInvoiceProcessor(mapper);
-
-    CsvInvoiceDto dto = new CsvInvoiceDto(); // invoiceTypeCode null
-    when(mapper.toInvoiceType(dto)).thenReturn(new InvoiceType());
-
-    Object result = processor.process(dto);
-
-    assertThat(result).isInstanceOf(InvoiceType.class);
-    verify(mapper).toInvoiceType(dto);
-  }
-}
-
-
-⸻
-
-3) CsvXmlWriterConfigTest
-
-Covers:
-	•	Delegation to invoice writer when item is InvoiceType.
-	•	Delegation to credit note writer when item is CreditNoteType.
-	•	Unsupported type throws IllegalArgumentException.
-
-package com.bnpp.pf.einvoice.connect.batch.csv;
-
-import oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType;
-import oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType;
-import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
-import org.springframework.batch.item.ItemWriter;
-
-import java.util.List;
-
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.*;
-
-class CsvXmlWriterConfigTest {
-
-  @SuppressWarnings("unchecked")
-  @Test
-  void classifierDelegatesToInvoiceWriter() throws Exception {
-    var config = new CsvXmlWriterConfig();
-
-    ItemWriter<Object> invoiceWriter = mock(ItemWriter.class);
-    ItemWriter<Object> creditWriter  = mock(ItemWriter.class);
-
-    var cw = config.ublClassifierWriter(invoiceWriter, creditWriter);
-
-    InvoiceType invoice = new InvoiceType();
-    cw.write(List.of(invoice));
-
-    @SuppressWarnings("unchecked")
-    ArgumentCaptor<List<Object>> cap = ArgumentCaptor.forClass(List.class);
-    verify(invoiceWriter, times(1)).write(cap.capture());
-    verify(creditWriter, never()).write(any());
-
-    // ensure the same item reached the delegate
-    assertThat(cap.getValue()).containsExactly(invoice);
-  }
-
-  @SuppressWarnings("unchecked")
-  @Test
-  void classifierDelegatesToCreditNoteWriter() throws Exception {
-    var config = new CsvXmlWriterConfig();
-
-    ItemWriter<Object> invoiceWriter = mock(ItemWriter.class);
-    ItemWriter<Object> creditWriter  = mock(ItemWriter.class);
-
-    var cw = config.ublClassifierWriter(invoiceWriter, creditWriter);
-
-    CreditNoteType credit = new CreditNoteType();
-    cw.write(List.of(credit));
-
-    verify(creditWriter, times(1)).write(any());
-    verify(invoiceWriter, never()).write(any());
-  }
-
-  @Test
-  void classifierThrowsForUnsupportedType() {
-    var config = new CsvXmlWriterConfig();
-    @SuppressWarnings("unchecked")
-    ItemWriter<Object> invoiceWriter = mock(ItemWriter.class);
-    @SuppressWarnings("unchecked")
-    ItemWriter<Object> creditWriter  = mock(ItemWriter.class);
-
-    var cw = config.ublClassifierWriter(invoiceWriter, creditWriter);
-
-    assertThatThrownBy(() -> cw.write(List.of("not-a-ubl-type")))
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("Unsupported type:");
-  }
-}
-
-
-⸻
-
-notes / tweaks
-	•	Package names match your screenshots: com.bnpp.pf.einvoice.connect.batch.csv. Adjust if needed.
-	•	These tests use only JUnit 5, Mockito, and Spring Batch core; no Spring context is required (fast!).
-	•	If your CsvInvoiceMapper is in a different package, update imports. We’re mocking it, so no MapStruct impl is required at test time.
-	•	If your build enforces strict generics, change ItemWriter<Object> mocks to the concrete types your bean method accepts (e.g., XmlInvoiceWriter, XmlCreditNoteWriter) but they still implement ItemWriter<?>, so Mockito works either way.
-
-Drop these in and re-run tests—csv should jump to high 80s/90s coverage, and those previously 0% classes will be green. Want the next batch (PDF writer/reader or scheduler)?
+Run your suite—this class should jump well into the green and nudge overall coverage up. Want me to add tests for the PDF reader or the XML writer next?
