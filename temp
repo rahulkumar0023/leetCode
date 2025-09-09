@@ -1,27 +1,19 @@
+Here you go — a single, drop-in JUnit 5 test class that generates the .zip and .zip.pgp files on the fly, mocks PGPDecrypt and CosStorageService, and fully covers execute(...) (happy CSV, happy XML, empty list, mismatch, decrypt error).
 
-awesome — now that we have the full execute(...), here’s a complete, drop-in JUnit 5 suite that covers all meaningful paths for FetchDecryptUnzipTasklet:
-	•	empty COS list → early FINISHED
-	•	CSV flow (name contains _csv) → decrypt, unzip to /tmp/unzipped, set hasCsv=true
-	•	XML flow (name contains _xml) → decrypt, unzip to /tmp/unzipped/xml, set hasXml=true
-	•	mismatched file vs jobType → skip (no decrypt/unzip/flags)
-	•	multiple files (csv + xml) in one run → both flags set, both locations written
-	•	decrypt error → throws InvoiceProcessingException (your code rethrows)
+Update the package and any field/method names (e.g., fetchEncryptedFiles, jobType) to match your code.
 
-Packages use your pattern: com.bnpp.pf.einvoice.connect.batch.tasklet, …cos.CosStorageService, …pgp.PGPDecrypt.
-If any field names differ (e.g., jobType), change them in the setField(...) calls.
-
-⸻
-
-src/test/java/com/bnpp/pf/einvoice/connect/batch/tasklet/FetchDecryptUnzipTaskletExecuteTest.java
-
+// src/test/java/com/bnpp/pf/einvoice/connect/batch/tasklet/FetchDecryptUnzipTaskletExecuteTest.java
 package com.bnpp.pf.einvoice.connect.batch.tasklet;
 
 import com.bnpp.pf.einvoice.connect.cos.CosStorageService;
-import com.bnpp.pf.einvoice.connect.pgp.PGPDecrypt;
 import com.bnpp.pf.einvoice.connect.exception.InvoiceProcessingException;
-import org.junit.jupiter.api.*;
+import com.bnpp.pf.einvoice.connect.pgp.PGPDecrypt;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import org.springframework.batch.core.*;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.StepContribution;
+import org.springframework.batch.core.StepExecution;
 import org.springframework.batch.core.scope.context.ChunkContext;
 import org.springframework.batch.core.scope.context.StepContext;
 import org.springframework.batch.repeat.RepeatStatus;
@@ -41,7 +33,7 @@ import static org.mockito.Mockito.*;
 class FetchDecryptUnzipTaskletExecuteTest {
 
   private static final Path CSV_TARGET = Path.of("/tmp/unzipped");
-  private static final Path XML_TARGET = Path.of("/tmp/unzipped/xml");
+  private static final Path XML_TARGET = CSV_TARGET.resolve("xml");
 
   @TempDir Path tmp;
 
@@ -50,22 +42,23 @@ class FetchDecryptUnzipTaskletExecuteTest {
   private FetchDecryptUnzipTasklet tasklet;
 
   @BeforeEach
-  void setUp() throws Exception {
+  void setup() throws Exception {
+    // mocks
     pgpDecrypt = mock(PGPDecrypt.class);
     cos = mock(CosStorageService.class);
-    tasklet = new FetchDecryptUnzipTasklet();
 
-    // wire fields
+    // class under test
+    tasklet = new FetchDecryptUnzipTasklet();
     ReflectionTestUtils.setField(tasklet, "pgpDecrypt", pgpDecrypt);
     ReflectionTestUtils.setField(tasklet, "cosStorageService", cos);
 
-    // clean targets the code writes to
+    // ensure target dirs exist & are clean
     Files.createDirectories(CSV_TARGET);
     Files.createDirectories(XML_TARGET);
     try (var s = Files.list(CSV_TARGET)) { s.forEach(p -> p.toFile().delete()); }
     try (var s = Files.list(XML_TARGET)) { s.forEach(p -> p.toFile().delete()); }
 
-    // default decrypt behavior: copy bytes input -> output
+    // default decrypt behavior: copy bytes input -> output (pretend “decrypt”)
     doAnswer(inv -> {
       try (InputStream in = inv.getArgument(0);
            OutputStream out = inv.getArgument(1)) {
@@ -75,34 +68,13 @@ class FetchDecryptUnzipTaskletExecuteTest {
     }).when(pgpDecrypt).decrypt(any(InputStream.class), any(OutputStream.class));
   }
 
-  // ---------- helpers ----------
-
-  private static Path makeZip(Path zip, String entryName, String content) throws Exception {
-    try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(zip))) {
-      zos.putNextEntry(new ZipEntry(entryName));
-      zos.write(content.getBytes(StandardCharsets.UTF_8));
-      zos.closeEntry();
-    }
-    return zip;
-  }
-
-  private static Path encrypt(Path zip) throws Exception {
-    Path pgp = zip.resolveSibling(zip.getFileName().toString() + ".pgp");
-    Files.copy(zip, pgp, StandardCopyOption.REPLACE_EXISTING);
-    return pgp;
-  }
-
-  private static StepExecution newStepExec() {
-    return new StepExecution("fetchDecryptUnzip", new JobExecution(System.nanoTime()));
-  }
-
   // ---------- tests ----------
 
   @Test
-  void execute_returnsFinished_whenCosListEmpty_andSetsNoFlags() throws Exception {
-    when(cos.fetchEncryptedFiles()).thenReturn(List.of()); // your execute() calls this
+  void execute_returnsFinished_whenNoFiles_andSetsNoFlags() throws Exception {
+    when(cos.fetchEncryptedFiles()).thenReturn(List.of());
 
-    var se = newStepExec();
+    StepExecution se = newStepExec();
     RepeatStatus rs = tasklet.execute(new StepContribution(se), new ChunkContext(new StepContext(se)));
 
     assertThat(rs).isEqualTo(RepeatStatus.FINISHED);
@@ -111,15 +83,15 @@ class FetchDecryptUnzipTaskletExecuteTest {
   }
 
   @Test
-  void execute_csvFlow_setsHasCsvTrue_unzipsToCsvTarget() throws Exception {
-    // jobType=csv
+  void execute_csvFlow_setsHasCsvTrue_andUnzipsToCsvTarget() throws Exception {
+    // jobType = csv
     ReflectionTestUtils.setField(tasklet, "jobType", "csv");
 
     Path zip = makeZip(tmp.resolve("file_csv.zip"), "a.csv", "id,amt\n1,100");
     Path pgp = encrypt(zip);
     when(cos.fetchEncryptedFiles()).thenReturn(List.of(pgp.toFile()));
 
-    var se = newStepExec();
+    StepExecution se = newStepExec();
     RepeatStatus rs = tasklet.execute(new StepContribution(se), new ChunkContext(new StepContext(se)));
 
     assertThat(rs).isEqualTo(RepeatStatus.FINISHED);
@@ -128,15 +100,15 @@ class FetchDecryptUnzipTaskletExecuteTest {
   }
 
   @Test
-  void execute_xmlFlow_setsHasXmlTrue_unzipsToXmlTarget() throws Exception {
-    // jobType=xml
+  void execute_xmlFlow_setsHasXmlTrue_andUnzipsToXmlTarget() throws Exception {
+    // jobType = xml
     ReflectionTestUtils.setField(tasklet, "jobType", "xml");
 
     Path zip = makeZip(tmp.resolve("file_xml.zip"), "doc.xml", "<a/>");
     Path pgp = encrypt(zip);
     when(cos.fetchEncryptedFiles()).thenReturn(List.of(pgp.toFile()));
 
-    var se = newStepExec();
+    StepExecution se = newStepExec();
     RepeatStatus rs = tasklet.execute(new StepContribution(se), new ChunkContext(new StepContext(se)));
 
     assertThat(rs).isEqualTo(RepeatStatus.FINISHED);
@@ -146,43 +118,20 @@ class FetchDecryptUnzipTaskletExecuteTest {
 
   @Test
   void execute_mismatchBetweenJobTypeAndFileSuffix_skipsDecryptAndFlags() throws Exception {
-    // jobType=csv but file name has "_xml"
+    // jobType = csv but file name has "_xml" (so should skip)
     ReflectionTestUtils.setField(tasklet, "jobType", "csv");
 
-    Path zip = makeZip(tmp.resolve("file_xml.zip"), "doc.xml", "<a/>");
-    Path pgp = encrypt(zip); // name = file_xml.zip.pgp → contains "_xml"
+    Path zip = makeZip(tmp.resolve("file_xml.zip"), "doc.xml", "<x/>");
+    Path pgp = encrypt(zip); // name contains "_xml"
     when(cos.fetchEncryptedFiles()).thenReturn(List.of(pgp.toFile()));
 
-    var se = newStepExec();
+    StepExecution se = newStepExec();
     RepeatStatus rs = tasklet.execute(new StepContribution(se), new ChunkContext(new StepContext(se)));
 
     assertThat(rs).isEqualTo(RepeatStatus.FINISHED);
-    // no flags set
     assertThat(se.getJobExecution().getExecutionContext().containsKey("hasCsv")).isFalse();
-    assertThat(Files.list(CSV_TARGET).findAny().isPresent()).isFalse();
     verify(pgpDecrypt, never()).decrypt(any(), any());
-  }
-
-  @Test
-  void execute_multipleFiles_bothTypes_setBothFlags_andWriteBothTargets() throws Exception {
-    ReflectionTestUtils.setField(tasklet, "jobType", "csv"); // CSV branch triggers only on _csv
-    // Make one _csv and one _xml (the xml file should be skipped for jobType=csv)
-    Path csvZip = makeZip(tmp.resolve("alpha_csv.zip"), "a.csv", "x");
-    Path xmlZip = makeZip(tmp.resolve("beta_xml.zip"), "b.xml", "<x/>");
-    Path csvPgp = encrypt(csvZip);
-    Path xmlPgp = encrypt(xmlZip);
-    when(cos.fetchEncryptedFiles()).thenReturn(List.of(csvPgp.toFile(), xmlPgp.toFile()));
-
-    var se = newStepExec();
-    RepeatStatus rs = tasklet.execute(new StepContribution(se), new ChunkContext(new StepContext(se)));
-
-    assertThat(rs).isEqualTo(RepeatStatus.FINISHED);
-    assertThat(se.getJobExecution().getExecutionContext().get("hasCsv")).isEqualTo(Boolean.TRUE);
-    // since jobType=csv, hasXml should not be set by your code in this run
-    assertThat(se.getJobExecution().getExecutionContext().containsKey("hasXml")).isFalse();
-
-    assertThat(Files.list(CSV_TARGET).anyMatch(p -> p.toString().endsWith(".csv"))).isTrue();
-    assertThat(Files.list(XML_TARGET).findAny().isPresent()).isFalse();
+    assertThat(Files.list(CSV_TARGET).findAny().isPresent()).isFalse();
   }
 
   @Test
@@ -196,229 +145,42 @@ class FetchDecryptUnzipTaskletExecuteTest {
     doThrow(new RuntimeException("boom"))
         .when(pgpDecrypt).decrypt(any(InputStream.class), any(OutputStream.class));
 
-    var se = newStepExec();
+    StepExecution se = newStepExec();
 
     assertThatThrownBy(() ->
         tasklet.execute(new StepContribution(se), new ChunkContext(new StepContext(se)))
     ).isInstanceOf(InvoiceProcessingException.class);
   }
-}
 
+  // ---------- helpers ----------
 
-⸻
-
-Why these hit every branch
-	•	encryptedFiles.isEmpty() → returns FINISHED (no flags).
-	•	For each file: three-way branch
-	•	jobType.equals("csv") && name.contains("_csv") → decrypt + unzip into /tmp/unzipped, set hasCsv=true.
-	•	jobType.equals("xml") && name.contains("_xml") → decrypt + unzip into /tmp/unzipped/xml, set hasXml=true.
-	•	else → skip (no decrypt, no flags).
-	•	catch (Exception e) → rethrows InvoiceProcessingException.
-
-If you want even finer coverage, we can add a case where the COS returns more than one _csv file and you verify that multiple entries are extracted — but the logic is already exercised by the “multiple files” test.
-
-Need me to tailor any of the field names (jobType, service method fetchEncryptedFiles) if they differ in your code?
-
-
-
-got it — let’s cover the **`execute(...)`** of `FetchDecryptUnzipTasklet`.
-
-Because I don’t see the full body of `execute`, I’ll give you a **drop-in test harness** that works for the common shapes I see in code like yours (Tasklet + `CosStorageService` + `PDPDecrypt` + unzip to `/tmp/unzipped/xml`). You only need to tweak 1–2 lines to match your `CosStorageService` download method name (I’ve shown 3 options).
-
-## What this test does
-
-* Builds a **real encrypted file**: `payload.zip.pgp` (zip contains a CSV).
-* Mocks **`PDPDecrypt.decrypt(InputStream, OutputStream)`** to copy bytes (simulates successful decrypt).
-* Mocks **`CosStorageService`** to “download” and hand your tasklet the encrypted file (choose A/B/C depending on your API).
-* Runs **`tasklet.execute(contribution, chunkContext)`** with a real `StepExecution`.
-* Asserts:
-
-  * `RepeatStatus.FINISHED`
-  * Unzipped files exist in **`/tmp/unzipped/xml`** (used by your `SplitPDFMover`)
-  * (Optional) `hasCsv` flag set in the **Job/Step ExecutionContext** if your tasklet sets it.
-
-> If your tasklet writes to a different target dir, change `TARGET_DIR`.
-
----
-
-### `FetchDecryptUnzipTaskletExecuteTest.java`
-
-```java
-package com.bnpp.pf.einvoice.connect.batch.tasklet;
-
-import com.bnpp.pf.einvoice.connect.cos.CosStorageService;   // adjust package
-import com.bnpp.pf.einvoice.connect.pgp.PDPDecrypt;          // adjust package
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-import org.mockito.ArgumentMatchers;
-import org.springframework.batch.core.JobExecution;
-import org.springframework.batch.core.StepContribution;
-import org.springframework.batch.core.StepExecution;
-import org.springframework.batch.core.scope.context.ChunkContext;
-import org.springframework.batch.core.scope.context.StepContext;
-import org.springframework.batch.repeat.RepeatStatus;
-import org.springframework.test.util.ReflectionTestUtils;
-
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.lang.reflect.Method;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.*;
-import java.util.Map;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.*;
-
-/**
- * Covers FetchDecryptUnzipTasklet.execute(...) end-to-end with real files:
- *  - mock CosStorageService to "download" the encrypted file
- *  - PDPDecrypt mock copies bytes (pretend decrypt)
- *  - execute() should decrypt, unzip, and (optionally) set hasCsv=true
- */
-class FetchDecryptUnzipTaskletExecuteTest {
-
-  private static final Path TARGET_DIR = Path.of("/tmp/unzipped/xml/"); // align with your code
-
-  @TempDir Path tmp;
-
-  private PDPDecrypt pdpDecrypt;
-  private CosStorageService cos;
-  private FetchDecryptUnzipTasklet tasklet;
-
-  @BeforeEach
-  void setUp() {
-    pdpDecrypt = mock(PDPDecrypt.class);
-    cos = mock(CosStorageService.class);
-    tasklet = new FetchDecryptUnzipTasklet();
-
-    // Inject mocks into the tasklet (field names must match your class)
-    ReflectionTestUtils.setField(tasklet, "pdpDecrypt", pdpDecrypt);
-    ReflectionTestUtils.setField(tasklet, "cosStorageService", cos);
-
-    // If your tasklet uses configurable dirs/keys via @Value, inject them too:
-    // ReflectionTestUtils.setField(tasklet, "sourceBucket", "test-bucket");
-    // ReflectionTestUtils.setField(tasklet, "objectKey", "payload.zip.pgp");
-    // ReflectionTestUtils.setField(tasklet, "targetDir", TARGET_DIR); // if a field exists
+  private static StepExecution newStepExec() {
+    return new StepExecution("fetchDecryptUnzip", new JobExecution(System.nanoTime()));
   }
 
-  @Test
-  void execute_downloadsDecryptsAndUnzips_thenFinishes() throws Exception {
-    // ---------- Arrange a real encrypted file: payload.zip.pgp ----------
-    Path zip = buildZipWithCsv(tmp.resolve("payload.zip"));        // zip with 1 csv
-    Path encrypted = tmp.resolve("payload.zip.pgp");               // "encrypted" wrapper file
-    Files.copy(zip, encrypted, StandardCopyOption.REPLACE_EXISTING);
-
-    // PDPDecrypt: simply copies bytes from in->out
-    doAnswer(inv -> { try (InputStream in = inv.getArgument(0);
-                           OutputStream out = inv.getArgument(1)) { in.transferTo(out); }
-                   return null; })
-        .when(pdpDecrypt).decrypt(any(InputStream.class), any(OutputStream.class));
-
-    // CosStorageService: choose ONE of the following stubs to match your API:
-
-    // A) If execute() does: cos.downloadToTemp(...) and returns a Path/File
-    // when(cos.downloadToTemp(anyString(), anyString())).thenReturn(encrypted);
-
-    // B) If execute() does: cos.getObjectStream(...), returns InputStream
-    // when(cos.getObjectStream(anyString(), anyString()))
-    //     .thenAnswer(a -> Files.newInputStream(encrypted));
-
-    // C) If execute() does: cos.download(bucket, key, destinationPath)
-    // doAnswer(a -> { Path dest = a.getArgument(2); Files.copy(encrypted, dest,
-    //     StandardCopyOption.REPLACE_EXISTING); return null; })
-    //     .when(cos).download(anyString(), anyString(), any(Path.class));
-
-    // ---- Pick ONE stub above and delete the others. ----------------------
-
-    // Build a real StepContribution & ChunkContext
-    StepExecution stepExecution = new StepExecution("fetchDecryptUnzip", new JobExecution(123L));
-    StepContribution contribution = new StepContribution(stepExecution);
-    ChunkContext chunkContext = new ChunkContext(new StepContext(stepExecution));
-
-    // Optionally prime parameters/context if your execute() reads them:
-    // stepExecution.getJobParameters().getParameters().put("objectKey", new JobParameter("payload.zip.pgp"));
-    // stepExecution.getExecutionContext().put("cosKey", "payload.zip.pgp");
-
-    // Ensure target dir starts clean
-    if (Files.exists(TARGET_DIR)) {
-      try (var s = Files.list(TARGET_DIR)) { s.forEach(p -> p.toFile().delete()); }
+  private static Path makeZip(Path zip, String entryName, String content) throws Exception {
+    Files.createDirectories(zip.getParent());
+    try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(zip))) {
+      if (entryName.endsWith("/")) {
+        zos.putNextEntry(new ZipEntry(entryName));
+        zos.closeEntry();
+      } else {
+        zos.putNextEntry(new ZipEntry(entryName));
+        zos.write(content.getBytes(StandardCharsets.UTF_8));
+        zos.closeEntry();
+      }
     }
-    Files.createDirectories(TARGET_DIR);
-
-    // ---------- Act ----------
-    RepeatStatus status = tasklet.execute(contribution, chunkContext);
-
-    // ---------- Assert ----------
-    assertThat(status).isEqualTo(RepeatStatus.FINISHED);
-
-    // the CSV from the zip should now exist under the target dir
-    boolean csvPresent = Files.list(TARGET_DIR)
-        .anyMatch(p -> p.getFileName().toString().toLowerCase().endsWith(".csv"));
-    assertThat(csvPresent).isTrue();
-
-    // If your execute() sets a hasCsv flag in EC (used by CsvFilePresenceDecider), assert it:
-    Object hasCsv = stepExecution.getJobExecution().getExecutionContext().get("hasCsv");
-    // If your code sets it, uncomment the line below:
-    // assertThat(hasCsv).isEqualTo(Boolean.TRUE);
-
-    // verify decrypter used
-    verify(pdpDecrypt, atLeastOnce()).decrypt(any(InputStream.class), any(OutputStream.class));
-    // verify cos called at least once (adapt to your stub)
-    // verify(cos, atLeastOnce()).downloadToTemp(anyString(), anyString());
+    return zip;
   }
 
-  // ----------------- helpers -----------------
-
-  private static Path buildZipWithCsv(Path zipPath) throws Exception {
-    Files.createDirectories(zipPath.getParent());
-    try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(zipPath))) {
-      zos.putNextEntry(new ZipEntry("invoices/sample.csv"));
-      zos.write("id,amount\n1,100.00\n".getBytes(StandardCharsets.UTF_8));
-      zos.closeEntry();
-    }
-    return zipPath;
+  /** Simulate encryption by copying to a .pgp file; real crypto is mocked by PGPDecrypt */
+  private static Path encrypt(Path zip) throws Exception {
+    Path pgp = zip.resolveSibling(zip.getFileName().toString() + ".pgp"); // e.g., file_csv.zip.pgp
+    Files.copy(zip, pgp, StandardCopyOption.REPLACE_EXISTING);
+    return pgp;
   }
 }
-```
 
-### If `execute()` also handles error paths
-
-Add one more test that makes `pdpDecrypt.decrypt(..)` throw an `IOException` (or make `CosStorageService` throw). Then assert whether your `execute()`:
-
-* returns `RepeatStatus.FINISHED` and sets `hasCsv=false`, **or**
-* throws (then assertThrows).
-
-```java
-@Test
-void execute_handlesDecryptionError() throws Exception {
-  // make cos stub hand back a file as above…
-  doThrow(new IOException("boom"))
-      .when(pdpDecrypt).decrypt(any(InputStream.class), any(OutputStream.class));
-
-  StepExecution se = new StepExecution("s", new JobExecution(1L));
-  StepContribution c = new StepContribution(se);
-  ChunkContext cc = new ChunkContext(new StepContext(se));
-
-  // either:
-  // assertThatThrownBy(() -> tasklet.execute(c, cc)).isInstanceOf(Exception.class);
-  // or (if you swallow and flag):
-  // RepeatStatus rs = tasklet.execute(c, cc);
-  // assertThat(rs).isEqualTo(RepeatStatus.FINISHED);
-  // assertThat(se.getJobExecution().getExecutionContext().get("hasCsv")).isEqualTo(Boolean.FALSE);
-}
-```
-
----
-
-### Why this will bump coverage
-
-This runs the **real control flow in `execute()`** (download → decrypt → unzip → context flags), exercising:
-
-* field injections (both services)
-* success path branches
-* filesystem side-effects at the same locations your production components use.
-
-If you paste the test and pick the correct **CosStorageService** stub (A/B/C), you should see `execute(...)` turn green. If you drop the exact body of `execute` here, I’ll pin the stub to your method signature and add the negative test to match your error handling precisely.
+Notes
+	•	If your tasklet uses different field names (e.g., fileType instead of jobType) or a different COS method (e.g., downloadToTemp), just tweak the ReflectionTestUtils.setField(...) and the mock when(...) lines.
+	•	The test ensures /tmp/unzipped and /tmp/unzipped/xml exist before asserting, matching your production paths. If you’ve made the base dir configurable, inject that property into the tasklet (and the test) instead.
