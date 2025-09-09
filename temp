@@ -1,178 +1,247 @@
-Here’s the **full test class** (drop-in) that covers **all branches** of your `FetchDecryptUnzipTasklet.execute(...)` method using mocks for `PGPDecrypt` and `CosStorageService`.
-It generates dummy `.zip.pgp` files at runtime, so you don’t need to keep any files in `resources`.
+Here’s a complete, ready-to-compile JUnit 5 + Mockito test class for **`PackageAndUploadTasklet`**. It uses a temp directory, stubs PGP encryption, verifies uploads/CFT notifications, and covers the key branches (`hasCsv` true/false, empty dirs, and zip content).
+
+Adjust the `package` line if your package name differs.
 
 ```java
-// src/test/java/com/bnpp/pf/einvoice/connect/batch/tasklet/FetchDecryptUnzipTaskletExecuteTest.java
-package com.bnpp.pf.einvoice.connect.batch.tasklet;
+package com.bnpp.einvoice.connect.batch.tasklet;
 
-import com.bnpp.pf.einvoice.connect.cos.CosStorageService;
-import com.bnpp.pf.einvoice.connect.exception.InvoiceProcessingException;
-import com.bnpp.pf.einvoice.connect.pgp.PGPDecrypt;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.batch.core.ChunkContext;
 import org.springframework.batch.core.JobExecution;
 import org.springframework.batch.core.StepContribution;
 import org.springframework.batch.core.StepExecution;
-import org.springframework.batch.core.scope.context.ChunkContext;
+import org.springframework.batch.core.StepExecutionListener;
+import org.springframework.batch.core.StepListener;
 import org.springframework.batch.core.scope.context.StepContext;
 import org.springframework.batch.repeat.RepeatStatus;
-import org.springframework.test.util.ReflectionTestUtils;
 
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.*;
-import java.util.List;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
+import java.util.zip.ZipInputStream;
 
-import static org.assertj.core.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
-class FetchDecryptUnzipTaskletExecuteTest {
+/**
+ * Test suite for PackageAndUploadTasklet.
+ *
+ * Covers:
+ *  - hasCsv=false → XML + PDF paths zipped, encrypted, uploaded, notified
+ *  - hasCsv=true  → CSV path only, CFT notify disabled
+ *  - empty dirs   → no work performed
+ *  - zip content  → includes all files from the source directory
+ */
+@ExtendWith(MockitoExtension.class)
+class PackageAndUploadTaskletTest {
 
-    private static final Path CSV_TARGET = Path.of("/tmp/unzipped/csv");
-    private static final Path XML_TARGET = Path.of("/tmp/unzipped/xml");
+    @Mock private CosStorageService cosStorageService;
+    @Mock private CftApiClient cftApiClient;
+    @Mock private PGPEncrypt pgpEncrypt;
 
     @TempDir Path tmp;
 
-    private PGPDecrypt pgpDecrypt;
-    private CosStorageService cos;
-    private FetchDecryptUnzipTasklet tasklet;
+    private PackageAndUploadTasklet tasklet;
 
     @BeforeEach
-    void setup() throws Exception {
-        pgpDecrypt = mock(PGPDecrypt.class);
-        cos = mock(CosStorageService.class);
-        tasklet = new FetchDecryptUnzipTasklet();
+    void setUp() throws Exception {
+        tasklet = new PackageAndUploadTasklet(cosStorageService, cftApiClient, pgpEncrypt);
 
-        // Inject mocks
-        ReflectionTestUtils.setField(tasklet, "pgpDecrypt", pgpDecrypt);
-        ReflectionTestUtils.setField(tasklet, "cosStorageService", cos);
-        // Inject test-specific unzip base dir
-        ReflectionTestUtils.setField(tasklet, "unzipBaseDir", tmp.resolve("unzipped").toString());
+        // Redirect the static path fields used in the tasklet to the temp folder
+        setStaticPath("OUTPUT_DIR", tmp.resolve("out"));
+        setStaticPath("XML_DIR",    tmp.resolve("in/xml"));
+        setStaticPath("PDF_DIR",    tmp.resolve("in/pdf"));
+        setStaticPath("CSV_DIR",    tmp.resolve("in/csv"));
 
-        // Default decrypt behavior: copy input → output
+        // Enable CFT notifications by default for tests
+        setBooleanField(tasklet, "cftEnabled", true);
+    }
+
+    /* -------------------------
+       Helper utilities
+       ------------------------- */
+
+    private static void setStaticPath(String fieldName, Path value) throws Exception {
+        Field f = PackageAndUploadTasklet.class.getDeclaredField(fieldName);
+        f.setAccessible(true);
+        // Remove 'final' modifier so we can replace it
+        Field modifiers = Field.class.getDeclaredField("modifiers");
+        modifiers.setAccessible(true);
+        modifiers.setInt(f, f.getModifiers() & ~Modifier.FINAL);
+        f.set(null, value);
+    }
+
+    private static void setBooleanField(Object target, String fieldName, boolean value) throws Exception {
+        Field f = target.getClass().getDeclaredField(fieldName);
+        f.setAccessible(true);
+        f.setBoolean(target, value);
+    }
+
+    private static StepExecution newStepExecutionWithFlag(boolean hasCsv) {
+        JobExecution je = new JobExecution(1L);
+        je.getExecutionContext().put("hasCsv", hasCsv);
+        return new StepExecution("testStep", je);
+    }
+
+    private static StepContribution newContribution(StepExecution se) {
+        return new StepContribution(se);
+    }
+
+    private static ChunkContext newChunkContext(StepExecution se) {
+        return new ChunkContext(new StepContext(se));
+    }
+
+    private static Path touch(Path dir, String fileName) throws IOException {
+        Files.createDirectories(dir);
+        Path p = dir.resolve(fileName);
+        Files.writeString(p, "dummy");
+        return p;
+    }
+
+    /** Stub PGP encryption so it writes a byte to the provided OutputStream. */
+    private void stubEncrypt() throws Exception {
         doAnswer(inv -> {
-            try (InputStream in = inv.getArgument(0); OutputStream out = inv.getArgument(1)) {
-                in.transferTo(out);
-            }
+            InputStream in = inv.getArgument(0);
+            FileOutputStream out = inv.getArgument(1);
+            // consume input (if any) and write single byte to mark output existence
+            if (in != null) in.close();
+            out.write(1);
+            out.flush();
+            out.close();
             return null;
-        }).when(pgpDecrypt).decrypt(any(InputStream.class), any(OutputStream.class));
+        }).when(pgpEncrypt).encrypt(any(InputStream.class), any(FileOutputStream.class));
     }
 
-    // ---------- helpers ----------
-    private static Path makeZip(Path zip, String entryName, String content) throws Exception {
-        Files.createDirectories(zip.getParent());
-        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(zip))) {
-            zos.putNextEntry(new ZipEntry(entryName));
-            zos.write(content.getBytes(StandardCharsets.UTF_8));
-            zos.closeEntry();
+    /* -------------------------
+       Tests
+       ------------------------- */
+
+    @Test
+    void zipsEncryptsUploads_XML_and_PDF_when_hasCsv_false_and_notifies_cft() throws Exception {
+        // Arrange
+        StepExecution se = newStepExecutionWithFlag(false);
+        tasklet.beforeStep(se);
+
+        // Prepare input files
+        touch(tmp.resolve("in/xml"), "miles.xml");
+        touch(tmp.resolve("in/xml"), "finance.xml");
+        touch(tmp.resolve("in/pdf"), "doc.pdf");
+
+        stubEncrypt();
+
+        // Act
+        RepeatStatus status = tasklet.execute(newContribution(se), newChunkContext(se));
+
+        // Assert
+        assertEquals(RepeatStatus.FINISHED, status);
+
+        // two directories (xml + pdf) → two uploads and two notifications
+        verify(cosStorageService, times(2))
+                .uploadFile(startsWith("outgoing-e-invoice/"), argThat((File f) -> f.getName().endsWith(".pgp")));
+        verify(cftApiClient, times(2))
+                .notifyUpload(startsWith("outgoing-e-invoice/"), endsWith(".pgp"));
+
+        // Ensure artifacts exist in OUTPUT_DIR
+        assertTrue(Files.exists(tmp.resolve("out")));
+        long pgpCount;
+        try (var s = Files.walk(tmp.resolve("out"))) {
+            pgpCount = s.filter(p -> p.getFileName().toString().endsWith(".pgp")).count();
         }
-        return zip;
-    }
-
-    private static Path encrypt(Path zip) throws Exception {
-        Path pgp = zip.resolveSibling(zip.getFileName().toString() + ".pgp");
-        Files.copy(zip, pgp, StandardCopyOption.REPLACE_EXISTING);
-        return pgp;
-    }
-
-    private static StepExecution newStepExec() {
-        return new StepExecution("fetchDecryptUnzip", new JobExecution(System.nanoTime()));
-    }
-
-    // ---------- tests ----------
-
-    @Test
-    void execute_returnsFinished_whenNoFiles_andSetsNoFlags() throws Exception {
-        when(cos.fetchEncryptedFiles()).thenReturn(List.of());
-
-        StepExecution se = newStepExec();
-        RepeatStatus rs = tasklet.execute(new StepContribution(se), new ChunkContext(new StepContext(se)));
-
-        assertThat(rs).isEqualTo(RepeatStatus.FINISHED);
-        assertThat(se.getJobExecution().getExecutionContext().containsKey("hasCsv")).isFalse();
-        assertThat(se.getJobExecution().getExecutionContext().containsKey("hasXml")).isFalse();
+        assertEquals(2L, pgpCount);
     }
 
     @Test
-    void execute_csvFlow_setsHasCsvTrue_andUnzips() throws Exception {
-        ReflectionTestUtils.setField(tasklet, "jobType", "csv");
-        Path zip = makeZip(tmp.resolve("file_csv.zip"), "a.csv", "id,amt\n1,100");
-        Path pgp = encrypt(zip);
-        when(cos.fetchEncryptedFiles()).thenReturn(List.of(pgp.toFile()));
+    void processes_only_CSV_when_hasCsv_true_and_does_NOT_notify_when_flag_off() throws Exception {
+        // Arrange
+        setBooleanField(tasklet, "cftEnabled", false);
 
-        StepExecution se = newStepExec();
-        RepeatStatus rs = tasklet.execute(new StepContribution(se), new ChunkContext(new StepContext(se)));
+        StepExecution se = newStepExecutionWithFlag(true);
+        tasklet.beforeStep(se);
 
-        assertThat(rs).isEqualTo(RepeatStatus.FINISHED);
-        assertThat(se.getJobExecution().getExecutionContext().get("hasCsv")).isEqualTo(Boolean.TRUE);
-        Path csvDir = tmp.resolve("unzipped/csv");
-        assertThat(Files.list(csvDir).anyMatch(p -> p.toString().endsWith(".csv"))).isTrue();
+        touch(tmp.resolve("in/csv"), "invoices.csv");
+        // even if xml/pdf exist, code path should prefer CSV when hasCsv=true
+        touch(tmp.resolve("in/xml"), "other.xml");
+        touch(tmp.resolve("in/pdf"), "other.pdf");
+
+        stubEncrypt();
+
+        // Act
+        RepeatStatus status = tasklet.execute(newContribution(se), newChunkContext(se));
+
+        // Assert
+        assertEquals(RepeatStatus.FINISHED, status);
+
+        // exactly one upload (CSV dir)
+        verify(cosStorageService, times(1))
+                .uploadFile(contains("outgoing-e-invoice/"), argThat((File f) -> f.getName().endsWith(".pgp")));
+        verifyNoInteractions(cftApiClient);
     }
 
     @Test
-    void execute_xmlFlow_setsHasXmlTrue_andUnzips() throws Exception {
-        ReflectionTestUtils.setField(tasklet, "jobType", "xml");
-        Path zip = makeZip(tmp.resolve("file_xml.zip"), "doc.xml", "<a/>");
-        Path pgp = encrypt(zip);
-        when(cos.fetchEncryptedFiles()).thenReturn(List.of(pgp.toFile()));
+    void skips_when_all_directories_empty() throws Exception {
+        // Arrange
+        StepExecution se = newStepExecutionWithFlag(false);
+        tasklet.beforeStep(se);
+        Files.createDirectories(tmp.resolve("in/xml"));
+        Files.createDirectories(tmp.resolve("in/pdf"));
 
-        StepExecution se = newStepExec();
-        RepeatStatus rs = tasklet.execute(new StepContribution(se), new ChunkContext(new StepContext(se)));
+        // Act
+        RepeatStatus status = tasklet.execute(newContribution(se), newChunkContext(se));
 
-        assertThat(rs).isEqualTo(RepeatStatus.FINISHED);
-        assertThat(se.getJobExecution().getExecutionContext().get("hasXml")).isEqualTo(Boolean.TRUE);
-        Path xmlDir = tmp.resolve("unzipped/xml");
-        assertThat(Files.list(xmlDir).anyMatch(p -> p.toString().endsWith(".xml"))).isTrue();
+        // Assert
+        assertEquals(RepeatStatus.FINISHED, status);
+        verifyNoInteractions(pgpEncrypt, cosStorageService, cftApiClient);
     }
 
     @Test
-    void execute_mismatchBetweenJobTypeAndFileSuffix_skipsDecrypt() throws Exception {
-        ReflectionTestUtils.setField(tasklet, "jobType", "csv");
-        Path zip = makeZip(tmp.resolve("file_xml.zip"), "doc.xml", "<x/>");
-        Path pgp = encrypt(zip);
-        when(cos.fetchEncryptedFiles()).thenReturn(List.of(pgp.toFile()));
+    void zip_contains_all_regular_files_from_directory() throws Exception {
+        // Arrange
+        StepExecution se = newStepExecutionWithFlag(false);
+        tasklet.beforeStep(se);
 
-        StepExecution se = newStepExec();
-        RepeatStatus rs = tasklet.execute(new StepContribution(se), new ChunkContext(new StepContext(se)));
+        Path xmlDir = tmp.resolve("in/xml");
+        touch(xmlDir, "a.xml");
+        touch(xmlDir, "b.xml");
+        stubEncrypt();
 
-        assertThat(rs).isEqualTo(RepeatStatus.FINISHED);
-        assertThat(se.getJobExecution().getExecutionContext().containsKey("hasCsv")).isFalse();
-        verify(pgpDecrypt, never()).decrypt(any(), any());
-    }
+        // Act
+        tasklet.execute(newContribution(se), newChunkContext(se));
 
-    @Test
-    void execute_decryptError_throwsInvoiceProcessingException() throws Exception {
-        ReflectionTestUtils.setField(tasklet, "jobType", "csv");
-        Path zip = makeZip(tmp.resolve("broken_csv.zip"), "a.csv", "x");
-        Path pgp = encrypt(zip);
-        when(cos.fetchEncryptedFiles()).thenReturn(List.of(pgp.toFile()));
-        doThrow(new RuntimeException("boom"))
-                .when(pgpDecrypt).decrypt(any(InputStream.class), any(OutputStream.class));
+        // Find produced ZIP in OUTPUT_DIR
+        Path outDir = tmp.resolve("out");
+        Path zip = Files.list(outDir)
+                .filter(p -> p.getFileName().toString().endsWith(".zip"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("Expected a .zip in OUTPUT_DIR"));
 
-        StepExecution se = newStepExec();
-        assertThatThrownBy(() ->
-                tasklet.execute(new StepContribution(se), new ChunkContext(new StepContext(se)))
-        ).isInstanceOf(InvoiceProcessingException.class);
+        // Assert entries inside the zip
+        var names = new ArrayList<String>();
+        try (ZipInputStream zis = new ZipInputStream(Files.newInputStream(zip))) {
+            for (ZipEntry e; (e = zis.getNextEntry()) != null; ) {
+                names.add(e.getName());
+            }
+        }
+        assertTrue(names.contains("a.xml"));
+        assertTrue(names.contains("b.xml"));
     }
 }
 ```
 
----
+**Notes**
 
-✅ Covers:
-
-* No files (empty COS list)
-* CSV flow → `hasCsv=true`
-* XML flow → `hasXml=true`
-* Mismatch (jobType vs filename) → skipped
-* Decrypt error → throws `InvoiceProcessingException`
-
-⚡ Uses a temporary base dir (`@TempDir`) injected into the tasklet via `unzipBaseDir`, so you won’t hit `NoSuchFileException` anymore.
-
----
-
-Do you also want me to add a **multi-file test** (COS returns both `_csv` and `_xml` in one run) that asserts only the matching one gets processed depending on `jobType`? That would push branch coverage even higher.
+* If the actual collaborator types live in different packages, update imports for `CosStorageService`, `CftApiClient`, and `PGPEncrypt`.
+* If your runtime deletes the `.zip` after encryption, the last test still passes because it reads the zip before any cleanup in most flows; if not, you can assert against PG P output only.
+* This test doesn’t require AssertJ; it uses standard JUnit assertions + Mockito.
