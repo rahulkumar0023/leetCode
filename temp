@@ -1,3 +1,13 @@
+StepExecution se = new StepExecution("fetchDecryptUnzip", new JobExecution(123L));
+tasklet.beforeStep(se); // <-- IMPORTANT
+
+StepContribution c = new StepContribution(se);
+ChunkContext ctx = new ChunkContext(new StepContext(se));
+RepeatStatus rs = tasklet.execute(c, ctx);
+
+
+
+
 awesome—let’s parameterize the unzip base directory with @Value and make both prod + tests happy.
 
 1) Update the tasklet (inject + use the base dir)
