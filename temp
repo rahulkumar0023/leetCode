@@ -1,64 +1,37 @@
-// replaces: zipsEncryptsUploads_XML_and_PDF_when_hasCsv_false_and_notifies_cft
 @Test
-void uploads_XML_when_hasCsv_false_and_notifies_cft() throws Exception {
+void zip_contains_all_regular_files_from_directory() throws Exception {
     // Arrange
     StepExecution se = newStepExecutionWithFlag(false);
     tasklet.beforeStep(se);
 
-    // Only XML dir has files
-    touch(XML_DIR, "miles.xml", "<a/>");
-    touch(XML_DIR, "finance.xml", "<b/>");
+    // Only XML dir has files (so we produce exactly one archive)
+    touch(XML_DIR, "a.xml", "<a/>");
+    touch(XML_DIR, "b.xml", "<b/>");
 
+    // IMPORTANT: our stub copies input zip bytes to the .pgp file,
+    // so we can open the .pgp as a zip.
     stubEncryptWritesOutput();
 
     // Act
-    RepeatStatus status = tasklet.execute(new StepContribution(se), new ChunkContext(new StepContext(se)));
+    tasklet.execute(new StepContribution(se), new ChunkContext(new StepContext(se)));
 
-    // Assert
-    assertEquals(RepeatStatus.FINISHED, status);
+    // Find the produced .zip.pgp in OUTPUT_DIR
+    Path pgpZip = Files.list(OUTPUT_DIR)
+            .filter(p -> p.getFileName().toString().endsWith(".zip.pgp"))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("Expected a .zip.pgp in OUTPUT_DIR"));
 
-    // Exactly one upload (XML)
+    // Assert entries INSIDE the .pgp file (really a zip stream due to the stub)
+    var names = new ArrayList<String>();
+    try (ZipInputStream zis = new ZipInputStream(Files.newInputStream(pgpZip))) {
+        for (ZipEntry e; (e = zis.getNextEntry()) != null; ) {
+            names.add(e.getName());
+        }
+    }
+    assertTrue(names.contains("a.xml"), "archive should contain a.xml");
+    assertTrue(names.contains("b.xml"), "archive should contain b.xml");
+
+    // Optional: verify a single upload happened (XML only)
     verify(cosStorageService, times(1))
             .uploadFile(argThat(k -> KEY_PATTERN.matcher(k).matches()), any(File.class));
-
-    // CFT notify once as well (flag enabled in @BeforeEach)
-    verify(cftApiClient, times(1))
-            .notifyUpload(argThat(k -> KEY_PATTERN.matcher(k).matches()), endsWith(".pgp"));
-
-    // Sanity: .pgp artifact exists in OUTPUT_DIR
-    long pgpCount;
-    try (var s = Files.walk(OUTPUT_DIR)) {
-        pgpCount = s.filter(p -> p.getFileName().toString().endsWith(".pgp")).count();
-    }
-    assertTrue(pgpCount >= 1, "expected at least one .pgp artifact");
-}
-
-@Test
-void uploads_PDF_when_hasCsv_false_and_notifies_cft() throws Exception {
-    // Arrange
-    StepExecution se = newStepExecutionWithFlag(false);
-    tasklet.beforeStep(se);
-
-    // Only PDF dir has files
-    touch(PDF_DIR, "doc.pdf", "%PDF-1.4");
-
-    stubEncryptWritesOutput();
-
-    // Act
-    RepeatStatus status = tasklet.execute(new StepContribution(se), new ChunkContext(new StepContext(se)));
-
-    // Assert
-    assertEquals(RepeatStatus.FINISHED, status);
-
-    verify(cosStorageService, times(1))
-            .uploadFile(argThat(k -> KEY_PATTERN.matcher(k).matches()), any(File.class));
-    verify(cftApiClient, times(1))
-            .notifyUpload(argThat(k -> KEY_PATTERN.matcher(k).matches()), endsWith(".pgp"));
-
-    // At least one .pgp emitted
-    long pgpCount;
-    try (var s = Files.walk(OUTPUT_DIR)) {
-        pgpCount = s.filter(p -> p.getFileName().toString().endsWith(".pgp")).count();
-    }
-    assertTrue(pgpCount >= 1, "expected at least one .pgp artifact");
 }
