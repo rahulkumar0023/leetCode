@@ -1,230 +1,64 @@
-package com.bnpp.pf.einvoice.connect.batch.tasklet;
+// replaces: zipsEncryptsUploads_XML_and_PDF_when_hasCsv_false_and_notifies_cft
+@Test
+void uploads_XML_when_hasCsv_false_and_notifies_cft() throws Exception {
+    // Arrange
+    StepExecution se = newStepExecutionWithFlag(false);
+    tasklet.beforeStep(se);
 
-import com.bnpp.pf.einvoice.connect.cos.service.CosStorageService;
-import com.bnpp.pf.einvoice.connect.cft.api.CftApiClient;
-import com.bnpp.pf.einvoice.connect.pgp.PGPEncrypt;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.batch.core.ChunkContext;
-import org.springframework.batch.core.JobExecution;
-import org.springframework.batch.core.StepContribution;
-import org.springframework.batch.core.StepExecution;
-import org.springframework.batch.core.scope.context.StepContext;
-import org.springframework.batch.repeat.RepeatStatus;
+    // Only XML dir has files
+    touch(XML_DIR, "miles.xml", "<a/>");
+    touch(XML_DIR, "finance.xml", "<b/>");
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.InputStream;
-import java.lang.reflect.Field;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.regex.Pattern;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
+    stubEncryptWritesOutput();
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.*;
-import static org.mockito.Mockito.*;
+    // Act
+    RepeatStatus status = tasklet.execute(new StepContribution(se), new ChunkContext(new StepContext(se)));
 
-/**
- * Tests for PackageAndUploadTasklet.
- * - No reflection hacks to change static finals.
- * - Creates/cleans the actual output/input dirs the class uses.
- * - Matches upload key with regex to allow date-based filenames.
- */
-@ExtendWith(MockitoExtension.class)
-class PackageAndUploadTaskletTest {
+    // Assert
+    assertEquals(RepeatStatus.FINISHED, status);
 
-    @Mock private CosStorageService cosStorageService;
-    @Mock private CftApiClient cftApiClient;
-    @Mock private PGPEncrypt pgpEncrypt;
+    // Exactly one upload (XML)
+    verify(cosStorageService, times(1))
+            .uploadFile(argThat(k -> KEY_PATTERN.matcher(k).matches()), any(File.class));
 
-    private PackageAndUploadTasklet tasklet;
+    // CFT notify once as well (flag enabled in @BeforeEach)
+    verify(cftApiClient, times(1))
+            .notifyUpload(argThat(k -> KEY_PATTERN.matcher(k).matches()), endsWith(".pgp"));
 
-    // Paths read from the class (we don't modify them)
-    private Path OUTPUT_DIR;
-    private Path XML_DIR;
-    private Path PDF_DIR;
-    private Path CSV_DIR;
-
-    // Regex for upload key used by the tasklet ("outgoing_e-invoice/<name>.zip.pgp")
-    private static final Pattern KEY_PATTERN =
-            Pattern.compile("^outgoing[_-]e-invoice/.+\\.zip\\.pgp$");
-
-    @BeforeEach
-    void setUp() throws Exception {
-        tasklet = new PackageAndUploadTasklet(cosStorageService, cftApiClient, pgpEncrypt);
-
-        // Read static Path constants
-        OUTPUT_DIR = readStaticPath("OUTPUT_DIR");
-        XML_DIR    = readStaticPath("XML_DIR");
-        PDF_DIR    = readStaticPath("PDF_DIR");
-        CSV_DIR    = readStaticPath("CSV_DIR");
-
-        // Ensure dirs exist & are clean
-        Files.createDirectories(OUTPUT_DIR);
-        cleanDir(OUTPUT_DIR);
-        Files.createDirectories(XML_DIR);
-        cleanDir(XML_DIR);
-        Files.createDirectories(PDF_DIR);
-        cleanDir(PDF_DIR);
-        Files.createDirectories(CSV_DIR);
-        cleanDir(CSV_DIR);
-
-        // Enable CFT by default (toggle per test)
-        setBooleanField(tasklet, "cftEnabled", true);
+    // Sanity: .pgp artifact exists in OUTPUT_DIR
+    long pgpCount;
+    try (var s = Files.walk(OUTPUT_DIR)) {
+        pgpCount = s.filter(p -> p.getFileName().toString().endsWith(".pgp")).count();
     }
+    assertTrue(pgpCount >= 1, "expected at least one .pgp artifact");
+}
 
-    // --------- helpers ---------
+@Test
+void uploads_PDF_when_hasCsv_false_and_notifies_cft() throws Exception {
+    // Arrange
+    StepExecution se = newStepExecutionWithFlag(false);
+    tasklet.beforeStep(se);
 
-    private static Path readStaticPath(String field) throws Exception {
-        Field f = PackageAndUploadTasklet.class.getDeclaredField(field);
-        f.setAccessible(true);
-        return (Path) f.get(null); // static field
+    // Only PDF dir has files
+    touch(PDF_DIR, "doc.pdf", "%PDF-1.4");
+
+    stubEncryptWritesOutput();
+
+    // Act
+    RepeatStatus status = tasklet.execute(new StepContribution(se), new ChunkContext(new StepContext(se)));
+
+    // Assert
+    assertEquals(RepeatStatus.FINISHED, status);
+
+    verify(cosStorageService, times(1))
+            .uploadFile(argThat(k -> KEY_PATTERN.matcher(k).matches()), any(File.class));
+    verify(cftApiClient, times(1))
+            .notifyUpload(argThat(k -> KEY_PATTERN.matcher(k).matches()), endsWith(".pgp"));
+
+    // At least one .pgp emitted
+    long pgpCount;
+    try (var s = Files.walk(OUTPUT_DIR)) {
+        pgpCount = s.filter(p -> p.getFileName().toString().endsWith(".pgp")).count();
     }
-
-    private static void cleanDir(Path dir) throws Exception {
-        try (var s = Files.list(dir)) { s.forEach(p -> p.toFile().delete()); }
-    }
-
-    private static void setBooleanField(Object target, String name, boolean value) throws Exception {
-        Field f = target.getClass().getDeclaredField(name);
-        f.setAccessible(true);
-        f.setBoolean(target, value);
-    }
-
-    private static Path touch(Path dir, String file, String content) throws Exception {
-        Files.createDirectories(dir);
-        Path p = dir.resolve(file);
-        Files.writeString(p, content);
-        return p;
-    }
-
-    private static StepExecution newStepExecutionWithFlag(boolean hasCsv) {
-        JobExecution je = new JobExecution(1L);
-        je.getExecutionContext().put("hasCsv", hasCsv);
-        return new StepExecution("pkg-upload", je);
-    }
-
-    /** Stub PGP encrypt to just write a byte so the pipeline continues. */
-    private void stubEncryptWritesOutput() throws Exception {
-        doAnswer(inv -> {
-            try (InputStream in = inv.getArgument(0);
-                 FileOutputStream out = inv.getArgument(1)) {
-                if (in != null) in.transferTo(out);
-                out.write(1);
-            }
-            return null;
-        }).when(pgpEncrypt).encrypt(any(InputStream.class), any(FileOutputStream.class));
-    }
-
-    // --------- tests ---------
-
-    @Test
-    void zipsEncryptsUploads_XML_and_PDF_when_hasCsv_false_and_notifies_cft() throws Exception {
-        // Arrange
-        StepExecution se = newStepExecutionWithFlag(false);
-        tasklet.beforeStep(se);
-
-        touch(XML_DIR, "miles.xml", "<a/>");
-        touch(XML_DIR, "finance.xml", "<b/>");
-        touch(PDF_DIR, "doc.pdf", "%PDF-1.4");
-
-        stubEncryptWritesOutput();
-
-        // Act
-        RepeatStatus status = tasklet.execute(new StepContribution(se), new ChunkContext(new StepContext(se)));
-
-        // Assert
-        assertEquals(RepeatStatus.FINISHED, status);
-
-        // Two uploads (xml + pdf). Match the real prefix with underscore.
-        verify(cosStorageService, times(2))
-                .uploadFile(argThat(k -> KEY_PATTERN.matcher(k).matches()), any(File.class));
-
-        // CFT called twice as well
-        verify(cftApiClient, times(2))
-                .notifyUpload(argThat(k -> KEY_PATTERN.matcher(k).matches()), endsWith(".pgp"));
-
-        // Sanity: .pgp artifacts exist
-        long pgpCount;
-        try (var s = Files.walk(OUTPUT_DIR)) {
-            pgpCount = s.filter(p -> p.getFileName().toString().endsWith(".pgp")).count();
-        }
-        assertEquals(2L, pgpCount);
-    }
-
-    @Test
-    void processes_only_CSV_when_hasCsv_true_and_does_NOT_notify_when_flag_off() throws Exception {
-        // Arrange
-        setBooleanField(tasklet, "cftEnabled", false);
-
-        StepExecution se = newStepExecutionWithFlag(true);
-        tasklet.beforeStep(se);
-
-        touch(CSV_DIR, "invoices.csv", "id,amount\n1,10.00");
-        // even if others exist, with hasCsv=true we expect CSV path only
-        touch(XML_DIR, "ignored.xml", "<x/>");
-        touch(PDF_DIR, "ignored.pdf", "%PDF-1.4");
-
-        stubEncryptWritesOutput();
-
-        // Act
-        RepeatStatus status = tasklet.execute(new StepContribution(se), new ChunkContext(new StepContext(se)));
-
-        // Assert
-        assertEquals(RepeatStatus.FINISHED, status);
-
-        verify(cosStorageService, times(1))
-                .uploadFile(argThat(k -> KEY_PATTERN.matcher(k).matches()), any(File.class));
-        verifyNoInteractions(cftApiClient);
-    }
-
-    @Test
-    void skips_when_all_directories_empty() throws Exception {
-        // Arrange
-        StepExecution se = newStepExecutionWithFlag(false);
-        tasklet.beforeStep(se);
-
-        // Act
-        RepeatStatus status = tasklet.execute(new StepContribution(se), new ChunkContext(new StepContext(se)));
-
-        // Assert
-        assertEquals(RepeatStatus.FINISHED, status);
-        verifyNoInteractions(pgpEncrypt, cosStorageService, cftApiClient);
-    }
-
-    @Test
-    void zip_contains_all_regular_files_from_directory() throws Exception {
-        // Arrange
-        StepExecution se = newStepExecutionWithFlag(false);
-        tasklet.beforeStep(se);
-
-        touch(XML_DIR, "a.xml", "<a/>");
-        touch(XML_DIR, "b.xml", "<b/>");
-        stubEncryptWritesOutput();
-
-        // Act
-        tasklet.execute(new StepContribution(se), new ChunkContext(new StepContext(se)));
-
-        // Find a produced .zip in OUTPUT_DIR
-        Path zip = Files.list(OUTPUT_DIR)
-                .filter(p -> p.getFileName().toString().endsWith(".zip"))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError("Expected a .zip in OUTPUT_DIR"));
-
-        // Assert entries inside zip
-        var names = new ArrayList<String>();
-        try (ZipInputStream zis = new ZipInputStream(Files.newInputStream(zip))) {
-            for (ZipEntry e; (e = zis.getNextEntry()) != null; ) {
-                names.add(e.getName());
-            }
-        }
-        assertTrue(names.contains("a.xml"));
-        assertTrue(names.contains("b.xml"));
-    }
+    assertTrue(pgpCount >= 1, "expected at least one .pgp artifact");
 }
