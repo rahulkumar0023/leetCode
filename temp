@@ -4,34 +4,52 @@ void zip_contains_all_regular_files_from_directory() throws Exception {
     StepExecution se = newStepExecutionWithFlag(false);
     tasklet.beforeStep(se);
 
-    // Only XML dir has files (so we produce exactly one archive)
+    // Prepare only XML files so we deterministically get ONE upload
     touch(XML_DIR, "a.xml", "<a/>");
     touch(XML_DIR, "b.xml", "<b/>");
 
-    // IMPORTANT: our stub copies input zip bytes to the .pgp file,
-    // so we can open the .pgp as a zip.
-    stubEncryptWritesOutput();
+    // IMPORTANT: make the encrypt stub write bytes to the provided OUT file
+    // Adapt to your PGPEncrypt signature:
+    // 1) encrypt(InputStream in, FileOutputStream out)
+    doAnswer(inv -> {
+        try (InputStream in = inv.getArgument(0);
+             FileOutputStream out = inv.getArgument(1)) {
+            if (in != null) in.transferTo(out);
+            out.write(1);
+        }
+        return null;
+    }).when(pgpEncrypt).encrypt(any(InputStream.class), any(FileOutputStream.class));
+
+    // If your PGPEncrypt uses (File in, File out), use this instead:
+    // doAnswer(inv -> {
+    //     File in = inv.getArgument(0);
+    //     File out = inv.getArgument(1);
+    //     Files.createDirectories(out.toPath().getParent());
+    //     Files.copy(in.toPath(), out.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+    //     return null;
+    // }).when(pgpEncrypt).encrypt(any(File.class), any(File.class));
 
     // Act
     tasklet.execute(new StepContribution(se), new ChunkContext(new StepContext(se)));
 
-    // Find the produced .zip.pgp in OUTPUT_DIR
-    Path pgpZip = Files.list(OUTPUT_DIR)
-            .filter(p -> p.getFileName().toString().endsWith(".zip.pgp"))
-            .findFirst()
-            .orElseThrow(() -> new AssertionError("Expected a .zip.pgp in OUTPUT_DIR"));
+    // Capture the EXACT file the tasklet uploaded (don’t guess the folder)
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<File> fileCap = ArgumentCaptor.forClass(File.class);
 
-    // Assert entries INSIDE the .pgp file (really a zip stream due to the stub)
-    var names = new ArrayList<String>();
-    try (ZipInputStream zis = new ZipInputStream(Files.newInputStream(pgpZip))) {
-        for (ZipEntry e; (e = zis.getNextEntry()) != null; ) {
+    verify(cosStorageService, times(1))
+            .uploadFile(argThat(k -> KEY_PATTERN.matcher(k).matches()), fileCap.capture());
+
+    File uploaded = fileCap.getValue();
+    assertNotNull(uploaded, "uploaded file must not be null");
+    assertTrue(uploaded.getName().endsWith(".pgp"), "uploaded file should be .pgp");
+
+    // Open the uploaded .pgp as a zip (our stub copied the zip bytes)
+    var names = new java.util.ArrayList<String>();
+    try (var zis = new java.util.zip.ZipInputStream(new java.io.FileInputStream(uploaded))) {
+        for (java.util.zip.ZipEntry e; (e = zis.getNextEntry()) != null; ) {
             names.add(e.getName());
         }
     }
     assertTrue(names.contains("a.xml"), "archive should contain a.xml");
     assertTrue(names.contains("b.xml"), "archive should contain b.xml");
-
-    // Optional: verify a single upload happened (XML only)
-    verify(cosStorageService, times(1))
-            .uploadFile(argThat(k -> KEY_PATTERN.matcher(k).matches()), any(File.class));
 }
