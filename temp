@@ -1,3 +1,75 @@
+Right — that block is exactly why the <AllowanceCharge> tag disappears.
+
+BigDecimal amount = new BigDecimal(dto.getAllowanceAmount());
+if (amount.compareTo(BigDecimal.ZERO) <= 0) {
+    return List.of(); // don’t set if <= 0
+}
+
+What’s happening
+	•	Your mapper returns an empty list when the parsed amount is <= 0.
+	•	JAXB/MapStruct don’t marshal empty lists, so the <AllowanceCharge> element is simply omitted from the XML.
+	•	When you remove the block, you always return a value, so the tag appears.
+
+Why you might be unexpectedly hitting <= 0
+
+Common pitfalls when parsing dto.getAllowanceAmount():
+	•	Whitespace / hidden chars: " 0.00 " or non-breaking spaces.
+	•	Comma decimals: "10,00" throws NumberFormatException (or you pre-normalize to 0 elsewhere).
+	•	Empty string / null: treated as no value.
+	•	Sign or rounding quirks: "-0.00" compares as 0.
+
+Make it robust (keep “only if > 0” behavior)
+
+Use a safe parser and only return the element when the parsed amount is strictly positive:
+
+@Mapping(target = "allowanceCharge", expression = "java(toAllowanceCharges(dto))")
+InvoiceType toInvoiceType(CsvInvoiceDto dto);
+
+default List<AllowanceChargeType> toAllowanceCharges(CsvInvoiceDto dto) {
+    BigDecimal amount = parseAmount(dto.getAllowanceAmount());
+    if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+        return List.of(); // -> no tag in XML
+    }
+
+    AllowanceChargeType ac = new AllowanceChargeType();
+
+    // allowance (discount) -> chargeIndicator = false
+    ChargeIndicatorType indicator = new ChargeIndicatorType();
+    indicator.setValue(Boolean.FALSE);
+    ac.setChargeIndicator(indicator);
+
+    AmountType amountType = new AmountType();
+    amountType.setCurrencyID(dto.getDocumentCurrencyCode()); // ensure not null
+    amountType.setValue(amount);
+    ac.setAmount(amountType);
+
+    return List.of(ac);
+}
+
+private BigDecimal parseAmount(String raw) {
+    if (raw == null) return null;
+    String s = raw.trim();
+    if (s.isEmpty()) return null;
+    // Optional: normalize locales like "10,00" -> "10.00"
+    s = s.replace(',', '.');
+    try {
+        return new BigDecimal(s);
+    } catch (NumberFormatException e) {
+        return null; // treat malformed as “not set”
+    }
+}
+
+Quick checklist if the tag still doesn’t show
+	•	@Mapping(target = "allowanceCharge", ...) — exact lowerCamel name.
+	•	dto.getAllowanceAmount() after parsing is > 0 (log it once to confirm).
+	•	documentCurrencyCode is set; some schemas/tooling can choke on a missing currency.
+	•	Your helper returns a non-empty list.
+
+If you want, paste your current @Mapping line + helper and I’ll align them precisely so the tag appears only when the amount is truly > 0.
+
+
+
+
 @Test
 void zip_contains_all_regular_files_from_directory() throws Exception {
     // Arrange
