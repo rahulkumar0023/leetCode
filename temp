@@ -1,127 +1,170 @@
-Right — that block is exactly why the <AllowanceCharge> tag disappears.
+That’s a great detail 👍 — your current `CsvInvoiceReader` is already doing the **low-level CSV parsing** (`DelimitedLineTokenizer`, `SmartCsvInvoiceFieldSetMapper`, etc.). You don’t need to throw that away.
 
-BigDecimal amount = new BigDecimal(dto.getAllowanceAmount());
-if (amount.compareTo(BigDecimal.ZERO) <= 0) {
-    return List.of(); // don’t set if <= 0
-}
+👉 The trick is: keep your existing `CsvInvoiceReader` *as-is* (so you still get 1 `CsvInvoiceDto` per row), and **wrap it** in a “grouping reader” that combines consecutive rows with the same `invoiceId`.
 
-What’s happening
-	•	Your mapper returns an empty list when the parsed amount is <= 0.
-	•	JAXB/MapStruct don’t marshal empty lists, so the <AllowanceCharge> element is simply omitted from the XML.
-	•	When you remove the block, you always return a value, so the tag appears.
+---
 
-Why you might be unexpectedly hitting <= 0
+## How it looks
 
-Common pitfalls when parsing dto.getAllowanceAmount():
-	•	Whitespace / hidden chars: " 0.00 " or non-breaking spaces.
-	•	Comma decimals: "10,00" throws NumberFormatException (or you pre-normalize to 0 elsewhere).
-	•	Empty string / null: treated as no value.
-	•	Sign or rounding quirks: "-0.00" compares as 0.
+```
+CsvInvoiceReader (your class)
+        ↓  (1 CsvInvoiceDto per row)
+GroupingCsvReader (new wrapper)
+        ↓  (CsvInvoiceGroup per invoiceId)
+Processor (CsvInvoiceGroup → InvoiceType with many lines)
+        ↓
+XML Writer
+```
 
-Make it robust (keep “only if > 0” behavior)
+---
 
-Use a safe parser and only return the element when the parsed amount is strictly positive:
+## 1. Grouping wrapper around your reader
 
-@Mapping(target = "allowanceCharge", expression = "java(toAllowanceCharges(dto))")
-InvoiceType toInvoiceType(CsvInvoiceDto dto);
+```java
+@Component
+@StepScope
+public class GroupingCsvReader implements ItemReader<CsvInvoiceGroup>, ResourceAwareItemReaderItemStream<CsvInvoiceGroup> {
 
-default List<AllowanceChargeType> toAllowanceCharges(CsvInvoiceDto dto) {
-    BigDecimal amount = parseAmount(dto.getAllowanceAmount());
-    if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
-        return List.of(); // -> no tag in XML
+    private final CsvInvoiceReader delegate; // your existing reader
+    private CsvInvoiceDto buffer;
+    private Resource resource;
+
+    public GroupingCsvReader(CsvInvoiceReader delegate) {
+        this.delegate = delegate;
     }
 
-    AllowanceChargeType ac = new AllowanceChargeType();
-
-    // allowance (discount) -> chargeIndicator = false
-    ChargeIndicatorType indicator = new ChargeIndicatorType();
-    indicator.setValue(Boolean.FALSE);
-    ac.setChargeIndicator(indicator);
-
-    AmountType amountType = new AmountType();
-    amountType.setCurrencyID(dto.getDocumentCurrencyCode()); // ensure not null
-    amountType.setValue(amount);
-    ac.setAmount(amountType);
-
-    return List.of(ac);
-}
-
-private BigDecimal parseAmount(String raw) {
-    if (raw == null) return null;
-    String s = raw.trim();
-    if (s.isEmpty()) return null;
-    // Optional: normalize locales like "10,00" -> "10.00"
-    s = s.replace(',', '.');
-    try {
-        return new BigDecimal(s);
-    } catch (NumberFormatException e) {
-        return null; // treat malformed as “not set”
+    @Override
+    public void setResource(Resource resource) {
+        this.resource = resource;
+        delegate.setResource(resource); // forward to your current reader
     }
-}
 
-Quick checklist if the tag still doesn’t show
-	•	@Mapping(target = "allowanceCharge", ...) — exact lowerCamel name.
-	•	dto.getAllowanceAmount() after parsing is > 0 (log it once to confirm).
-	•	documentCurrencyCode is set; some schemas/tooling can choke on a missing currency.
-	•	Your helper returns a non-empty list.
+    @Override
+    public CsvInvoiceGroup read() throws Exception {
+        List<CsvInvoiceDto> group = new ArrayList<>();
+        CsvInvoiceDto first = (buffer != null) ? buffer : delegate.read();
+        buffer = null;
+        if (first == null) return null;
 
-If you want, paste your current @Mapping line + helper and I’ll align them precisely so the tag appears only when the amount is truly > 0.
+        String invoiceId = first.getInvoiceNumber();
+        group.add(first);
 
-
-
-
-@Test
-void zip_contains_all_regular_files_from_directory() throws Exception {
-    // Arrange
-    StepExecution se = newStepExecutionWithFlag(false);
-    tasklet.beforeStep(se);
-
-    // Prepare only XML files so we deterministically get ONE upload
-    touch(XML_DIR, "a.xml", "<a/>");
-    touch(XML_DIR, "b.xml", "<b/>");
-
-    // IMPORTANT: make the encrypt stub write bytes to the provided OUT file
-    // Adapt to your PGPEncrypt signature:
-    // 1) encrypt(InputStream in, FileOutputStream out)
-    doAnswer(inv -> {
-        try (InputStream in = inv.getArgument(0);
-             FileOutputStream out = inv.getArgument(1)) {
-            if (in != null) in.transferTo(out);
-            out.write(1);
+        CsvInvoiceDto next;
+        while ((next = delegate.read()) != null) {
+            if (!invoiceId.equals(next.getInvoiceNumber())) {
+                buffer = next; // save for next call
+                break;
+            }
+            group.add(next);
         }
-        return null;
-    }).when(pgpEncrypt).encrypt(any(InputStream.class), any(FileOutputStream.class));
 
-    // If your PGPEncrypt uses (File in, File out), use this instead:
-    // doAnswer(inv -> {
-    //     File in = inv.getArgument(0);
-    //     File out = inv.getArgument(1);
-    //     Files.createDirectories(out.toPath().getParent());
-    //     Files.copy(in.toPath(), out.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-    //     return null;
-    // }).when(pgpEncrypt).encrypt(any(File.class), any(File.class));
-
-    // Act
-    tasklet.execute(new StepContribution(se), new ChunkContext(new StepContext(se)));
-
-    // Capture the EXACT file the tasklet uploaded (don’t guess the folder)
-    @SuppressWarnings("unchecked")
-    ArgumentCaptor<File> fileCap = ArgumentCaptor.forClass(File.class);
-
-    verify(cosStorageService, times(1))
-            .uploadFile(argThat(k -> KEY_PATTERN.matcher(k).matches()), fileCap.capture());
-
-    File uploaded = fileCap.getValue();
-    assertNotNull(uploaded, "uploaded file must not be null");
-    assertTrue(uploaded.getName().endsWith(".pgp"), "uploaded file should be .pgp");
-
-    // Open the uploaded .pgp as a zip (our stub copied the zip bytes)
-    var names = new java.util.ArrayList<String>();
-    try (var zis = new java.util.zip.ZipInputStream(new java.io.FileInputStream(uploaded))) {
-        for (java.util.zip.ZipEntry e; (e = zis.getNextEntry()) != null; ) {
-            names.add(e.getName());
-        }
+        return new CsvInvoiceGroup(invoiceId, group);
     }
-    assertTrue(names.contains("a.xml"), "archive should contain a.xml");
-    assertTrue(names.contains("b.xml"), "archive should contain b.xml");
+
+    @Override
+    public void open(ExecutionContext executionContext) throws ItemStreamException {
+        delegate.open(executionContext);
+    }
+
+    @Override
+    public void update(ExecutionContext executionContext) throws ItemStreamException {
+        delegate.update(executionContext);
+    }
+
+    @Override
+    public void close() throws ItemStreamException {
+        delegate.close();
+    }
 }
+```
+
+---
+
+## 2. CsvInvoiceGroup DTO
+
+```java
+@Data
+@AllArgsConstructor
+public class CsvInvoiceGroup {
+    private String invoiceId;
+    private List<CsvInvoiceDto> rows;
+}
+```
+
+---
+
+## 3. Processor: group → InvoiceType
+
+```java
+@Component
+@RequiredArgsConstructor
+public class CsvGroupToInvoiceProcessor implements ItemProcessor<CsvInvoiceGroup, InvoiceType> {
+
+    private final CsvInvoiceMapper mapper;
+
+    @Override
+    public InvoiceType process(CsvInvoiceGroup group) {
+        return mapper.toInvoiceType(group);
+    }
+}
+```
+
+---
+
+## 4. Mapper update
+
+```java
+@Mapper(componentModel = "spring")
+public interface CsvInvoiceMapper {
+
+    @Mapping(target = "ID", expression = "java(toID(group.getInvoiceId()))")
+    @Mapping(target = "invoiceLine", expression = "java(toInvoiceLines(group.getRows()))")
+    InvoiceType toInvoiceType(CsvInvoiceGroup group);
+
+    default List<InvoiceLineType> toInvoiceLines(List<CsvInvoiceDto> rows) {
+        List<InvoiceLineType> lines = new ArrayList<>();
+        for (CsvInvoiceDto row : rows) {
+            InvoiceLineType line = new InvoiceLineType();
+            // map row → line fields here
+            lines.add(line);
+        }
+        return lines;
+    }
+
+    default IDType toID(String id) {
+        IDType t = new IDType();
+        t.setValue(id);
+        return t;
+    }
+}
+```
+
+---
+
+## 5. Step wiring
+
+Instead of wiring your old `CsvInvoiceReader` directly:
+
+```java
+@Bean
+public Step csvToXmlStep(GroupingCsvReader reader,
+                         CsvGroupToInvoiceProcessor processor,
+                         XMLInvoiceWriter writer) {
+    return stepBuilderFactory.get("csvToXmlStep")
+        .<CsvInvoiceGroup, InvoiceType>chunk(50)
+        .reader(reader)
+        .processor(processor)
+        .writer(writer)
+        .build();
+}
+```
+
+---
+
+✅ This way you don’t lose your tokenizer/line-mapper logic — your `CsvInvoiceReader` still produces `CsvInvoiceDto` per row.
+✅ The wrapper groups them into invoices before mapping.
+✅ One invoice ID = one XML with multiple `<InvoiceLine>` entries.
+
+---
+
+Do you want me to also show the **CreditNote variant** (same grouping, but `CreditNoteLineType` instead of `InvoiceLineType`), since you’ve already got `InvoiceTypeCode` deciding between the two?
