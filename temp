@@ -1,3 +1,106 @@
+Exactly 👍 — you’ve already done the hard part once: your CsvInvoiceMapper maps those 78+ flat CSV columns into all the header-level fields of a InvoiceType (or CreditNoteType): supplier, customer, amounts, tax totals, references, etc.
+
+When you move to grouping, the good news is:
+	•	Header-level fields (those 78 columns that are per-invoice) still map once, using any of the rows in the group (they all have the same invoiceId).
+	•	Line-level fields (quantity, description, price, etc.) need to be mapped for each row, and accumulated into the invoice’s InvoiceLine or CreditNoteLine.
+
+⸻
+
+How to reuse your existing mapper with 78+ columns
+	1.	Split responsibilities:
+	•	Keep a method that maps a single CsvInvoiceDto into all header fields of InvoiceType.
+	•	Keep/reuse your existing line mapper (CsvInvoiceDto → InvoiceLineType).
+	2.	Create a new group-level mapping:
+	•	Take the CsvInvoiceGroup (rows with the same invoiceId).
+	•	Use the first row (or any, since headers are duplicated) to fill in the header fields.
+	•	Collect all rows → InvoiceLineType list.
+
+⸻
+
+Mapper sketch
+
+@Mapper(componentModel = "spring", builder = @Builder(disableBuilder = true))
+public interface CsvInvoiceMapper {
+
+    // --- 1) Existing row → header mapping (78+ columns used here)
+    @Mapping(target = "ID", expression = "java(toID(dto.getInvoiceNumber()))")
+    @Mapping(target = "AccountingSupplierParty", expression = "java(toSupplier(dto))")
+    @Mapping(target = "AccountingCustomerParty", expression = "java(toCustomer(dto))")
+    @Mapping(target = "TaxTotal", expression = "java(toTaxTotal(dto))")
+    @Mapping(target = "LegalMonetaryTotal", expression = "java(toTotals(dto))")
+    // ... and the rest of your 78 column mappings
+    InvoiceType toInvoiceHeader(CsvInvoiceDto dto);
+
+    // --- 2) Row → line (just line-level columns)
+    default InvoiceLineType toInvoiceLine(CsvInvoiceDto dto) {
+        InvoiceLineType line = new InvoiceLineType();
+        // map lineId, quantity, price, description, tax per line, etc.
+        return line;
+    }
+
+    // --- 3) Group → InvoiceType
+    default InvoiceType toInvoiceType(CsvInvoiceGroup group) {
+        // use first row for header fields
+        CsvInvoiceDto first = group.getRows().get(0);
+        InvoiceType invoice = toInvoiceHeader(first);
+
+        // collect all lines
+        List<InvoiceLineType> lines = new ArrayList<>();
+        for (CsvInvoiceDto row : group.getRows()) {
+            lines.add(toInvoiceLine(row));
+        }
+        invoice.getInvoiceLine().addAll(lines);
+
+        return invoice;
+    }
+
+    // helper for ID
+    default IDType toID(String value) {
+        IDType id = new IDType();
+        id.setValue(value);
+        return id;
+    }
+}
+
+
+⸻
+
+Credit notes (same principle)
+
+default CreditNoteType toCreditNoteType(CsvInvoiceGroup group) {
+    CsvInvoiceDto first = group.getRows().get(0);
+    CreditNoteType credit = toCreditNoteHeader(first);
+
+    List<CreditNoteLineType> lines = new ArrayList<>();
+    for (CsvInvoiceDto row : group.getRows()) {
+        lines.add(toCreditNoteLine(row));
+    }
+    credit.getCreditNoteLine().addAll(lines);
+
+    return credit;
+}
+
+
+⸻
+
+✅ Why this works
+	•	You don’t duplicate 78 mappings: you still map a single row to headers.
+	•	You simply change the entry point: instead of mapping a row, you map a group, and delegate to the existing header and line mappers.
+	•	All the per-invoice fields (currency, totals, parties, etc.) come from the first row, so they’re consistent.
+	•	All the per-line fields (price, qty, item) come from every row.
+
+⸻
+
+👉 Do you want me to draft the exact update to your current CsvInvoiceMapper so it has both the “row → header” mapping (with all 78 fields) and the “group → invoice” wrapper, so you can drop it straight in without rewriting those 78 lines?
+
+
+
+
+
+
+
+
+
 That’s a great detail 👍 — your current `CsvInvoiceReader` is already doing the **low-level CSV parsing** (`DelimitedLineTokenizer`, `SmartCsvInvoiceFieldSetMapper`, etc.). You don’t need to throw that away.
 
 👉 The trick is: keep your existing `CsvInvoiceReader` *as-is* (so you still get 1 `CsvInvoiceDto` per row), and **wrap it** in a “grouping reader” that combines consecutive rows with the same `invoiceId`.
