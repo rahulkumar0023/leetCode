@@ -1,3 +1,18 @@
+gpg --import my-public.asc
+gpg --import my-private.asc
+
+# Verify
+gpg --list-keys
+gpg --list-secret-keys
+
+# Encrypt for recipient (public key required)
+gpg --output secret.txt.pgp --encrypt --recipient recipient@example.com secret.txt
+# Decrypt back into plaintext
+gpg --output secret.txt --decrypt secret.txt.pgp
+
+
+
+
 Exactly 👍 — you’ve already done the hard part once: your CsvInvoiceMapper maps those 78+ flat CSV columns into all the header-level fields of a InvoiceType (or CreditNoteType): supplier, customer, amounts, tax totals, references, etc.
 
 When you move to grouping, the good news is:
