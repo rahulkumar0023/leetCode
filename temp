@@ -1,3 +1,74 @@
+package com.alphacredit.batch.pgp;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.test.util.ReflectionTestUtils;
+
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Base64;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class PGPConfigTest {
+
+    @TempDir
+    Path tmp;
+
+    @Test
+    void pgpEncryptBeanBuildsSuccessfully() throws Exception {
+        // Arrange
+        PGPConfig config = new PGPConfig();
+        // Dummy Base64 public key string (normally your .asc content)
+        String dummyKey = "-----BEGIN PGP PUBLIC KEY BLOCK-----\\nFAKEKEY\\n-----END PGP PUBLIC KEY BLOCK-----";
+        String encoded = Base64.getEncoder().encodeToString(dummyKey.getBytes(StandardCharsets.UTF_8));
+
+        ReflectionTestUtils.setField(config, "pgpPublicKey", encoded);
+
+        // Act
+        var pgpEncrypt = config.pgpEncrypt();
+
+        // Assert
+        assertThat(pgpEncrypt).isNotNull();
+    }
+
+    @Test
+    void pgpDecryptBeanBuildsSuccessfully() throws Exception {
+        // Arrange
+        PGPConfig config = new PGPConfig();
+        String dummyPrivKey = "-----BEGIN PGP PRIVATE KEY BLOCK-----\\nFAKEKEY\\n-----END PGP PRIVATE KEY BLOCK-----";
+        String encodedPriv = Base64.getEncoder().encodeToString(dummyPrivKey.getBytes(StandardCharsets.UTF_8));
+
+        ReflectionTestUtils.setField(config, "pgpPrivateKey", encodedPriv);
+        ReflectionTestUtils.setField(config, "privateKeyCred", "secret".toCharArray());
+
+        // Act
+        var pgpDecrypt = config.pgpDecrypt();
+
+        // Assert
+        assertThat(pgpDecrypt).isNotNull();
+    }
+
+    @Test
+    void convertStringToTempFile_createsAscFile() throws Exception {
+        // Arrange
+        PGPConfig config = new PGPConfig();
+        String key = "fake-key-content";
+
+        // Act
+        var file = config.convertStringToTempFile(key, tmp.resolve("test").toString());
+
+        // Assert
+        assertThat(file).exists();
+        assertThat(file.getName()).endsWith(".asc");
+        assertThat(Files.readString(file.toPath())).contains("fake-key-content");
+    }
+}
+
+
+
+
 Perfect 👌 — let’s add **JUnit 5** tests for the 3 big changes you just introduced:
 
 1. **Grouping reader** (rows with same `invoiceId` → `CsvInvoiceGroup`)
