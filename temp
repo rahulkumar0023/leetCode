@@ -1,3 +1,55 @@
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.StepExecution;
+import org.springframework.batch.core.scope.context.StepContext;
+import org.springframework.batch.core.scope.context.StepSynchronizationManager;
+import org.springframework.core.io.FileSystemResource;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class XmlInvoiceReaderTest {
+
+    @TempDir
+    Path tmp;
+
+    @Test
+    void setResource_storesBaseNameInExecutionContext() throws Exception {
+        // Arrange: minimal XML file
+        Path xmlFile = tmp.resolve("INV-123.xml");
+        String xml = """
+            <Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"
+                     xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">
+              <cbc:ID>INV-123</cbc:ID>
+            </Invoice>
+            """;
+        Files.writeString(xmlFile, xml);
+
+        XmlInvoiceReader reader = new XmlInvoiceReader();
+
+        // 🔑 Simulate a step execution context
+        JobExecution jobExecution = new JobExecution(1L);
+        StepExecution stepExecution = new StepExecution("testStep", jobExecution);
+        StepSynchronizationManager.register(new StepContext(stepExecution));
+
+        try {
+            // Act
+            reader.setResource(new FileSystemResource(xmlFile.toFile()));
+
+            // Assert
+            assertThat(stepExecution.getExecutionContext().get("currentResourceBaseName"))
+                .isEqualTo("INV-123");
+        } finally {
+            // 🔑 Always clear the context to avoid leaks between tests
+            StepSynchronizationManager.close();
+        }
+    }
+}
+
+
 Great 📸 — I see three new classes you want coverage for:
 	1.	XmlInvoiceReader (Spring Batch ResourceAwareItemReaderItemStream)
 	2.	SchedulerConfig (just holds cron expressions)
