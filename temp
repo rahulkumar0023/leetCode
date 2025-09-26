@@ -1,3 +1,157 @@
+Great 📸 — I see three new classes you want coverage for:
+	1.	XmlInvoiceReader (Spring Batch ResourceAwareItemReaderItemStream)
+	2.	SchedulerConfig (just holds cron expressions)
+	3.	CsvInvoiceGroup (a Lombok data holder DTO)
+
+Here’s how to test them:
+
+⸻
+
+1. XmlInvoiceReaderTest.java
+
+We’ll simulate reading a minimal valid XML invoice file, check that setResource stores the base name in the execution context, and that read() unmarshals correctly.
+
+package com.bnpp.pf.einvoice.connect.batch.xml;
+
+import oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.batch.item.ExecutionContext;
+import org.springframework.batch.item.xml.StaxEventItemReader;
+import org.springframework.core.io.FileSystemResource;
+
+import javax.xml.bind.JAXBContext;
+import javax.xml.bind.Marshaller;
+import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class XmlInvoiceReaderTest {
+
+    @TempDir
+    Path tmp;
+
+    @Test
+    void setResource_storesBaseNameInExecutionContext() throws Exception {
+        // Arrange: create minimal invoice XML
+        Path xmlFile = tmp.resolve("INV-123.xml");
+        String xml = """
+            <Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2">
+              <cbc:ID xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">INV-123</cbc:ID>
+            </Invoice>
+            """;
+        Files.writeString(xmlFile, xml);
+
+        XmlInvoiceReader reader = new XmlInvoiceReader();
+        ExecutionContext ctx = new ExecutionContext();
+
+        // Act
+        reader.setResource(new FileSystemResource(xmlFile.toFile()));
+        reader.open(ctx);
+        InvoiceType invoice = reader.read();
+
+        // Assert
+        assertThat(invoice.getID().getValue()).isEqualTo("INV-123");
+        assertThat(ctx.containsKey("currentResourceBaseName")).isTrue();
+    }
+
+    @Test
+    void openAndClose_resetFlags() throws Exception {
+        XmlInvoiceReader reader = new XmlInvoiceReader();
+        ExecutionContext ctx = new ExecutionContext();
+        reader.open(ctx);
+        reader.close();
+        reader.update(ctx);
+        assertThat(ctx).isNotNull();
+    }
+}
+
+
+⸻
+
+2. SchedulerConfigTest.java
+
+Very simple: just inject fake values and assert getters work (Lombok’s @Getter).
+
+package com.bnpp.pf.einvoice.connect.batch.scheduler;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class SchedulerConfigTest {
+
+    @Test
+    void cronValuesAreAccessible() {
+        SchedulerConfig config = new SchedulerConfig();
+        ReflectionTestUtils.setField(config, "xmlCron", "0 0 * * * *");
+        ReflectionTestUtils.setField(config, "csvCron", "0 */5 * * * *");
+
+        assertThat(config.getXmlCron()).isEqualTo("0 0 * * * *");
+        assertThat(config.getCsvCron()).isEqualTo("0 */5 * * * *");
+    }
+}
+
+
+⸻
+
+3. CsvInvoiceGroupTest.java
+
+This is a Lombok DTO (@Data, @AllArgsConstructor). We test equals/hashCode/toString + constructor.
+
+package com.bnpp.pf.einvoice.connect.batch.csv;
+
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class CsvInvoiceGroupTest {
+
+    @Test
+    void allArgsConstructorAndGettersWork() {
+        CsvInvoiceDto row = new CsvInvoiceDto();
+        row.setInvoiceId("INV-1");
+
+        CsvInvoiceGroup group = new CsvInvoiceGroup("INV-1", List.of(row));
+
+        assertThat(group.getInvoiceId()).isEqualTo("INV-1");
+        assertThat(group.getRows()).hasSize(1);
+    }
+
+    @Test
+    void equalsAndHashCodeConsiderInvoiceIdAndRows() {
+        CsvInvoiceDto row = new CsvInvoiceDto();
+        row.setInvoiceId("INV-2");
+
+        CsvInvoiceGroup g1 = new CsvInvoiceGroup("INV-2", List.of(row));
+        CsvInvoiceGroup g2 = new CsvInvoiceGroup("INV-2", List.of(row));
+
+        assertThat(g1).isEqualTo(g2);
+        assertThat(g1.hashCode()).isEqualTo(g2.hashCode());
+        assertThat(g1.toString()).contains("INV-2");
+    }
+}
+
+
+⸻
+
+✅ Coverage impact
+	•	XmlInvoiceReader: both setResource(...), read(), open(), close(), update().
+	•	SchedulerConfig: both cron fields covered.
+	•	CsvInvoiceGroup: constructor + Lombok-generated methods covered.
+
+⸻
+
+Do you want me to also add a negative test for XmlInvoiceReader.read() (e.g., invalid XML → should throw JAXB exception) so you hit the error branch too?
+
+
+
+
 package com.alphacredit.batch.pgp;
 
 import org.junit.jupiter.api.Test;
