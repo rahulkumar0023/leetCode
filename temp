@@ -1,742 +1,125 @@
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-import org.springframework.batch.core.JobExecution;
-import org.springframework.batch.core.StepExecution;
-import org.springframework.batch.core.scope.context.StepContext;
-import org.springframework.batch.core.scope.context.StepSynchronizationManager;
-import org.springframework.core.io.FileSystemResource;
+Perfect 👌 — now I see two more classes you’d like to cover with tests:
 
-import java.nio.file.Files;
-import java.nio.file.Path;
+1. **`SupplierEntity`** (a JPA entity with Lombok getters/setters)
+2. **`CosConfig`** (a Spring `@ConfigurationProperties` bean with Lombok)
+
+Since you asked earlier to avoid `@SpringBootTest`, we’ll keep these tests plain **JUnit 5**, with **ReflectionTestUtils** (or direct setters) to validate behavior.
+
+---
+
+## 1. `SupplierEntityTest.java`
+
+```java
+package com.bnpp.pf.einvoice.connect.batch.entity;
+
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-class XmlInvoiceReaderTest {
-
-    @TempDir
-    Path tmp;
+class SupplierEntityTest {
 
     @Test
-    void setResource_storesBaseNameInExecutionContext() throws Exception {
-        // Arrange: minimal XML file
-        Path xmlFile = tmp.resolve("INV-123.xml");
-        String xml = """
-            <Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"
-                     xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">
-              <cbc:ID>INV-123</cbc:ID>
-            </Invoice>
-            """;
-        Files.writeString(xmlFile, xml);
+    void gettersAndSettersWork() {
+        SupplierEntity supplier = new SupplierEntity();
+        supplier.setId(1L);
+        supplier.setEnterpriseNumber("ENT-123");
+        supplier.setCompanyName("Alpha Ltd");
 
-        XmlInvoiceReader reader = new XmlInvoiceReader();
+        assertThat(supplier.getId()).isEqualTo(1L);
+        assertThat(supplier.getEnterpriseNumber()).isEqualTo("ENT-123");
+        assertThat(supplier.getCompanyName()).isEqualTo("Alpha Ltd");
+    }
 
-        // 🔑 Simulate a step execution context
-        JobExecution jobExecution = new JobExecution(1L);
-        StepExecution stepExecution = new StepExecution("testStep", jobExecution);
-        StepSynchronizationManager.register(new StepContext(stepExecution));
+    @Test
+    void equalityAndHashCodeBasedOnFields() {
+        SupplierEntity s1 = new SupplierEntity();
+        s1.setId(1L);
+        s1.setEnterpriseNumber("ENT-123");
+        s1.setCompanyName("Alpha");
 
-        try {
-            // Act
-            reader.setResource(new FileSystemResource(xmlFile.toFile()));
+        SupplierEntity s2 = new SupplierEntity();
+        s2.setId(1L);
+        s2.setEnterpriseNumber("ENT-123");
+        s2.setCompanyName("Alpha");
 
-            // Assert
-            assertThat(stepExecution.getExecutionContext().get("currentResourceBaseName"))
-                .isEqualTo("INV-123");
-        } finally {
-            // 🔑 Always clear the context to avoid leaks between tests
-            StepSynchronizationManager.close();
-        }
+        assertThat(s1).isEqualTo(s2);
+        assertThat(s1.hashCode()).isEqualTo(s2.hashCode());
+    }
+
+    @Test
+    void toStringIncludesFields() {
+        SupplierEntity supplier = new SupplierEntity();
+        supplier.setId(5L);
+        supplier.setEnterpriseNumber("E-5");
+        supplier.setCompanyName("Zeta Ltd");
+
+        assertThat(supplier.toString()).contains("E-5").contains("Zeta Ltd");
     }
 }
+```
 
+---
 
-Great 📸 — I see three new classes you want coverage for:
-	1.	XmlInvoiceReader (Spring Batch ResourceAwareItemReaderItemStream)
-	2.	SchedulerConfig (just holds cron expressions)
-	3.	CsvInvoiceGroup (a Lombok data holder DTO)
+## 2. `CosConfigTest.java`
 
-Here’s how to test them:
-
-⸻
-
-1. XmlInvoiceReaderTest.java
-
-We’ll simulate reading a minimal valid XML invoice file, check that setResource stores the base name in the execution context, and that read() unmarshals correctly.
-
-package com.bnpp.pf.einvoice.connect.batch.xml;
-
-import oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-import org.springframework.batch.item.ExecutionContext;
-import org.springframework.batch.item.xml.StaxEventItemReader;
-import org.springframework.core.io.FileSystemResource;
-
-import javax.xml.bind.JAXBContext;
-import javax.xml.bind.Marshaller;
-import java.io.File;
-import java.nio.file.Files;
-import java.nio.file.Path;
-
-import static org.assertj.core.api.Assertions.assertThat;
-
-class XmlInvoiceReaderTest {
-
-    @TempDir
-    Path tmp;
-
-    @Test
-    void setResource_storesBaseNameInExecutionContext() throws Exception {
-        // Arrange: create minimal invoice XML
-        Path xmlFile = tmp.resolve("INV-123.xml");
-        String xml = """
-            <Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2">
-              <cbc:ID xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">INV-123</cbc:ID>
-            </Invoice>
-            """;
-        Files.writeString(xmlFile, xml);
-
-        XmlInvoiceReader reader = new XmlInvoiceReader();
-        ExecutionContext ctx = new ExecutionContext();
-
-        // Act
-        reader.setResource(new FileSystemResource(xmlFile.toFile()));
-        reader.open(ctx);
-        InvoiceType invoice = reader.read();
-
-        // Assert
-        assertThat(invoice.getID().getValue()).isEqualTo("INV-123");
-        assertThat(ctx.containsKey("currentResourceBaseName")).isTrue();
-    }
-
-    @Test
-    void openAndClose_resetFlags() throws Exception {
-        XmlInvoiceReader reader = new XmlInvoiceReader();
-        ExecutionContext ctx = new ExecutionContext();
-        reader.open(ctx);
-        reader.close();
-        reader.update(ctx);
-        assertThat(ctx).isNotNull();
-    }
-}
-
-
-⸻
-
-2. SchedulerConfigTest.java
-
-Very simple: just inject fake values and assert getters work (Lombok’s @Getter).
-
-package com.bnpp.pf.einvoice.connect.batch.scheduler;
+```java
+package com.bnpp.pf.einvoice.connect.cos.config;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-class SchedulerConfigTest {
+class CosConfigTest {
 
     @Test
-    void cronValuesAreAccessible() {
-        SchedulerConfig config = new SchedulerConfig();
-        ReflectionTestUtils.setField(config, "xmlCron", "0 0 * * * *");
-        ReflectionTestUtils.setField(config, "csvCron", "0 */5 * * * *");
+    void gettersAndSettersWork() {
+        CosConfig config = new CosConfig();
+        config.setInstance("dev-instance");
+        config.setTimeOut(30);
 
-        assertThat(config.getXmlCron()).isEqualTo("0 0 * * * *");
-        assertThat(config.getCsvCron()).isEqualTo("0 */5 * * * *");
-    }
-}
-
-
-⸻
-
-3. CsvInvoiceGroupTest.java
-
-This is a Lombok DTO (@Data, @AllArgsConstructor). We test equals/hashCode/toString + constructor.
-
-package com.bnpp.pf.einvoice.connect.batch.csv;
-
-import org.junit.jupiter.api.Test;
-
-import java.util.List;
-
-import static org.assertj.core.api.Assertions.assertThat;
-
-class CsvInvoiceGroupTest {
-
-    @Test
-    void allArgsConstructorAndGettersWork() {
-        CsvInvoiceDto row = new CsvInvoiceDto();
-        row.setInvoiceId("INV-1");
-
-        CsvInvoiceGroup group = new CsvInvoiceGroup("INV-1", List.of(row));
-
-        assertThat(group.getInvoiceId()).isEqualTo("INV-1");
-        assertThat(group.getRows()).hasSize(1);
+        assertThat(config.getInstance()).isEqualTo("dev-instance");
+        assertThat(config.getTimeOut()).isEqualTo(30);
     }
 
     @Test
-    void equalsAndHashCodeConsiderInvoiceIdAndRows() {
-        CsvInvoiceDto row = new CsvInvoiceDto();
-        row.setInvoiceId("INV-2");
+    void reflectionCanSetComplexFields() {
+        CosConfig config = new CosConfig();
 
-        CsvInvoiceGroup g1 = new CsvInvoiceGroup("INV-2", List.of(row));
-        CsvInvoiceGroup g2 = new CsvInvoiceGroup("INV-2", List.of(row));
+        Bucket bucket = new Bucket(); // assuming Bucket is a simple POJO
+        Iam iam = new Iam();          // assuming Iam is a simple POJO
 
-        assertThat(g1).isEqualTo(g2);
-        assertThat(g1.hashCode()).isEqualTo(g2.hashCode());
-        assertThat(g1.toString()).contains("INV-2");
-    }
-}
+        ReflectionTestUtils.setField(config, "bucket", bucket);
+        ReflectionTestUtils.setField(config, "iam", iam);
 
-
-⸻
-
-✅ Coverage impact
-	•	XmlInvoiceReader: both setResource(...), read(), open(), close(), update().
-	•	SchedulerConfig: both cron fields covered.
-	•	CsvInvoiceGroup: constructor + Lombok-generated methods covered.
-
-⸻
-
-Do you want me to also add a negative test for XmlInvoiceReader.read() (e.g., invalid XML → should throw JAXB exception) so you hit the error branch too?
-
-
-
-
-package com.alphacredit.batch.pgp;
-
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-import org.springframework.test.util.ReflectionTestUtils;
-
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.Base64;
-
-import static org.assertj.core.api.Assertions.assertThat;
-
-class PGPConfigTest {
-
-    @TempDir
-    Path tmp;
-
-    @Test
-    void pgpEncryptBeanBuildsSuccessfully() throws Exception {
-        // Arrange
-        PGPConfig config = new PGPConfig();
-        // Dummy Base64 public key string (normally your .asc content)
-        String dummyKey = "-----BEGIN PGP PUBLIC KEY BLOCK-----\\nFAKEKEY\\n-----END PGP PUBLIC KEY BLOCK-----";
-        String encoded = Base64.getEncoder().encodeToString(dummyKey.getBytes(StandardCharsets.UTF_8));
-
-        ReflectionTestUtils.setField(config, "pgpPublicKey", encoded);
-
-        // Act
-        var pgpEncrypt = config.pgpEncrypt();
-
-        // Assert
-        assertThat(pgpEncrypt).isNotNull();
+        assertThat(config.getBucket()).isSameAs(bucket);
+        assertThat(config.getIam()).isSameAs(iam);
     }
 
     @Test
-    void pgpDecryptBeanBuildsSuccessfully() throws Exception {
-        // Arrange
-        PGPConfig config = new PGPConfig();
-        String dummyPrivKey = "-----BEGIN PGP PRIVATE KEY BLOCK-----\\nFAKEKEY\\n-----END PGP PRIVATE KEY BLOCK-----";
-        String encodedPriv = Base64.getEncoder().encodeToString(dummyPrivKey.getBytes(StandardCharsets.UTF_8));
-
-        ReflectionTestUtils.setField(config, "pgpPrivateKey", encodedPriv);
-        ReflectionTestUtils.setField(config, "privateKeyCred", "secret".toCharArray());
-
-        // Act
-        var pgpDecrypt = config.pgpDecrypt();
-
-        // Assert
-        assertThat(pgpDecrypt).isNotNull();
-    }
-
-    @Test
-    void convertStringToTempFile_createsAscFile() throws Exception {
-        // Arrange
-        PGPConfig config = new PGPConfig();
-        String key = "fake-key-content";
-
-        // Act
-        var file = config.convertStringToTempFile(key, tmp.resolve("test").toString());
-
-        // Assert
-        assertThat(file).exists();
-        assertThat(file.getName()).endsWith(".asc");
-        assertThat(Files.readString(file.toPath())).contains("fake-key-content");
-    }
-}
-
-
-
-
-Perfect 👌 — let’s add **JUnit 5** tests for the 3 big changes you just introduced:
-
-1. **Grouping reader** (rows with same `invoiceId` → `CsvInvoiceGroup`)
-2. **Mapper group methods** (`toInvoiceTypeGroup`, `toCreditNoteTypeGroup`)
-3. **Processor** (`CsvGroupToUblProcessor` → picks Invoice/CreditNote + marks self-billing)
-
-I’ll keep them lightweight but enough to catch regressions.
-
----
-
-## 1. GroupingCsvReaderTest
-
-```java
-@ExtendWith(MockitoExtension.class)
-class GroupingCsvReaderTest {
-
-  @Mock CsvInvoiceReader delegate; // your existing FlatFileItemReader
-  GroupingCsvReader reader;
-
-  @BeforeEach
-  void init() {
-    reader = new GroupingCsvReader(delegate);
-  }
-
-  @Test
-  void groupsRowsByInvoiceId() throws Exception {
-    CsvInvoiceDto r1 = new CsvInvoiceDto(); r1.setInvoiceNumber("INV-1");
-    CsvInvoiceDto r2 = new CsvInvoiceDto(); r2.setInvoiceNumber("INV-1");
-    CsvInvoiceDto r3 = new CsvInvoiceDto(); r3.setInvoiceNumber("INV-2");
-
-    when(delegate.read())
-        .thenReturn(r1)
-        .thenReturn(r2)
-        .thenReturn(r3)
-        .thenReturn(null);
-
-    CsvInvoiceGroup g1 = reader.read();
-    assertEquals("INV-1", g1.getInvoiceId());
-    assertEquals(2, g1.getRows().size());
-
-    CsvInvoiceGroup g2 = reader.read();
-    assertEquals("INV-2", g2.getInvoiceId());
-    assertEquals(1, g2.getRows().size());
-
-    assertNull(reader.read()); // end
-  }
-}
-```
-
----
-
-## 2. CsvInvoiceMapperGroupTest
-
-```java
-class CsvInvoiceMapperGroupTest {
-
-  // Use real MapStruct impl
-  private final CsvInvoiceMapper mapper = new CsvInvoiceMapperImpl();
-
-  @Test
-  void toInvoiceTypeGroup_addsAllLines() {
-    CsvInvoiceDto r1 = new CsvInvoiceDto(); r1.setInvoiceNumber("INV-1");
-    CsvInvoiceDto r2 = new CsvInvoiceDto(); r2.setInvoiceNumber("INV-1");
-    CsvInvoiceGroup group = new CsvInvoiceGroup("INV-1", List.of(r1, r2));
-
-    InvoiceType inv = mapper.toInvoiceTypeGroup(group);
-
-    assertEquals("INV-1", inv.getID().getValue());
-    assertEquals(2, inv.getInvoiceLine().size());
-  }
-
-  @Test
-  void toCreditNoteTypeGroup_addsAllLines() {
-    CsvInvoiceDto r1 = new CsvInvoiceDto(); r1.setInvoiceNumber("CN-9");
-    CsvInvoiceDto r2 = new CsvInvoiceDto(); r2.setInvoiceNumber("CN-9");
-    CsvInvoiceGroup group = new CsvInvoiceGroup("CN-9", List.of(r1, r2));
-
-    CreditNoteType cn = mapper.toCreditNoteTypeGroup(group);
-
-    assertEquals("CN-9", cn.getID().getValue());
-    assertEquals(2, cn.getCreditNoteLine().size());
-  }
-}
-```
-
----
-
-## 3. CsvGroupToUblProcessorTest
-
-```java
-@ExtendWith(MockitoExtension.class)
-class CsvGroupToUblProcessorTest {
-
-  @Mock CsvInvoiceMapper mapper;
-  @InjectMocks CsvGroupToUblProcessor processor;
-
-  SelfBillingRegistry registry = new SelfBillingRegistry();
-
-  @BeforeEach
-  void injectRegistry() throws Exception {
-    Field f = CsvGroupToUblProcessor.class.getDeclaredField("selfBillingRegistry");
-    f.setAccessible(true);
-    f.set(processor, registry);
-  }
-
-  @Test
-  void code380_mapsInvoice_notSelfBilling() throws Exception {
-    CsvInvoiceDto dto = new CsvInvoiceDto(); dto.setInvoiceTypeCode("380");
-    CsvInvoiceGroup group = new CsvInvoiceGroup("INV-1", List.of(dto));
-
-    InvoiceType inv = new InvoiceType();
-    when(mapper.toInvoiceTypeGroup(group)).thenReturn(inv);
-
-    Object out = processor.process(group);
-
-    assertSame(inv, out);
-    assertFalse(registry.isSelfBilling(inv));
-  }
-
-  @Test
-  void code381_mapsCreditNote_notSelfBilling() throws Exception {
-    CsvInvoiceDto dto = new CsvInvoiceDto(); dto.setInvoiceTypeCode("381");
-    CsvInvoiceGroup group = new CsvInvoiceGroup("CN-1", List.of(dto));
-
-    CreditNoteType cn = new CreditNoteType();
-    when(mapper.toCreditNoteTypeGroup(group)).thenReturn(cn);
-
-    Object out = processor.process(group);
-
-    assertSame(cn, out);
-    assertFalse(registry.isSelfBilling(cn));
-  }
-
-  @Test
-  void code389_invoice_selfBilling() throws Exception {
-    CsvInvoiceDto dto = new CsvInvoiceDto(); dto.setInvoiceTypeCode("389");
-    CsvInvoiceGroup group = new CsvInvoiceGroup("INV-SB", List.of(dto));
-
-    InvoiceType inv = new InvoiceType();
-    when(mapper.toInvoiceTypeGroup(group)).thenReturn(inv);
-
-    Object out = processor.process(group);
-
-    assertSame(inv, out);
-    assertTrue(registry.isSelfBilling(inv));
-  }
-
-  @Test
-  void code261_creditNote_selfBilling() throws Exception {
-    CsvInvoiceDto dto = new CsvInvoiceDto(); dto.setInvoiceTypeCode("261");
-    CsvInvoiceGroup group = new CsvInvoiceGroup("CN-SB", List.of(dto));
-
-    CreditNoteType cn = new CreditNoteType();
-    when(mapper.toCreditNoteTypeGroup(group)).thenReturn(cn);
-
-    Object out = processor.process(group);
-
-    assertSame(cn, out);
-    assertTrue(registry.isSelfBilling(cn));
-  }
-}
-```
-
----
-
-✅ These tests cover:
-
-* **Reader**: properly groups rows by `invoiceId`.
-* **Mapper**: group methods produce one Invoice/CreditNote with multiple lines.
-* **Processor**: routes to correct mapper and sets self-billing flag.
-
----
-
-👉 Do you want me to also add a **writer test** that proves a self-billing invoice/credit note actually lands under the `sb/` folder (instead of `miles/finance`)?
-
-
-
-gpg --import my-public.asc
-gpg --import my-private.asc
-
-# Verify
-gpg --list-keys
-gpg --list-secret-keys
-
-# Encrypt for recipient (public key required)
-gpg --output secret.txt.pgp --encrypt --recipient recipient@example.com secret.txt
-# Decrypt back into plaintext
-gpg --output secret.txt --decrypt secret.txt.pgp
-
-
-
-
-Exactly 👍 — you’ve already done the hard part once: your CsvInvoiceMapper maps those 78+ flat CSV columns into all the header-level fields of a InvoiceType (or CreditNoteType): supplier, customer, amounts, tax totals, references, etc.
-
-When you move to grouping, the good news is:
-	•	Header-level fields (those 78 columns that are per-invoice) still map once, using any of the rows in the group (they all have the same invoiceId).
-	•	Line-level fields (quantity, description, price, etc.) need to be mapped for each row, and accumulated into the invoice’s InvoiceLine or CreditNoteLine.
-
-⸻
-
-How to reuse your existing mapper with 78+ columns
-	1.	Split responsibilities:
-	•	Keep a method that maps a single CsvInvoiceDto into all header fields of InvoiceType.
-	•	Keep/reuse your existing line mapper (CsvInvoiceDto → InvoiceLineType).
-	2.	Create a new group-level mapping:
-	•	Take the CsvInvoiceGroup (rows with the same invoiceId).
-	•	Use the first row (or any, since headers are duplicated) to fill in the header fields.
-	•	Collect all rows → InvoiceLineType list.
-
-⸻
-
-Mapper sketch
-
-@Mapper(componentModel = "spring", builder = @Builder(disableBuilder = true))
-public interface CsvInvoiceMapper {
-
-    // --- 1) Existing row → header mapping (78+ columns used here)
-    @Mapping(target = "ID", expression = "java(toID(dto.getInvoiceNumber()))")
-    @Mapping(target = "AccountingSupplierParty", expression = "java(toSupplier(dto))")
-    @Mapping(target = "AccountingCustomerParty", expression = "java(toCustomer(dto))")
-    @Mapping(target = "TaxTotal", expression = "java(toTaxTotal(dto))")
-    @Mapping(target = "LegalMonetaryTotal", expression = "java(toTotals(dto))")
-    // ... and the rest of your 78 column mappings
-    InvoiceType toInvoiceHeader(CsvInvoiceDto dto);
-
-    // --- 2) Row → line (just line-level columns)
-    default InvoiceLineType toInvoiceLine(CsvInvoiceDto dto) {
-        InvoiceLineType line = new InvoiceLineType();
-        // map lineId, quantity, price, description, tax per line, etc.
-        return line;
-    }
-
-    // --- 3) Group → InvoiceType
-    default InvoiceType toInvoiceType(CsvInvoiceGroup group) {
-        // use first row for header fields
-        CsvInvoiceDto first = group.getRows().get(0);
-        InvoiceType invoice = toInvoiceHeader(first);
-
-        // collect all lines
-        List<InvoiceLineType> lines = new ArrayList<>();
-        for (CsvInvoiceDto row : group.getRows()) {
-            lines.add(toInvoiceLine(row));
-        }
-        invoice.getInvoiceLine().addAll(lines);
-
-        return invoice;
-    }
-
-    // helper for ID
-    default IDType toID(String value) {
-        IDType id = new IDType();
-        id.setValue(value);
-        return id;
-    }
-}
-
-
-⸻
-
-Credit notes (same principle)
-
-default CreditNoteType toCreditNoteType(CsvInvoiceGroup group) {
-    CsvInvoiceDto first = group.getRows().get(0);
-    CreditNoteType credit = toCreditNoteHeader(first);
-
-    List<CreditNoteLineType> lines = new ArrayList<>();
-    for (CsvInvoiceDto row : group.getRows()) {
-        lines.add(toCreditNoteLine(row));
-    }
-    credit.getCreditNoteLine().addAll(lines);
-
-    return credit;
-}
-
-
-⸻
-
-✅ Why this works
-	•	You don’t duplicate 78 mappings: you still map a single row to headers.
-	•	You simply change the entry point: instead of mapping a row, you map a group, and delegate to the existing header and line mappers.
-	•	All the per-invoice fields (currency, totals, parties, etc.) come from the first row, so they’re consistent.
-	•	All the per-line fields (price, qty, item) come from every row.
-
-⸻
-
-👉 Do you want me to draft the exact update to your current CsvInvoiceMapper so it has both the “row → header” mapping (with all 78 fields) and the “group → invoice” wrapper, so you can drop it straight in without rewriting those 78 lines?
-
-
-
-
-
-
-
-
-
-That’s a great detail 👍 — your current `CsvInvoiceReader` is already doing the **low-level CSV parsing** (`DelimitedLineTokenizer`, `SmartCsvInvoiceFieldSetMapper`, etc.). You don’t need to throw that away.
-
-👉 The trick is: keep your existing `CsvInvoiceReader` *as-is* (so you still get 1 `CsvInvoiceDto` per row), and **wrap it** in a “grouping reader” that combines consecutive rows with the same `invoiceId`.
-
----
-
-## How it looks
-
-```
-CsvInvoiceReader (your class)
-        ↓  (1 CsvInvoiceDto per row)
-GroupingCsvReader (new wrapper)
-        ↓  (CsvInvoiceGroup per invoiceId)
-Processor (CsvInvoiceGroup → InvoiceType with many lines)
-        ↓
-XML Writer
-```
-
----
-
-## 1. Grouping wrapper around your reader
-
-```java
-@Component
-@StepScope
-public class GroupingCsvReader implements ItemReader<CsvInvoiceGroup>, ResourceAwareItemReaderItemStream<CsvInvoiceGroup> {
-
-    private final CsvInvoiceReader delegate; // your existing reader
-    private CsvInvoiceDto buffer;
-    private Resource resource;
-
-    public GroupingCsvReader(CsvInvoiceReader delegate) {
-        this.delegate = delegate;
-    }
-
-    @Override
-    public void setResource(Resource resource) {
-        this.resource = resource;
-        delegate.setResource(resource); // forward to your current reader
-    }
-
-    @Override
-    public CsvInvoiceGroup read() throws Exception {
-        List<CsvInvoiceDto> group = new ArrayList<>();
-        CsvInvoiceDto first = (buffer != null) ? buffer : delegate.read();
-        buffer = null;
-        if (first == null) return null;
-
-        String invoiceId = first.getInvoiceNumber();
-        group.add(first);
-
-        CsvInvoiceDto next;
-        while ((next = delegate.read()) != null) {
-            if (!invoiceId.equals(next.getInvoiceNumber())) {
-                buffer = next; // save for next call
-                break;
-            }
-            group.add(next);
-        }
-
-        return new CsvInvoiceGroup(invoiceId, group);
-    }
-
-    @Override
-    public void open(ExecutionContext executionContext) throws ItemStreamException {
-        delegate.open(executionContext);
-    }
-
-    @Override
-    public void update(ExecutionContext executionContext) throws ItemStreamException {
-        delegate.update(executionContext);
-    }
-
-    @Override
-    public void close() throws ItemStreamException {
-        delegate.close();
+    void toStringEqualsHashCodeWork() {
+        CosConfig c1 = new CosConfig();
+        c1.setInstance("A");
+        c1.setTimeOut(5);
+
+        CosConfig c2 = new CosConfig();
+        c2.setInstance("A");
+        c2.setTimeOut(5);
+
+        assertThat(c1).isEqualTo(c2);
+        assertThat(c1.hashCode()).isEqualTo(c2.hashCode());
+        assertThat(c1.toString()).contains("A");
     }
 }
 ```
 
 ---
 
-## 2. CsvInvoiceGroup DTO
+### ✅ What this covers
 
-```java
-@Data
-@AllArgsConstructor
-public class CsvInvoiceGroup {
-    private String invoiceId;
-    private List<CsvInvoiceDto> rows;
-}
-```
+* **SupplierEntity**: all Lombok-generated getters/setters, `equals`, `hashCode`, `toString`.
+* **CosConfig**: getters/setters, reflection injection for `bucket` + `iam`, equality/hashCode/toString.
 
 ---
 
-## 3. Processor: group → InvoiceType
-
-```java
-@Component
-@RequiredArgsConstructor
-public class CsvGroupToInvoiceProcessor implements ItemProcessor<CsvInvoiceGroup, InvoiceType> {
-
-    private final CsvInvoiceMapper mapper;
-
-    @Override
-    public InvoiceType process(CsvInvoiceGroup group) {
-        return mapper.toInvoiceType(group);
-    }
-}
-```
-
----
-
-## 4. Mapper update
-
-```java
-@Mapper(componentModel = "spring")
-public interface CsvInvoiceMapper {
-
-    @Mapping(target = "ID", expression = "java(toID(group.getInvoiceId()))")
-    @Mapping(target = "invoiceLine", expression = "java(toInvoiceLines(group.getRows()))")
-    InvoiceType toInvoiceType(CsvInvoiceGroup group);
-
-    default List<InvoiceLineType> toInvoiceLines(List<CsvInvoiceDto> rows) {
-        List<InvoiceLineType> lines = new ArrayList<>();
-        for (CsvInvoiceDto row : rows) {
-            InvoiceLineType line = new InvoiceLineType();
-            // map row → line fields here
-            lines.add(line);
-        }
-        return lines;
-    }
-
-    default IDType toID(String id) {
-        IDType t = new IDType();
-        t.setValue(id);
-        return t;
-    }
-}
-```
-
----
-
-## 5. Step wiring
-
-Instead of wiring your old `CsvInvoiceReader` directly:
-
-```java
-@Bean
-public Step csvToXmlStep(GroupingCsvReader reader,
-                         CsvGroupToInvoiceProcessor processor,
-                         XMLInvoiceWriter writer) {
-    return stepBuilderFactory.get("csvToXmlStep")
-        .<CsvInvoiceGroup, InvoiceType>chunk(50)
-        .reader(reader)
-        .processor(processor)
-        .writer(writer)
-        .build();
-}
-```
-
----
-
-✅ This way you don’t lose your tokenizer/line-mapper logic — your `CsvInvoiceReader` still produces `CsvInvoiceDto` per row.
-✅ The wrapper groups them into invoices before mapping.
-✅ One invoice ID = one XML with multiple `<InvoiceLine>` entries.
-
----
-
-Do you want me to also show the **CreditNote variant** (same grouping, but `CreditNoteLineType` instead of `InvoiceLineType`), since you’ve already got `InvoiceTypeCode` deciding between the two?
+👉 Do you also want me to add **negative tests** (e.g. `equals` with different values, `null` checks) to hit more branches in Lombok-generated methods?
