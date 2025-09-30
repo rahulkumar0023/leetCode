@@ -1,13 +1,13 @@
-Perfect 👌 — now I see two more classes you’d like to cover with tests:
+You’re right — those assertions only pass if your classes implement **value-based equality**.
+Right now `SupplierEntity` and `CosConfig` only have `@Getter/@Setter`, so they inherit `Object.equals/hashCode` (identity). Two different instances → **not equal**, and hash codes usually differ.
 
-1. **`SupplierEntity`** (a JPA entity with Lombok getters/setters)
-2. **`CosConfig`** (a Spring `@ConfigurationProperties` bean with Lombok)
-
-Since you asked earlier to avoid `@SpringBootTest`, we’ll keep these tests plain **JUnit 5**, with **ReflectionTestUtils** (or direct setters) to validate behavior.
+Below are two ways forward. I’ll default to **fixing the tests** to match current code (identity semantics). If you want value-based equality instead, I’ve added the exact Lombok changes + matching tests too.
 
 ---
 
-## 1. `SupplierEntityTest.java`
+# A) Keep current code (identity equality) — ✅ revised tests
+
+## `SupplierEntityTest.java`
 
 ```java
 package com.bnpp.pf.einvoice.connect.batch.entity;
@@ -20,47 +20,41 @@ class SupplierEntityTest {
 
     @Test
     void gettersAndSettersWork() {
-        SupplierEntity supplier = new SupplierEntity();
-        supplier.setId(1L);
-        supplier.setEnterpriseNumber("ENT-123");
-        supplier.setCompanyName("Alpha Ltd");
+        SupplierEntity s = new SupplierEntity();
+        s.setId(1L);
+        s.setEnterpriseNumber("ENT-123");
+        s.setCompanyName("Alpha Ltd");
 
-        assertThat(supplier.getId()).isEqualTo(1L);
-        assertThat(supplier.getEnterpriseNumber()).isEqualTo("ENT-123");
-        assertThat(supplier.getCompanyName()).isEqualTo("Alpha Ltd");
+        assertThat(s.getId()).isEqualTo(1L);
+        assertThat(s.getEnterpriseNumber()).isEqualTo("ENT-123");
+        assertThat(s.getCompanyName()).isEqualTo("Alpha Ltd");
     }
 
     @Test
-    void equalityAndHashCodeBasedOnFields() {
+    void equalsIsIdentity_basedOnObjectImplementation() {
         SupplierEntity s1 = new SupplierEntity();
-        s1.setId(1L);
         s1.setEnterpriseNumber("ENT-123");
-        s1.setCompanyName("Alpha");
 
         SupplierEntity s2 = new SupplierEntity();
-        s2.setId(1L);
         s2.setEnterpriseNumber("ENT-123");
-        s2.setCompanyName("Alpha");
 
-        assertThat(s1).isEqualTo(s2);
-        assertThat(s1.hashCode()).isEqualTo(s2.hashCode());
+        // identity semantics
+        assertThat(s1).isNotEqualTo(s2);
+        assertThat(s1).isEqualTo(s1);
+        assertThat(s1).isNotEqualTo(null);
     }
 
     @Test
-    void toStringIncludesFields() {
-        SupplierEntity supplier = new SupplierEntity();
-        supplier.setId(5L);
-        supplier.setEnterpriseNumber("E-5");
-        supplier.setCompanyName("Zeta Ltd");
-
-        assertThat(supplier.toString()).contains("E-5").contains("Zeta Ltd");
+    void toStringContainsFields() {
+        SupplierEntity s = new SupplierEntity();
+        s.setEnterpriseNumber("E-5");
+        s.setCompanyName("Zeta Ltd");
+        assertThat(s.toString()).contains("E-5").contains("Zeta Ltd");
     }
 }
 ```
 
----
-
-## 2. `CosConfigTest.java`
+## `CosConfigTest.java`
 
 ```java
 package com.bnpp.pf.einvoice.connect.cos.config;
@@ -74,43 +68,124 @@ class CosConfigTest {
 
     @Test
     void gettersAndSettersWork() {
-        CosConfig config = new CosConfig();
-        config.setInstance("dev-instance");
-        config.setTimeOut(30);
-
-        assertThat(config.getInstance()).isEqualTo("dev-instance");
-        assertThat(config.getTimeOut()).isEqualTo(30);
+        CosConfig c = new CosConfig();
+        c.setInstance("dev-instance");
+        c.setTimeOut(30);
+        assertThat(c.getInstance()).isEqualTo("dev-instance");
+        assertThat(c.getTimeOut()).isEqualTo(30);
     }
 
     @Test
-    void reflectionCanSetComplexFields() {
-        CosConfig config = new CosConfig();
-
-        Bucket bucket = new Bucket(); // assuming Bucket is a simple POJO
-        Iam iam = new Iam();          // assuming Iam is a simple POJO
-
-        ReflectionTestUtils.setField(config, "bucket", bucket);
-        ReflectionTestUtils.setField(config, "iam", iam);
-
-        assertThat(config.getBucket()).isSameAs(bucket);
-        assertThat(config.getIam()).isSameAs(iam);
+    void complexFieldsViaReflection() {
+        CosConfig c = new CosConfig();
+        Object bucket = new Object(); // replace with real Bucket if available
+        Object iam = new Object();    // replace with real Iam if available
+        ReflectionTestUtils.setField(c, "bucket", bucket);
+        ReflectionTestUtils.setField(c, "iam", iam);
+        assertThat(c.getBucket()).isSameAs(bucket);
+        assertThat(c.getIam()).isSameAs(iam);
     }
 
     @Test
-    void toStringEqualsHashCodeWork() {
+    void equalsIsIdentity_andToStringHasUsefulInfo() {
         CosConfig c1 = new CosConfig();
-        c1.setInstance("A");
-        c1.setTimeOut(5);
+        c1.setInstance("A"); c1.setTimeOut(5);
 
         CosConfig c2 = new CosConfig();
-        c2.setInstance("A");
-        c2.setTimeOut(5);
+        c2.setInstance("A"); c2.setTimeOut(5);
 
-        assertThat(c1).isEqualTo(c2);
-        assertThat(c1.hashCode()).isEqualTo(c2.hashCode());
+        // object identity semantics
+        assertThat(c1).isNotEqualTo(c2);
+        assertThat(c1).isEqualTo(c1);
         assertThat(c1.toString()).contains("A");
     }
 }
+```
+
+These tests won’t assert hash equality/inequality (since `Object.hashCode()` is identity-based and not something we should rely on deterministically across JVMs). They still give you coverage for the class behavior you actually have.
+
+---
+
+# B) If you **want value-based equality** (optional) — change Lombok + tests
+
+## Production changes
+
+### For JPA entities (recommended pattern)
+
+Use a stable, unique business key (you already have `enterprise_number UNIQUE`), not the generated `id`:
+
+```java
+import lombok.EqualsAndHashCode;
+
+@Entity
+@Table(name = "suppliers")
+@Getter @Setter
+@EqualsAndHashCode(onlyExplicitlyIncluded = true)
+public class SupplierEntity {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @EqualsAndHashCode.Include
+    @Column(name = "enterprise_number", nullable = false, unique = true)
+    private String enterpriseNumber;
+
+    @Column(name = "company_name")
+    private String companyName;
+}
+```
+
+### For `CosConfig`
+
+If you want simple value equality over its fields:
+
+```java
+import lombok.Data;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+@ConfigurationProperties(prefix = "cos")
+@Data // generates getters, setters, equals, hashCode, toString
+public class CosConfig {
+    private String instance;
+    private Bucket bucket;
+    private Iam iam;
+    private int timeOut;
+}
+```
+
+## Matching tests (when value-based equality is enabled)
+
+```java
+// SupplierEntity equality by enterpriseNumber
+@Test
+void supplierEqualityByBusinessKey() {
+    SupplierEntity a = new SupplierEntity(); a.setEnterpriseNumber("ENT-123");
+    SupplierEntity b = new SupplierEntity(); b.setEnterpriseNumber("ENT-123");
+    assertThat(a).isEqualTo(b);
+    assertThat(a.hashCode()).isEqualTo(b.hashCode());
+}
+
+// CosConfig value-based equality
+@Test
+void cosConfigValueEquality() {
+    CosConfig c1 = new CosConfig(); c1.setInstance("A"); c1.setTimeOut(5);
+    CosConfig c2 = new CosConfig(); c2.setInstance("A"); c2.setTimeOut(5);
+    assertThat(c1).isEqualTo(c2);
+    assertThat(c1.hashCode()).isEqualTo(c2.hashCode());
+}
+```
+
+---
+
+## Which should you pick?
+
+* If you don’t want to modify production code right now, **use option A** (updated tests).
+* If equality by content is desired (often useful for DTO/configs; for JPA be careful), **use option B**, with the JPA-friendly `@EqualsAndHashCode` approach on `SupplierEntity`.
+
+If you tell me which route you prefer, I can adjust the rest of your suite in the same style.
+
 ```
 
 ---
