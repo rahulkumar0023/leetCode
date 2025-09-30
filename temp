@@ -188,6 +188,92 @@ If you tell me which route you prefer, I can adjust the rest of your suite in th
 
 ```
 
+These tests won’t assert hash equality/inequality (since `Object.hashCode()` is identity-based and not something we should rely on deterministically across JVMs). They still give you coverage for the class behavior you actually have.
+
+---
+
+# B) If you **want value-based equality** (optional) — change Lombok + tests
+
+## Production changes
+
+### For JPA entities (recommended pattern)
+
+Use a stable, unique business key (you already have `enterprise_number UNIQUE`), not the generated `id`:
+
+```java
+import lombok.EqualsAndHashCode;
+
+@Entity
+@Table(name = "suppliers")
+@Getter @Setter
+@EqualsAndHashCode(onlyExplicitlyIncluded = true)
+public class SupplierEntity {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @EqualsAndHashCode.Include
+    @Column(name = "enterprise_number", nullable = false, unique = true)
+    private String enterpriseNumber;
+
+    @Column(name = "company_name")
+    private String companyName;
+}
+```
+
+### For `CosConfig`
+
+If you want simple value equality over its fields:
+
+```java
+import lombok.Data;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+@ConfigurationProperties(prefix = "cos")
+@Data // generates getters, setters, equals, hashCode, toString
+public class CosConfig {
+    private String instance;
+    private Bucket bucket;
+    private Iam iam;
+    private int timeOut;
+}
+```
+
+## Matching tests (when value-based equality is enabled)
+
+```java
+// SupplierEntity equality by enterpriseNumber
+@Test
+void supplierEqualityByBusinessKey() {
+    SupplierEntity a = new SupplierEntity(); a.setEnterpriseNumber("ENT-123");
+    SupplierEntity b = new SupplierEntity(); b.setEnterpriseNumber("ENT-123");
+    assertThat(a).isEqualTo(b);
+    assertThat(a.hashCode()).isEqualTo(b.hashCode());
+}
+
+// CosConfig value-based equality
+@Test
+void cosConfigValueEquality() {
+    CosConfig c1 = new CosConfig(); c1.setInstance("A"); c1.setTimeOut(5);
+    CosConfig c2 = new CosConfig(); c2.setInstance("A"); c2.setTimeOut(5);
+    assertThat(c1).isEqualTo(c2);
+    assertThat(c1.hashCode()).isEqualTo(c2.hashCode());
+}
+```
+
+---
+
+## Which should you pick?
+
+* If you don’t want to modify production code right now, **use option A** (updated tests).
+* If equality by content is desired (often useful for DTO/configs; for JPA be careful), **use option B**, with the JPA-friendly `@EqualsAndHashCode` approach on `SupplierEntity`.
+
+If you tell me which route you prefer, I can adjust the rest of your suite in the same style.
+
+```
+
 ---
 
 ### ✅ What this covers
