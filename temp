@@ -1,3 +1,97 @@
+Perfect 👍 now you’ve got your `/processed` directory populated with the actual files you moved in there (inputs after fetch, outputs after upload).
+
+To delete them only **if the batch job completed successfully**, the cleanest way is to use a **JobExecutionListener** that fires after the job ends:
+
+---
+
+## ✅ Listener-based cleanup
+
+```java
+@Component
+@RequiredArgsConstructor
+public class CosProcessedCleanupListener implements JobExecutionListener {
+
+    private final CosStorageService cos;
+
+    @Value("${cos.bucket}")
+    private String bucket;
+
+    @Value("${cos.processed-prefix:processed/}")
+    private String processedPrefix;
+
+    @Override
+    public void afterJob(JobExecution jobExecution) {
+        if (jobExecution.getStatus() == BatchStatus.COMPLETED) {
+            // list all objects under processed/ and delete
+            List<String> keys = cos.listKeys(bucket, processedPrefix);
+            keys.forEach(k -> cos.deleteObject(bucket, k));
+        } else {
+            // optional: leave processed/ intact for debugging
+            log.warn("Job failed, keeping files in {}/{}", bucket, processedPrefix);
+        }
+    }
+}
+```
+
+---
+
+## ✅ Service methods in your `CosStorageService`
+
+```java
+public List<String> listKeys(String bucket, String prefix) {
+    List<String> keys = new ArrayList<>();
+    ObjectListing listing = s3Client.listObjects(bucket, prefix);
+    while (true) {
+        for (S3ObjectSummary s : listing.getObjectSummaries()) {
+            keys.add(s.getKey());
+        }
+        if (listing.isTruncated()) {
+            listing = s3Client.listNextBatchOfObjects(listing);
+        } else break;
+    }
+    return keys;
+}
+
+public void deleteObject(String bucket, String key) {
+    s3Client.deleteObject(bucket, key);
+}
+```
+
+---
+
+## ✅ Wiring it into your job
+
+In your job config:
+
+```java
+@Bean
+public Job invoiceJob(JobRepository repo, PlatformTransactionManager tx,
+                      Step fetchStep, Step processStep, Step uploadStep,
+                      CosProcessedCleanupListener cleanupListener) {
+    return new JobBuilder("invoiceJob", repo)
+        .listener(cleanupListener)  // attach listener here
+        .start(fetchStep)
+        .next(processStep)
+        .next(uploadStep)
+        .build();
+}
+```
+
+---
+
+### 🔑 Advantages
+
+* Deletes only if the job `COMPLETED`.
+* Leaves files if the job `FAILED` (so you can debug).
+* No need to pass filenames around in execution context — it just wipes the whole `processed/` prefix when successful.
+
+---
+
+👉 Do you want me to adapt this so it **only deletes the specific keys your tasklets recorded in ExecutionContext** (instead of scanning all of `processed/`)? That’s safer if multiple jobs run in parallel.
+
+
+
+
 You’re right — those assertions only pass if your classes implement **value-based equality**.
 Right now `SupplierEntity` and `CosConfig` only have `@Getter/@Setter`, so they inherit `Object.equals/hashCode` (identity). Two different instances → **not equal**, and hash codes usually differ.
 
