@@ -1,3 +1,117 @@
+
+
+Awesome 🎉 — that’s the cleanest setup:
+
+* **One reader** that looks at the XML root and unmarshals into either `InvoiceType` or `CreditNoteType`.
+* **One step**, with a `ClassifierCompositeItemWriter<Object>` to delegate to your `XMLInvoiceWriter` and `XMLCreditNoteWriter`.
+
+---
+
+## ✅ Reader (polymorphic)
+
+```java
+@Component
+@StepScope
+public class UblXmlReader implements ItemReader<Object> {
+
+    private final Iterator<Resource> files;
+
+    public UblXmlReader(@Value("#{jobParameters['inputFiles']}") List<Resource> resources) {
+        this.files = resources.iterator();
+    }
+
+    @Override
+    public Object read() throws Exception {
+        if (!files.hasNext()) return null;
+
+        Resource res = files.next();
+
+        try (InputStream in = res.getInputStream()) {
+            XMLStreamReader xsr = XMLInputFactory.newFactory().createXMLStreamReader(in);
+            xsr.nextTag(); // advance to root element
+            String root = xsr.getLocalName();
+
+            if ("Invoice".equals(root)) {
+                JAXBContext ctx = JAXBContext.newInstance(
+                        oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType.class);
+                return ctx.createUnmarshaller().unmarshal(res.getFile(), 
+                        oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType.class).getValue();
+            } else if ("CreditNote".equals(root)) {
+                JAXBContext ctx = JAXBContext.newInstance(
+                        oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType.class);
+                return ctx.createUnmarshaller().unmarshal(res.getFile(), 
+                        oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType.class).getValue();
+            } else {
+                throw new IllegalArgumentException("Unsupported UBL root element: " + root);
+            }
+        }
+    }
+}
+```
+
+---
+
+## ✅ Writer (classifier)
+
+```java
+@Configuration
+public class WriterConfig {
+
+    @Bean
+    @StepScope
+    @SuppressWarnings("unchecked")
+    public ClassifierCompositeItemWriter<Object> ublClassifierWriter(
+            XMLInvoiceWriter invoiceWriter,
+            XMLCreditNoteWriter creditNoteWriter) {
+
+        ClassifierCompositeItemWriter<Object> cw = new ClassifierCompositeItemWriter<>();
+
+        cw.setClassifier(item -> {
+            if (item instanceof oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType) {
+                return (ItemWriter<Object>) (ItemWriter<?>) invoiceWriter;
+            } else if (item instanceof oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType) {
+                return (ItemWriter<Object>) (ItemWriter<?>) creditNoteWriter;
+            } else {
+                throw new IllegalArgumentException("Unsupported type: " + item.getClass());
+            }
+        });
+
+        return cw;
+    }
+}
+```
+
+---
+
+## ✅ Step wiring
+
+```java
+@Bean
+public Step xmlInvoiceStep(JobRepository repo,
+                           PlatformTransactionManager tx,
+                           UblXmlReader reader,
+                           ClassifierCompositeItemWriter<Object> writer) {
+
+    return new StepBuilder("xmlInvoiceStep", repo)
+            .<Object, Object>chunk(10, tx)
+            .reader(reader)
+            .writer(writer)
+            .build();
+}
+```
+
+---
+
+### 🚀 Flow
+
+1. Reader peeks at XML root → produces `InvoiceType` or `CreditNoteType`.
+2. Classifier writer checks instance type → routes to correct concrete writer.
+3. You keep **specialized writer logic** (file naming, grouping, etc.) but have **only one step** to maintain.
+
+---
+
+👉 Do you want me to also give you a **JUnit test** that feeds two XML files (one invoice, one credit note) into this step and proves they get routed to the right writer?
+
 Perfect 👍 now you’ve got your `/processed` directory populated with the actual files you moved in there (inputs after fetch, outputs after upload).
 
 To delete them only **if the batch job completed successfully**, the cleanest way is to use a **JobExecutionListener** that fires after the job ends:
