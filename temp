@@ -1,5 +1,102 @@
 
 
+Thanks for sharing the screenshot 🙌 — I see your current `XmlInvoiceReader` is:
+
+* `implements ResourceAwareItemReaderItemStream<InvoiceType>`
+* Hard-wired to **InvoiceType only**
+* Always unmarshals into `InvoiceType` via `JAXBElement<InvoiceType>`
+
+That’s why you can’t reuse it for credit notes — it assumes the XML root is `<Invoice>`.
+
+---
+
+### ✅ How to evolve this reader
+
+Since UBL XMLs can be `<Invoice>` **or** `<CreditNote>`, you can generalize your reader:
+
+1. **Return `Object`** (instead of `InvoiceType` only).
+2. Peek at the XML root element first.
+3. Choose the right JAXB context (`InvoiceType.class` or `CreditNoteType.class`).
+4. Unmarshal accordingly.
+
+---
+
+### 🔄 Refactored Reader
+
+```java
+@Component
+@Slf4j
+@StepScope
+public class UblXmlReader implements ResourceAwareItemReaderItemStream<Object> {
+
+    private Resource resource;
+    private boolean alreadyRead = false;
+
+    @Override
+    public void setResource(Resource resource) {
+        log.debug("UblXmlReader.setResource started: {}", resource);
+        this.resource = resource;
+        this.alreadyRead = false;
+        log.debug("UblXmlReader.setResource completed");
+    }
+
+    @Override
+    public Object read() throws Exception {
+        log.info("UblXmlReader.read started");
+        if (resource == null || alreadyRead) {
+            return null;
+        }
+
+        try (InputStream in = resource.getInputStream()) {
+            alreadyRead = true;
+
+            XMLStreamReader xsr = XMLInputFactory.newFactory().createXMLStreamReader(in);
+            xsr.nextTag(); // advance to root element
+            String root = xsr.getLocalName();
+            log.debug("Root element detected: {}", root);
+
+            if ("Invoice".equals(root)) {
+                JAXBContext ctx = JAXBContext.newInstance(
+                        oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType.class);
+                return ctx.createUnmarshaller()
+                          .unmarshal(resource.getFile(), 
+                                     oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType.class)
+                          .getValue();
+            } else if ("CreditNote".equals(root)) {
+                JAXBContext ctx = JAXBContext.newInstance(
+                        oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType.class);
+                return ctx.createUnmarshaller()
+                          .unmarshal(resource.getFile(), 
+                                     oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType.class)
+                          .getValue();
+            } else {
+                throw new IllegalArgumentException("Unsupported UBL root element: " + root);
+            }
+        }
+    }
+
+    @Override
+    public void open(ExecutionContext executionContext) { }
+    @Override
+    public void update(ExecutionContext executionContext) { }
+    @Override
+    public void close() { }
+}
+```
+
+---
+
+### ✅ Why this works
+
+* Handles **both Invoices and Credit Notes** in one place.
+* Returns `Object` → later routed to the correct writer by your `ClassifierCompositeItemWriter`.
+* Still supports Spring Batch `MultiResourceItemReader` (since it implements `ResourceAwareItemReaderItemStream`).
+
+---
+
+👉 Do you want me to also show you the **JUnit test** for this reader that feeds it an `Invoice.xml` and `CreditNote.xml` and asserts the correct object type comes out? That will give you confidence before wiring into the step.
+
+
 Awesome 🎉 — that’s the cleanest setup:
 
 * **One reader** that looks at the XML root and unmarshals into either `InvoiceType` or `CreditNoteType`.
