@@ -1,4 +1,87 @@
 
+Perfect 👍 — I see your CosProcessedCleanupListener implementation. You want to add JUnit coverage for it. Let’s do that.
+
+⸻
+
+✅ What we’ll test
+	1.	When job COMPLETED → it should call cos.listKeys() and cos.deleteFile() for each key.
+	2.	When job FAILED → it should not call cos.deleteFile() (files stay in processed/).
+
+⸻
+
+✅ Example JUnit 5 Test (with Mockito)
+
+package com.example.batch;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.batch.core.BatchStatus;
+import org.springframework.batch.core.JobExecution;
+
+import java.util.List;
+
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class CosProcessedCleanupListenerTest {
+
+    @Mock
+    private CosStorageService cos;
+
+    private CosProcessedCleanupListener listener;
+
+    @BeforeEach
+    void setUp() {
+        listener = new CosProcessedCleanupListener(cos, "processed/");
+    }
+
+    @Test
+    void deletesProcessedFiles_whenJobCompleted() {
+        // Arrange
+        JobExecution jobExecution = new JobExecution(1L);
+        jobExecution.setStatus(BatchStatus.COMPLETED);
+
+        when(cos.listKeys("processed/")).thenReturn(List.of("processed/file1", "processed/file2"));
+
+        // Act
+        listener.afterJob(jobExecution);
+
+        // Assert
+        verify(cos).listKeys("processed/");
+        verify(cos).deleteFile("processed/file1");
+        verify(cos).deleteFile("processed/file2");
+        verifyNoMoreInteractions(cos);
+    }
+
+    @Test
+    void keepsFiles_whenJobFailed() {
+        // Arrange
+        JobExecution jobExecution = new JobExecution(2L);
+        jobExecution.setStatus(BatchStatus.FAILED);
+
+        // Act
+        listener.afterJob(jobExecution);
+
+        // Assert
+        verifyNoInteractions(cos);
+    }
+}
+
+
+⸻
+
+✅ Notes
+	•	Uses Mockito to fake the CosStorageService.
+	•	Confirms the listener behaves differently depending on BatchStatus.
+	•	Keeps tests clean by injecting "processed/" directly into the constructor.
+
+⸻
+
+👉 Do you also want me to show you how to make this test Spring Boot style (loading the bean from context with @SpringBatchTest), or keep it lean like this with just Mockito?
+
 
 Thanks for sharing the screenshot 🙌 — I see your current `XmlInvoiceReader` is:
 
