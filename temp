@@ -1,3 +1,160 @@
+Perfect — this is a very common (and smart) question for UBL / Spring Batch pipelines 👍
+
+You’re basically saying:
+
+> “Some XMLs are blank or malformed (e.g. empty root or invalid schema).
+> When unmarshalling or writing, the batch step fails with a cryptic stacktrace.
+> I want the batch to **skip those files gracefully** and **log which XML caused it.**”
+
+Let’s fix that cleanly — without losing visibility.
+
+---
+
+## ✅ Step 1: Wrap your reader in a fail-safe
+
+Your current `UblXmlReader` may throw exceptions like `JAXBException` or `XMLStreamException` when parsing empty/malformed XMLs.
+Instead of letting them crash the step, you can **catch + rethrow as a custom checked exception** that includes the file name.
+
+```java
+@Override
+public Object read() throws Exception {
+    log.info("UblXmlReader.read started for {}", resource);
+    if (resource == null || alreadyRead) return null;
+
+    try (InputStream in = resource.getInputStream()) {
+        alreadyRead = true;
+        XMLStreamReader xsr = XMLInputFactory.newFactory().createXMLStreamReader(in);
+        xsr.nextTag(); // may fail on empty XML
+        String root = xsr.getLocalName();
+
+        if ("Invoice".equals(root)) {
+            JAXBContext ctx = JAXBContext.newInstance(InvoiceType.class);
+            return ctx.createUnmarshaller().unmarshal(xsr, InvoiceType.class).getValue();
+        } else if ("CreditNote".equals(root)) {
+            JAXBContext ctx = JAXBContext.newInstance(CreditNoteType.class);
+            return ctx.createUnmarshaller().unmarshal(xsr, CreditNoteType.class).getValue();
+        } else {
+            throw new BadXmlException("Unsupported or empty root element", resource.getFilename());
+        }
+    } catch (Exception e) {
+        throw new BadXmlException("Failed to parse XML: " + resource.getFilename(), e);
+    }
+}
+```
+
+and define:
+
+```java
+public class BadXmlException extends Exception {
+    public BadXmlException(String message, String fileName) {
+        super(message + " [file=" + fileName + "]");
+    }
+    public BadXmlException(String message, Throwable cause) {
+        super(message, cause);
+    }
+}
+```
+
+This ensures the exception message *always includes the filename*.
+
+---
+
+## ✅ Step 2: Add a SkipPolicy
+
+In your step definition:
+
+```java
+@Bean
+public Step xmlInvoiceStep(JobRepository repo,
+                           PlatformTransactionManager tx,
+                           UblXmlReader reader,
+                           ClassifierCompositeItemWriter<Object> writer) {
+
+    return new StepBuilder("xmlInvoiceStep", repo)
+        .<Object, Object>chunk(10, tx)
+        .reader(reader)
+        .writer(writer)
+        .faultTolerant()
+        .skipPolicy(new BadXmlSkipPolicy())
+        .listener(new SkipLoggingListener())
+        .build();
+}
+```
+
+The skip policy decides which exceptions are skippable:
+
+```java
+public class BadXmlSkipPolicy implements SkipPolicy {
+    @Override
+    public boolean shouldSkip(Throwable t, long skipCount) {
+        return t instanceof BadXmlException
+            || t.getCause() instanceof BadXmlException
+            || t instanceof JAXBException;
+    }
+}
+```
+
+---
+
+## ✅ Step 3: Add a SkipListener for visibility
+
+```java
+@Slf4j
+public class SkipLoggingListener implements SkipListener<Object, Object> {
+    @Override
+    public void onSkipInRead(Throwable t) {
+        log.warn("Skipped XML during read: {}", t.getMessage());
+    }
+
+    @Override
+    public void onSkipInProcess(Object item, Throwable t) {
+        log.warn("Skipped XML during process: {} - {}", item, t.getMessage());
+    }
+
+    @Override
+    public void onSkipInWrite(Object item, Throwable t) {
+        log.warn("Skipped XML during write: {} - {}", item, t.getMessage());
+    }
+}
+```
+
+Now your logs will say, for example:
+
+```
+WARN  Skipped XML during read: Failed to parse XML: invoice-003.xml
+```
+
+…and the batch will continue to process the next file instead of failing.
+
+---
+
+## ✅ Step 4: Optional — write bad XMLs to a quarantine folder
+
+If you want to keep them for debugging:
+
+```java
+catch (Exception e) {
+    Files.copy(resource.getFile().toPath(), 
+               Paths.get("/tmp/quarantine/" + resource.getFilename()),
+               StandardCopyOption.REPLACE_EXISTING);
+    throw new BadXmlException("Failed to parse XML: " + resource.getFilename(), e);
+}
+```
+
+---
+
+## 🚀 Result
+
+* Bad XMLs are **skipped safely**.
+* Logs tell you **exactly which file** caused the issue.
+* Job doesn’t stop processing good XMLs.
+* You can optionally keep failed ones for later inspection.
+
+---
+
+👉 Do you want me to also make this “quarantine” behavior configurable (e.g. enable/disable via `application.properties`)? That’s handy in production.
+
+
 
 Perfect 👍 — I see your CosProcessedCleanupListener implementation. You want to add JUnit coverage for it. Let’s do that.
 
