@@ -1,3 +1,145 @@
+Got it ✅ — you’re absolutely right.
+Since you’re already using a **`ClassifierCompositeItemWriter<Object>`** (to route between `XmlInvoiceWriter` and `XmlCreditNoteWriter`), you don’t want to complicate the flow with wrapper classes or type juggling.
+
+Let’s simplify things completely while still achieving your real goal:
+
+> 🔹 “If the XML fails in the writer, I want to see the **file name** (or resource name) that caused it.”
+
+---
+
+## 🎯 The Simplest, Most Practical Way
+
+You don’t need to wrap or change your step definition — you can just make your **reader set the resource name on a thread-local variable**, which your writers can log later.
+
+Spring Batch calls `setResource(...)` on your reader for each file, so you already know which file is being processed.
+
+We can safely capture that.
+
+---
+
+### ✅ Step 1 — Add a ThreadLocal holder
+
+Create a tiny helper class (in `com.alphacredit.batch.common` for example):
+
+```java
+public class CurrentResourceHolder {
+    private static final ThreadLocal<String> CURRENT_FILE = new ThreadLocal<>();
+
+    public static void set(String fileName) {
+        CURRENT_FILE.set(fileName);
+    }
+
+    public static String get() {
+        return CURRENT_FILE.get();
+    }
+
+    public static void clear() {
+        CURRENT_FILE.remove();
+    }
+}
+```
+
+---
+
+### ✅ Step 2 — Update your `UblXmlReader`
+
+Inside `setResource(...)`, store the current file name:
+
+```java
+@Override
+public void setResource(Resource resource) {
+    this.resource = resource;
+    this.alreadyRead = false;
+
+    String fileName = resource != null ? resource.getFilename() : "unknown";
+    CurrentResourceHolder.set(fileName);
+    log.debug("UblXmlReader: now reading {}", fileName);
+}
+```
+
+…and at the end of the file (in `close()`), clear it:
+
+```java
+@Override
+public void close() {
+    CurrentResourceHolder.clear();
+}
+```
+
+✅ Now every thread processing this resource knows the current file name — even your writers.
+
+---
+
+### ✅ Step 3 — Use it in your writers
+
+In your existing `XmlInvoiceWriter` (and `XmlCreditNoteWriter`), just reference the holder in your logs or error handling:
+
+```java
+@Override
+public void write(Chunk<? extends InvoiceType> invoices) throws Exception {
+    String sourceName = CurrentResourceHolder.get(); // ✅ file being processed
+    log.info("XmlInvoiceWriter started for file: {}", sourceName);
+
+    for (InvoiceType invoice : invoices) {
+        try {
+            // ... your existing logic ...
+            UblDocumentWriter.write(invoice, InvoiceType.class,
+                    new QName("urn:oasis:names:specification:ubl:schema:xsd:Invoice-2", "Invoice"),
+                    outputPath);
+        } catch (Exception e) {
+            log.error("❌ Failed to write invoice from file '{}': {}", sourceName, e.getMessage(), e);
+            throw e; // Spring Batch will handle skip policy
+        }
+    }
+}
+```
+
+Same pattern applies to your credit note writer:
+
+```java
+String sourceName = CurrentResourceHolder.get();
+log.info("XmlCreditNoteWriter processing file: {}", sourceName);
+```
+
+---
+
+### ✅ Step 4 — What you’ll see in logs
+
+```
+INFO  UblXmlReader: now reading invoice_batch_12.xml
+INFO  XmlInvoiceWriter started for file: invoice_batch_12.xml
+ERROR ❌ Failed to write invoice from file 'invoice_batch_12.xml': unexpected element 'TaxTotal'
+WARN  Skipped writing invoice_batch_12.xml due to marshalling error
+```
+
+✅ No wrapper objects
+✅ No change to `ClassifierCompositeItemWriter`
+✅ No `ExecutionContext` complexity
+✅ Works perfectly with multi-resource jobs
+✅ Automatically resets between files
+
+---
+
+### ⚙️ Optional hardening (for multi-threading)
+
+If you use a multi-threaded step, you can safely keep this because each step execution thread has its own `ThreadLocal`.
+
+---
+
+### 💡 Summary
+
+| You want                             | Solution                          |
+| ------------------------------------ | --------------------------------- |
+| Print filename in writer             | `CurrentResourceHolder` stores it |
+| Avoid wrapping objects               | ✅ no wrapper                      |
+| Keep `ClassifierCompositeItemWriter` | ✅ unchanged                       |
+| Clear after each file                | `close()` in reader               |
+
+---
+
+Would you like me to show how to add **a single log line per failed file** in your skip listener (so it prints the same filename automatically)?
+
+
 Perfect 👍 — let’s lock this down cleanly and safely without Schematron for now.
 Below is a **complete setup** that ensures:
 
