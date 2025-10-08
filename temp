@@ -1,144 +1,148 @@
-Got it ✅ — you’re absolutely right.
-Since you’re already using a **`ClassifierCompositeItemWriter<Object>`** (to route between `XmlInvoiceWriter` and `XmlCreditNoteWriter`), you don’t want to complicate the flow with wrapper classes or type juggling.
+Got it — you want to **know which invoice file failed** (or ideally, avoid having the writer fail at all) while keeping your `XmlInvoiceWriter` clean.
 
-Let’s simplify things completely while still achieving your real goal:
-
-> 🔹 “If the XML fails in the writer, I want to see the **file name** (or resource name) that caused it.”
+Here’s a clean, production-safe approach — consistent with your current **AlphaCredit** batch architecture (as per the latest project docs):
 
 ---
 
-## 🎯 The Simplest, Most Practical Way
+## ✅ Option 1 — Detect bad XMLs early (in the reader)
 
-You don’t need to wrap or change your step definition — you can just make your **reader set the resource name on a thread-local variable**, which your writers can log later.
+This keeps your writer clean and ensures no bad XMLs ever reach it.
 
-Spring Batch calls `setResource(...)` on your reader for each file, so you already know which file is being processed.
+### 📄 Update your `UblXmlReader`:
 
-We can safely capture that.
-
----
-
-### ✅ Step 1 — Add a ThreadLocal holder
-
-Create a tiny helper class (in `com.alphacredit.batch.common` for example):
-
-```java
-public class CurrentResourceHolder {
-    private static final ThreadLocal<String> CURRENT_FILE = new ThreadLocal<>();
-
-    public static void set(String fileName) {
-        CURRENT_FILE.set(fileName);
-    }
-
-    public static String get() {
-        return CURRENT_FILE.get();
-    }
-
-    public static void clear() {
-        CURRENT_FILE.remove();
-    }
-}
-```
-
----
-
-### ✅ Step 2 — Update your `UblXmlReader`
-
-Inside `setResource(...)`, store the current file name:
+Add a lightweight validation after unmarshalling:
 
 ```java
 @Override
-public void setResource(Resource resource) {
-    this.resource = resource;
-    this.alreadyRead = false;
+public Object read() throws Exception {
+    if (resource == null || alreadyRead) return null;
+    try (InputStream in = resource.getInputStream()) {
+        alreadyRead = true;
+        XMLStreamReader xsr = XMLInputFactory.newFactory().createXMLStreamReader(in);
+        xsr.nextTag();
+        String root = xsr.getLocalName();
 
-    String fileName = resource != null ? resource.getFilename() : "unknown";
-    CurrentResourceHolder.set(fileName);
-    log.debug("UblXmlReader: now reading {}", fileName);
-}
-```
-
-…and at the end of the file (in `close()`), clear it:
-
-```java
-@Override
-public void close() {
-    CurrentResourceHolder.clear();
-}
-```
-
-✅ Now every thread processing this resource knows the current file name — even your writers.
-
----
-
-### ✅ Step 3 — Use it in your writers
-
-In your existing `XmlInvoiceWriter` (and `XmlCreditNoteWriter`), just reference the holder in your logs or error handling:
-
-```java
-@Override
-public void write(Chunk<? extends InvoiceType> invoices) throws Exception {
-    String sourceName = CurrentResourceHolder.get(); // ✅ file being processed
-    log.info("XmlInvoiceWriter started for file: {}", sourceName);
-
-    for (InvoiceType invoice : invoices) {
-        try {
-            // ... your existing logic ...
-            UblDocumentWriter.write(invoice, InvoiceType.class,
-                    new QName("urn:oasis:names:specification:ubl:schema:xsd:Invoice-2", "Invoice"),
-                    outputPath);
-        } catch (Exception e) {
-            log.error("❌ Failed to write invoice from file '{}': {}", sourceName, e.getMessage(), e);
-            throw e; // Spring Batch will handle skip policy
+        Object doc;
+        if ("Invoice".equals(root)) {
+            JAXBContext ctx = JAXBContext.newInstance(InvoiceType.class);
+            doc = ctx.createUnmarshaller().unmarshal(xsr, InvoiceType.class).getValue();
+        } else if ("CreditNote".equals(root)) {
+            JAXBContext ctx = JAXBContext.newInstance(CreditNoteType.class);
+            doc = ctx.createUnmarshaller().unmarshal(xsr, CreditNoteType.class).getValue();
+        } else {
+            throw new BadXmlException("Unsupported or empty XML", resource.getFilename());
         }
+
+        // ✅ basic validation
+        if (doc instanceof InvoiceType inv && (inv.getID() == null || inv.getID().getValue().isBlank())) {
+            throw new BadXmlException("Missing ID in file " + resource.getFilename(), resource.getFilename());
+        }
+        if (doc instanceof CreditNoteType cn && (cn.getID() == null || cn.getID().getValue().isBlank())) {
+            throw new BadXmlException("Missing ID in file " + resource.getFilename(), resource.getFilename());
+        }
+
+        return doc;
+    } catch (Exception e) {
+        throw new BadXmlException("Failed to parse or validate " + resource.getFilename(), e);
     }
 }
 ```
 
-Same pattern applies to your credit note writer:
+### 📄 Add `BadXmlException`:
 
 ```java
-String sourceName = CurrentResourceHolder.get();
-log.info("XmlCreditNoteWriter processing file: {}", sourceName);
+public class BadXmlException extends Exception {
+    public BadXmlException(String message, String file) {
+        super(message + " [file=" + file + "]");
+    }
+    public BadXmlException(String message, Throwable cause) {
+        super(message, cause);
+    }
+}
 ```
 
----
+### 📄 Add a skip policy and listener:
 
-### ✅ Step 4 — What you’ll see in logs
-
+```java
+@Bean
+public Step xmlInvoiceStep(JobRepository repo, PlatformTransactionManager tx,
+                           UblXmlReader reader, ClassifierCompositeItemWriter<Object> writer) {
+    return new StepBuilder("xmlInvoiceStep", repo)
+            .<Object, Object>chunk(10, tx)
+            .reader(reader)
+            .writer(writer)
+            .faultTolerant()
+            .skipPolicy((t, count) -> t instanceof BadXmlException)
+            .listener(new SkipLoggingListener())
+            .build();
+}
 ```
-INFO  UblXmlReader: now reading invoice_batch_12.xml
-INFO  XmlInvoiceWriter started for file: invoice_batch_12.xml
-ERROR ❌ Failed to write invoice from file 'invoice_batch_12.xml': unexpected element 'TaxTotal'
-WARN  Skipped writing invoice_batch_12.xml due to marshalling error
+
+```java
+@Slf4j
+public class SkipLoggingListener implements SkipListener<Object, Object> {
+    @Override
+    public void onSkipInRead(Throwable t) {
+        log.warn("❌ Skipped bad XML: {}", t.getMessage());
+    }
+}
 ```
 
-✅ No wrapper objects
-✅ No change to `ClassifierCompositeItemWriter`
-✅ No `ExecutionContext` complexity
-✅ Works perfectly with multi-resource jobs
-✅ Automatically resets between files
+✅ **Result:**
+
+* Bad XMLs (empty, invalid, missing ID, etc.) are **skipped before writing**.
+* Logs clearly show:
+
+  ```
+  WARN  ❌ Skipped bad XML: Missing ID in file invoice-2025-08.xml
+  ```
+* The writer receives **only clean, valid UBLs**.
 
 ---
 
-### ⚙️ Optional hardening (for multi-threading)
+## ✅ Option 2 — Keep writer clean but aware of source file
 
-If you use a multi-threaded step, you can safely keep this because each step execution thread has its own `ThreadLocal`.
+If you still want the writer to **know the original filename** (e.g. for naming or logs):
+
+Wrap the document in a lightweight holder from the reader:
+
+```java
+public record XmlDocument(Object ubl, String sourceName) {}
+```
+
+In reader:
+
+```java
+return new XmlDocument(doc, resource.getFilename());
+```
+
+In writer:
+
+```java
+@Override
+public void write(List<? extends XmlDocument> items) throws Exception {
+    for (XmlDocument wrapper : items) {
+        Object doc = wrapper.ubl();
+        String name = getFileName(doc, wrapper.sourceName());
+        Path file = outputDir.resolve(name + ".xml");
+        ublWriter.write(doc, file);
+    }
+}
+private String getFileName(Object doc, String fallback) {
+    if (doc instanceof InvoiceType inv && inv.getID() != null) return inv.getID().getValue();
+    if (doc instanceof CreditNoteType cn && cn.getID() != null) return cn.getID().getValue();
+    return fallback != null ? fallback.replace(".xml", "") : UUID.randomUUID().toString();
+}
+```
+
+✅ This way:
+
+* Reader validates and labels files.
+* Writer remains generic — just gets the correct file name automatically.
 
 ---
 
-### 💡 Summary
-
-| You want                             | Solution                          |
-| ------------------------------------ | --------------------------------- |
-| Print filename in writer             | `CurrentResourceHolder` stores it |
-| Avoid wrapping objects               | ✅ no wrapper                      |
-| Keep `ClassifierCompositeItemWriter` | ✅ unchanged                       |
-| Clear after each file                | `close()` in reader               |
-
----
-
-Would you like me to show how to add **a single log line per failed file** in your skip listener (so it prints the same filename automatically)?
-
+Would you like me to give you a **unit test class** for this (`UblXmlReader` + skip policy) showing how it handles a good XML, an empty XML, and a missing-ID XML gracefully?
 
 Perfect 👍 — let’s lock this down cleanly and safely without Schematron for now.
 Below is a **complete setup** that ensures:
