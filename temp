@@ -1,3 +1,59 @@
+Excellent — the screenshots clearly show your SonarQube warning:
+
+> ⚠️ **“Enable server hostname verification on this SSL/TLS connection.”**
+
+That warning happens because your current `createUnsecuredHttpClient()` disables **both certificate** and **hostname verification** (you’re trusting all certs and returning `true` for all hostnames):
+
+```java
+SSLContext sslContext = SSLContextBuilder.create()
+    .loadTrustMaterial((X509Certificate[] chain, String authType) -> true) // trust all
+    .build();
+
+SSLConnectionSocketFactory sslSf =
+    new SSLConnectionSocketFactory(sslContext, (hostname, session) -> true); // ignore hostname
+```
+
+---
+
+## ✅ Root cause
+
+This configuration is **not secure**.
+You’re effectively saying “trust any certificate for any host” — useful for local testing, but flagged by Sonar (CWE-295 / CWE-297).
+
+---
+
+## ✅ Secure Fix (Sonar-compliant)
+
+### Option 1: Use the default, secure hostname verifier
+
+Replace the insecure `(hostname, session) -> true` with the official verifier from Apache HttpClient:
+
+```java
+SSLConnectionSocketFactory sslSf = new SSLConnectionSocketFactory(
+    sslContext,
+    new DefaultHostnameVerifier()
+);
+```
+
+And ideally don’t trust all certificates — instead, use a proper trust strategy or truststore.
+
+Full secure version:
+
+```java
+private static CloseableHttpClient createSecureHttpClient() throws Exception {
+    SSLContext sslContext = SSLContextBuilder.create()
+        // loads default system trust store (no trust-all)
+        .loadTrustMaterial(null, new TrustSelfSignedStrategy()) 
+        .build();
+
+    SSLConnectionSocketFactory sslSf =
+        new SSLConnectionSocketFactory(sslContext, new DefaultHostnameVerifier());
+
+    PoolingHttpClientConnectionManager connectionManager =
+        PoolingHttp
+```
+
+
 Got it — you want to **know which invoice file failed** (or ideally, avoid having the writer fail at all) while keeping your `XmlInvoiceWriter` clean.
 
 Here’s a clean, production-safe approach — consistent with your current **AlphaCredit** batch architecture (as per the latest project docs):
