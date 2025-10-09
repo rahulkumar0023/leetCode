@@ -1,75 +1,34 @@
-
 @Test
-    void createSecureHttpClient_throwsWhenSslBuilderFails() {
-        // Mock SSLContextBuilder.create() to throw RuntimeException when build() is called
-        try (MockedStatic<SSLContextBuilder> mocked = Mockito.mockStatic(SSLContextBuilder.class)) {
-            SSLContextBuilder builder = Mockito.mock(SSLContextBuilder.class);
-            Mockito.when(SSLContextBuilder.create()).thenReturn(builder);
-            Mockito.when(builder.loadTrustMaterial(Mockito.any(KeyStore.class), Mockito.any()))
-                    .thenReturn(builder);
-            Mockito.when(builder.build()).thenThrow(new RuntimeException("Simulated SSL failure"));
+void createSecureHttpClient_logsErrorAndReturnsNull_onFailure() {
+    ByteArrayOutputStream errOut = new ByteArrayOutputStream();
+    PrintStream originalErr = System.err;
+    System.setErr(new PrintStream(errOut));
 
-            Exception ex = assertThrows(RuntimeException.class, HttpClientFactory::createSecureHttpClient);
-            assertThat(ex).hasMessageContaining("Simulated SSL failure");
-        }
-    }
-package com.example.http;
+    try (MockedStatic<SSLContextBuilder> mockedStatic = Mockito.mockStatic(SSLContextBuilder.class)) {
+        SSLContextBuilder mockBuilder = Mockito.mock(SSLContextBuilder.class);
+        mockedStatic.when(SSLContextBuilder::create).thenReturn(mockBuilder);
 
-import org.apache.hc.client5.http.classic.CloseableHttpClient;
-import org.apache.hc.client5.http.impl.classic.HttpClients;
-import org.apache.hc.core5.http.config.Registry;
-import org.apache.hc.client5.http.ssl.SSLConnectionSocketFactory;
-import org.apache.hc.client5.http.ssl.DefaultHostnameVerifier;
-import org.apache.hc.core5.ssl.SSLContexts;
-import org.junit.jupiter.api.Test;
+        // lenient stubbing avoids mismatch errors when actual call passes literal nulls
+        Mockito.lenient()
+                .when(mockBuilder.loadTrustMaterial(Mockito.isNull(), Mockito.isNull()))
+                .thenReturn(mockBuilder);
 
-import javax.net.ssl.SSLContext;
+        // handle one-arg overload too (in case your code calls it)
+        Mockito.lenient()
+                .when(mockBuilder.loadTrustMaterial(Mockito.any(TrustStrategy.class)))
+                .thenReturn(mockBuilder);
 
-import java.lang.reflect.Field;
+        Mockito.when(mockBuilder.build())
+                .thenThrow(new RuntimeException("Simulated SSL failure"));
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+        var client = CFApiClient.createUnsecuredHttpClient(); // your method under test
 
-class HttpClientFactoryTest {
-
-    @Test
-    void createSecureHttpClient_buildsClientSuccessfully() throws Exception {
-        // Act
-        CloseableHttpClient client = assertDoesNotThrow(HttpClientFactory::createSecureHttpClient);
-
-        // Assert
-        assertThat(client).isNotNull();
-    }
-
-    @Test
-    void createdHttpClient_usesDefaultHostnameVerifier_andJvmTruststore() throws Exception {
-        CloseableHttpClient client = HttpClientFactory.createSecureHttpClient();
-
-        // Use reflection to ensure SSL context and verifier are correct
-        Field cmField = client.getClass().getDeclaredField("connManager");
-        cmField.setAccessible(true);
-        Object connManager = cmField.get(client);
-        assertThat(connManager).isNotNull();
-
-        // Verify the SSLContext matches system default (contains default trust managers)
-        SSLContext defaultCtx = SSLContexts.createDefault();
-        SSLContext customCtx = SSLContexts.custom()
-                .loadTrustMaterial((KeyStore) null, (TrustStrategy) null)
-                .build();
-
-        assertThat(customCtx.getProtocol()).isEqualTo(defaultCtx.getProtocol());
-    }
-
-    @Test
-    void factory_createsClient_withExpectedConnectionManager() throws Exception {
-        CloseableHttpClient client = HttpClientFactory.createSecureHttpClient();
-
-        Field cmField = client.getClass().getDeclaredField("connManager");
-        cmField.setAccessible(true);
-        Object cm = cmField.get(client);
-
-        assertThat(cm).isNotNull();
-        assertThat(cm.toString()).contains("PoolingHttpClientConnectionManager");
+        assertThat(client).isNull();
+        assertThat(errOut.toString())
+                .contains("Error creating SSL Ignoring HTTP Client")
+                .contains("Simulated SSL failure");
+    } finally {
+        System.setErr(originalErr);
     }
 }
 
