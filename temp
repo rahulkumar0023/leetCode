@@ -1,3 +1,4 @@
+
 @Test
 void createSecureHttpClient_logsErrorAndReturnsNull_onFailure() {
     ByteArrayOutputStream errOut = new ByteArrayOutputStream();
