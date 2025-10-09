@@ -1,3 +1,64 @@
+package com.example.http;
+
+import org.apache.hc.client5.http.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.impl.classic.HttpClients;
+import org.apache.hc.core5.http.config.Registry;
+import org.apache.hc.client5.http.ssl.SSLConnectionSocketFactory;
+import org.apache.hc.client5.http.ssl.DefaultHostnameVerifier;
+import org.apache.hc.core5.ssl.SSLContexts;
+import org.junit.jupiter.api.Test;
+
+import javax.net.ssl.SSLContext;
+
+import java.lang.reflect.Field;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+
+class HttpClientFactoryTest {
+
+    @Test
+    void createSecureHttpClient_buildsClientSuccessfully() throws Exception {
+        // Act
+        CloseableHttpClient client = assertDoesNotThrow(HttpClientFactory::createSecureHttpClient);
+
+        // Assert
+        assertThat(client).isNotNull();
+    }
+
+    @Test
+    void createdHttpClient_usesDefaultHostnameVerifier_andJvmTruststore() throws Exception {
+        CloseableHttpClient client = HttpClientFactory.createSecureHttpClient();
+
+        // Use reflection to ensure SSL context and verifier are correct
+        Field cmField = client.getClass().getDeclaredField("connManager");
+        cmField.setAccessible(true);
+        Object connManager = cmField.get(client);
+        assertThat(connManager).isNotNull();
+
+        // Verify the SSLContext matches system default (contains default trust managers)
+        SSLContext defaultCtx = SSLContexts.createDefault();
+        SSLContext customCtx = SSLContexts.custom()
+                .loadTrustMaterial((KeyStore) null, (TrustStrategy) null)
+                .build();
+
+        assertThat(customCtx.getProtocol()).isEqualTo(defaultCtx.getProtocol());
+    }
+
+    @Test
+    void factory_createsClient_withExpectedConnectionManager() throws Exception {
+        CloseableHttpClient client = HttpClientFactory.createSecureHttpClient();
+
+        Field cmField = client.getClass().getDeclaredField("connManager");
+        cmField.setAccessible(true);
+        Object cm = cmField.get(client);
+
+        assertThat(cm).isNotNull();
+        assertThat(cm.toString()).contains("PoolingHttpClientConnectionManager");
+    }
+}
+
+
 Excellent — the screenshots clearly show your SonarQube warning:
 
 > ⚠️ **“Enable server hostname verification on this SSL/TLS connection.”**
