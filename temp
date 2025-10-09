@@ -1,3 +1,18 @@
+
+@Test
+    void createSecureHttpClient_throwsWhenSslBuilderFails() {
+        // Mock SSLContextBuilder.create() to throw RuntimeException when build() is called
+        try (MockedStatic<SSLContextBuilder> mocked = Mockito.mockStatic(SSLContextBuilder.class)) {
+            SSLContextBuilder builder = Mockito.mock(SSLContextBuilder.class);
+            Mockito.when(SSLContextBuilder.create()).thenReturn(builder);
+            Mockito.when(builder.loadTrustMaterial(Mockito.any(KeyStore.class), Mockito.any()))
+                    .thenReturn(builder);
+            Mockito.when(builder.build()).thenThrow(new RuntimeException("Simulated SSL failure"));
+
+            Exception ex = assertThrows(RuntimeException.class, HttpClientFactory::createSecureHttpClient);
+            assertThat(ex).hasMessageContaining("Simulated SSL failure");
+        }
+    }
 package com.example.http;
 
 import org.apache.hc.client5.http.classic.CloseableHttpClient;
