@@ -1,46 +1,125 @@
-package com.bnpp.pf.einvoice.connect.notifycft;
+Perfect 👏 — even better. YAML makes this cleaner and more readable than properties.
+Here’s the **production-grade, Sonar-safe setup** using your existing `application.yaml` format.
 
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
-import org.slf4j.Logger;
+---
 
-import static org.mockito.Mockito.*;
+## ✅ **1. application.yaml**
 
-class SkipLoggingListenerTest {
+```yaml
+work:
+  root: /var/app/alphacredit      # or /tmp/alphacredit in containers
+  processed:
+    xml: ${work.root}/processed/xml
+    pdf: ${work.root}/processed/pdf
+    csv: ${work.root}/processed/csv
+  output: ${work.root}/output
+```
 
-    private SkipLoggingListener listener;
-    private Logger mockLogger;
+**👉 Why this is great**
 
-    @BeforeEach
-    void setUp() {
-        // create a partial spy that uses our own logger
-        mockLogger = Mockito.mock(Logger.class);
-        listener = new SkipLoggingListener() {
-            @Override
-            public void onSkipInRead(Throwable t) {
-                mockLogger.info("Skipped XML during read: {}", t.getMessage());
-            }
+* All file paths are centralized.
+* You can easily override `work.root` per environment (`dev`, `uat`, `prod`).
+* No hardcoding of `/tmp` in your Java code.
 
-            @Override
-            public void onSkipInWrite(Object item, Throwable t) {
-                mockLogger.info("Skipped XML during write: {} - {}", item, t.getMessage());
-            }
-        };
+---
+
+## ✅ **2. Strongly-typed configuration class**
+
+```java
+@Component
+@ConfigurationProperties(prefix = "work")
+@Getter
+@Setter
+public class WorkDirectoryProperties {
+
+    private Path root;
+    private Processed processed = new Processed();
+    private Path output;
+
+    @Getter
+    @Setter
+    public static class Processed {
+        private Path xml;
+        private Path pdf;
+        private Path csv;
     }
 
-    @Test
-    void logsMessage_onSkipInRead() {
-        Throwable ex = new RuntimeException("Read error");
-        listener.onSkipInRead(ex);
-        verify(mockLogger).info("Skipped XML during read: {}", "Read error");
-    }
-
-    @Test
-    void logsMessage_onSkipInWrite() {
-        Object item = "invoice-001.xml";
-        Throwable ex = new RuntimeException("Write failed");
-        listener.onSkipInWrite(item, ex);
-        verify(mockLogger).info("Skipped XML during write: {} - {}", item, "Write failed");
+    @PostConstruct
+    void init() throws IOException {
+        // Create all required directories with restricted permissions
+        for (Path dir : List.of(processed.xml, processed.pdf, processed.csv, output)) {
+            if (dir != null) {
+                Files.createDirectories(dir);
+                try {
+                    Files.setPosixFilePermissions(dir,
+                            PosixFilePermissions.fromString("rwx------"));
+                } catch (UnsupportedOperationException ignored) {
+                    // Windows or non-POSIX FS: safe to ignore
+                }
+            }
+        }
     }
 }
+```
+
+**✅ Advantages**
+
+* No hardcoded `/tmp` → passes Sonar security checks.
+* Automatically creates required directories.
+* Secure (`rwx------`) permissions on Unix.
+* Central place to manage all work paths.
+* Clean YAML → clean code → easy to maintain.
+
+---
+
+## ✅ **3. Usage in your code**
+
+```java
+@Component
+@RequiredArgsConstructor
+@Slf4j
+public class PackageAndUploadTasklet implements Tasklet {
+
+    private final WorkDirectoryProperties dirs;
+
+    @Override
+    public RepeatStatus execute(StepContribution contribution, ChunkContext context) throws Exception {
+        Path xmlDir = dirs.getProcessed().getXml();
+        Path outputDir = dirs.getOutput();
+
+        log.info("Processing XML from {}", xmlDir);
+        log.info("Writing output to {}", outputDir);
+
+        // ... your logic here ...
+
+        return RepeatStatus.FINISHED;
+    }
+}
+```
+
+---
+
+### 🧩 **Optional Integration**
+
+If you want to use the same base directory for secure temporary files (like your PGP key `.asc` files), you can reuse it:
+
+```java
+Path tempDir = dirs.getRoot().resolve("temp");
+Files.createDirectories(tempDir);
+File tempFile = Files.createTempFile(tempDir, filePrefix, ".asc").toFile();
+```
+
+That way **everything (input, output, temp)** stays within one controlled, private root.
+
+---
+
+✅ **Final Result**
+
+* Sonar warnings disappear.
+* Fully production-safe (no `/tmp` exposure).
+* Works the same on-prem, Docker, or K8s.
+* Clean YAML config, no magic strings or SpEL.
+
+---
+
+Would you like me to also show how to adapt your **PGP key loading method** (`convertStringToTempFile`) to use this same config structure, so all temp key files go into your secure `work.root/temp` folder?
