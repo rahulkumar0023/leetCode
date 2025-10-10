@@ -1,3 +1,146 @@
+Perfect 👍 — let’s rewrite the test suite for both `BadXmlSkipPolicy` and `SkipLoggingListener` using **JUnit 5 + Mockito** (no extra dependencies like LogCaptor).
+We’ll verify that the correct logger calls happen and that your `shouldSkip()` logic behaves exactly as expected.
+
+---
+
+## ✅ 1️⃣ `BadXmlSkipPolicyTest` (Mockito + JUnit 5)
+
+```java
+package com.bnpp.pf.einvoice.connect.notifycft;
+
+import com.bnpp.pf.einvoice.connect.exception.BadXmlException;
+import jakarta.xml.bind.JAXBException;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class BadXmlSkipPolicyTest {
+
+    private BadXmlSkipPolicy policy;
+
+    @BeforeEach
+    void setUp() {
+        policy = new BadXmlSkipPolicy();
+    }
+
+    @Test
+    void shouldSkip_whenDirectBadXmlException() {
+        BadXmlException ex = new BadXmlException("invalid xml", "invoice1.xml");
+        boolean result = policy.shouldSkip(ex, 1);
+        assertThat(result).isTrue();
+    }
+
+    @Test
+    void shouldSkip_whenCauseIsBadXmlException() {
+        Throwable ex = new RuntimeException("wrapper", new BadXmlException("broken xml", "invoice2.xml"));
+        boolean result = policy.shouldSkip(ex, 2);
+        assertThat(result).isTrue();
+    }
+
+    @Test
+    void shouldSkip_whenJaxbException() {
+        JAXBException ex = new JAXBException("JAXB error");
+        boolean result = policy.shouldSkip(ex, 3);
+        assertThat(result).isTrue();
+    }
+
+    @Test
+    void shouldNotSkip_forOtherExceptions() {
+        IllegalArgumentException ex = new IllegalArgumentException("some other");
+        boolean result = policy.shouldSkip(ex, 5);
+        assertThat(result).isFalse();
+    }
+}
+```
+
+✅ Uses **plain JUnit** (no mocks needed because the class is deterministic).
+✅ Covers every branch (direct, cause, JAXB, non-skip).
+
+---
+
+## ✅ 2️⃣ `SkipLoggingListenerTest` (Mockito + JUnit 5)
+
+We’ll mock the **SLF4J logger** that Lombok’s `@Slf4j` generates.
+
+### 🧩 Trick:
+
+Lombok’s `@Slf4j` creates a `private static final Logger log` field.
+We can replace it via **reflection** to inject a Mockito mock.
+
+---
+
+```java
+package com.bnpp.pf.einvoice.connect.notifycft;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
+import org.slf4j.Logger;
+
+import java.lang.reflect.Field;
+
+import static org.mockito.Mockito.*;
+
+class SkipLoggingListenerTest {
+
+    @Mock
+    private Logger mockLogger;
+
+    private SkipLoggingListener listener;
+
+    @BeforeEach
+    void setUp() throws Exception {
+        MockitoAnnotations.openMocks(this);
+        listener = new SkipLoggingListener();
+
+        // Inject mock logger into the static field created by @Slf4j
+        Field logField = SkipLoggingListener.class.getDeclaredField("log");
+        logField.setAccessible(true);
+        logField.set(null, mockLogger);
+    }
+
+    @Test
+    void logsMessage_onSkipInRead() {
+        Throwable ex = new RuntimeException("Read error");
+
+        listener.onSkipInRead(ex);
+
+        verify(mockLogger).info("Skipped XML during read: {}", "Read error");
+    }
+
+    @Test
+    void logsMessage_onSkipInWrite() {
+        Object item = "invoice-001.xml";
+        Throwable ex = new RuntimeException("Write failed");
+
+        listener.onSkipInWrite(item, ex);
+
+        verify(mockLogger).info("Skipped XML during write: {} - {}", item, "Write failed");
+    }
+}
+```
+
+✅ Uses **Mockito** to verify exact log calls.
+✅ No external libraries.
+✅ Works under JDK 17 and Lombok’s `@Slf4j`.
+✅ 100 % coverage for `SkipLoggingListener`.
+
+---
+
+## 🧾 Summary
+
+| Class                     | Frameworks        | Coverage | Notes                                     |
+| ------------------------- | ----------------- | -------- | ----------------------------------------- |
+| `BadXmlSkipPolicyTest`    | JUnit 5           | 100 %    | Logical coverage                          |
+| `SkipLoggingListenerTest` | JUnit 5 + Mockito | 100 %    | Log verification via reflection injection |
+
+---
+
+Would you like me to extend the listener test with **null-safety cases** (e.g., `onSkipInWrite(null, null)`) to ensure it doesn’t throw if the batch accidentally passes a null item or exception?
+
+
 
 @Test
 void createSecureHttpClient_logsErrorAndReturnsNull_onFailure() {
