@@ -1,3 +1,136 @@
+Perfect — you’ve highlighted the red-marked (uncovered) parts of your **`CsvInvoiceMapper`**, specifically:
+
+* `toUUID(String)`
+* `toIssueDate(String)` (and probably `toDueDate(String)`)
+* plus the **supplier address mapping** section (postal zone, subentity, address line, etc.).
+
+Let’s add **JUnit 5 + AssertJ** tests that cover all those red lines.
+
+---
+
+### ✅ 1. Unit test for the helper conversion methods
+
+These are simple null/non-null cases for your `default` MapStruct helpers like `toUUID`, `toIssueDate`, and `toDueDate`.
+
+```java
+package com.alphacredit.batch.mapping;
+
+import oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.*;
+import org.junit.jupiter.api.Test;
+import java.util.GregorianCalendar;
+import javax.xml.datatype.DatatypeFactory;
+
+import static org.assertj.core.api.Assertions.*;
+
+class CsvInvoiceMapperHelperTest {
+
+    private final CsvInvoiceMapper mapper = new CsvInvoiceMapperImpl();
+
+    @Test
+    void toUUID_returnsNull_whenInputIsNull() {
+        assertThat(mapper.toUUID(null)).isNull();
+    }
+
+    @Test
+    void toUUID_setsValue_whenInputPresent() {
+        UUIDType uuid = mapper.toUUID("123e4567");
+        assertThat(uuid).isNotNull();
+        assertThat(uuid.getValue()).isEqualTo("123e4567");
+    }
+
+    @Test
+    void toIssueDate_returnsNull_whenInputIsNull() {
+        assertThat(mapper.toIssueDate(null)).isNull();
+    }
+
+    @Test
+    void toIssueDate_parsesValidDate() {
+        IssueDateType date = mapper.toIssueDate("2025-10-10");
+        assertThat(date.getValue().toGregorianCalendar().get(GregorianCalendar.YEAR))
+                .isEqualTo(2025);
+    }
+
+    @Test
+    void toDueDate_parsesValidDate() {
+        DueDateType date = mapper.toDueDate("2025-12-31");
+        assertThat(date).isNotNull();
+        assertThat(date.getValue().toXMLFormat()).isEqualTo("2025-12-31");
+    }
+}
+```
+
+✅ This will give you full coverage for the red bar around lines 170–182 (null + non-null branches).
+
+---
+
+### ✅ 2. Unit test for the supplier address mapping logic
+
+Your address-building code runs only when the source DTO has non-empty supplier fields.
+We can build a `CsvInvoiceDto` with minimal address fields and call the `toInvoice` (or the private mapping helper if exposed).
+
+```java
+package com.alphacredit.batch.mapping;
+
+import com.alphacredit.batch.domain.CsvInvoiceDto;
+import oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.AddressType;
+import oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.*;
+import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.*;
+
+class CsvInvoiceMapperAddressTest {
+
+    private final CsvInvoiceMapper mapper = new CsvInvoiceMapperImpl();
+
+    @Test
+    void mapsSupplierAddressFields_whenPresent() {
+        CsvInvoiceDto dto = new CsvInvoiceDto();
+        dto.setSupplierStreetName("Main Street 1");
+        dto.setSupplierAdditionalStreetName("Block B");
+        dto.setSupplierCityName("Brussels");
+        dto.setSupplierPostalZone("1000");
+        dto.setSupplierCountrySubentity("Flemish Region");
+        dto.setSupplierAddressLineCbcLine("Line A");
+        dto.setSupplierCountryCbcIdentificationCode("BE");
+
+        var inv = mapper.toInvoice(dto);
+
+        AddressType addr = inv.getAccountingSupplierParty()
+                              .getParty()
+                              .getPostalAddress();
+
+        assertThat(addr.getStreetName().getValue()).isEqualTo("Main Street 1");
+        assertThat(addr.getAdditionalStreetName().getValue()).isEqualTo("Block B");
+        assertThat(addr.getCityName().getValue()).isEqualTo("Brussels");
+        assertThat(addr.getPostalZone().getValue()).isEqualTo("1000");
+        assertThat(addr.getCountrySubentity().getValue()).isEqualTo("Flemish Region");
+        assertThat(addr.getAddressLine().get(0).getLine().getValue()).isEqualTo("Line A");
+        assertThat(addr.getCountry().getIdentificationCode().getValue()).isEqualTo("BE");
+    }
+
+    @Test
+    void skipsNullOrEmptyFields() {
+        CsvInvoiceDto dto = new CsvInvoiceDto(); // all nulls
+        var inv = mapper.toInvoice(dto);
+        AddressType addr = inv.getAccountingSupplierParty()
+                              .getParty()
+                              .getPostalAddress();
+        // none of these optional fields should be set
+        assertThat(addr.getStreetName()).isNull();
+        assertThat(addr.getPostalZone()).isNull();
+        assertThat(addr.getAddressLine()).isEmpty();
+    }
+}
+```
+
+✅ This covers every `if (StringUtils.isNotEmpty(...))` branch (true + false).
+Together with the first test class, you’ll hit all the red blocks you showed in your screenshots.
+
+---
+
+Would you like me to include the **`toDueDate`** and **`toXmlDate`** helpers in the same test class (for 100 % mapper helper coverage), or keep them separated as above?
+
+
 Perfect 👏 — even better. YAML makes this cleaner and more readable than properties.
 Here’s the **production-grade, Sonar-safe setup** using your existing `application.yaml` format.
 
