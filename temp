@@ -1,3 +1,46 @@
+import org.apache.hc.client5.http.classic.HttpClients;
+import org.apache.hc.client5.http.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
+import org.apache.hc.client5.http.ssl.ClientTlsStrategyBuilder;
+import org.apache.hc.client5.http.ssl.TrustAllStrategy;
+import org.apache.hc.core5.ssl.SSLContextBuilder;
+import org.apache.hc.core5.util.Timeout;
+
+import javax.net.ssl.SSLContext;
+
+public static CloseableHttpClient createUnsecuredHttpClient() {
+    try {
+        // ✅ Build SSL context that trusts all certs
+        SSLContext sslContext = SSLContextBuilder.create()
+                .loadTrustMaterial(null, TrustAllStrategy.INSTANCE)
+                .build();
+
+        // ✅ Build modern TLS strategy (replaces deprecated SSLConnectionSocketFactory)
+        var tlsStrategy = ClientTlsStrategyBuilder.create()
+                .setSslContext(sslContext)
+                .setHostnameVerifier((host, session) -> true) // skip hostname verification
+                .build();
+
+        // ✅ Connection manager using new API
+        PoolingHttpClientConnectionManager connectionManager =
+                PoolingHttpClientConnectionManagerBuilder.create()
+                        .setTlsStrategy(tlsStrategy)
+                        .build();
+
+        // ✅ Create HttpClient
+        return HttpClients.custom()
+                .setConnectionManager(connectionManager)
+                .evictExpiredConnections()
+                .evictIdleConnections(Timeout.ofSeconds(30))
+                .build();
+
+    } catch (Exception e) {
+        throw new InvoiceProcessingException("Error creating SSL Ignoring HTTP Client", e);
+    }
+}
+
+
 
 Correct 👍 — `SSLConnectionSocketFactory` is **deprecated** in newer Apache HttpClient 5.x versions.
 
