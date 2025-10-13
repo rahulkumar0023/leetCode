@@ -1,3 +1,81 @@
+
+Correct 👍 — `SSLConnectionSocketFactory` is **deprecated** in newer Apache HttpClient 5.x versions.
+
+Let’s fix that cleanly for modern HttpClient 5.x (since your code already uses `PoolingHttpClientConnectionManagerBuilder` and `HttpClients.custom()` from HttpClient 5).
+
+---
+
+### ✅ Modern Equivalent (Apache HttpClient 5.x)
+
+You can safely replace `SSLConnectionSocketFactory` with the new builder API that integrates SSL directly.
+
+Here’s the correct version:
+
+```java
+public static CloseableHttpClient createUnsecuredHttpClient() {
+    try {
+        // Create an SSLContext that trusts all certificates
+        SSLContext sslContext = SSLContexts.custom()
+            .loadTrustMaterial(null, (certificate, authType) -> true)
+            .build();
+
+        // Create a connection manager that uses the SSLContext
+        PoolingHttpClientConnectionManager connectionManager =
+            PoolingHttpClientConnectionManagerBuilder.create()
+                .setSSLSocketFactory(
+                    SSLConnectionSocketFactoryBuilder.create()
+                        .setSslContext(sslContext)
+                        .setHostnameVerifier(NoopHostnameVerifier.INSTANCE)
+                        .build()
+                )
+                .build();
+
+        // Build the HttpClient
+        return HttpClients.custom()
+            .setConnectionManager(connectionManager)
+            .evictExpiredConnections()
+            .evictIdleConnections(Timeout.ofSeconds(30))
+            .build();
+
+    } catch (Exception e) {
+        throw new InvoiceProcessingException("Error creating SSL Ignoring HTTP Client", e);
+    }
+}
+```
+
+---
+
+### 🔍 Key Changes vs. Deprecated Version
+
+| Old                                                                             | New                                              |
+| ------------------------------------------------------------------------------- | ------------------------------------------------ |
+| `SSLConnectionSocketFactory`                                                    | `SSLConnectionSocketFactoryBuilder`              |
+| `PoolingHttpClientConnectionManagerBuilder.create().setSSLSocketFactory(sslsf)` | Same, but `sslsf` built via new builder          |
+| `NoopHostnameVerifier.INSTANCE`                                                 | Still valid — use for local/test only            |
+| `HttpClients.custom()`                                                          | Same — still the entry point for client creation |
+
+---
+
+### ⚙️ Optional: Secure Variant for Production
+
+If you want SonarQube to stop flagging it (and secure it for prod):
+
+```java
+SSLContext sslContext = SSLContexts.createSystemDefault(); // uses JVM truststore
+PoolingHttpClientConnectionManager connectionManager =
+    PoolingHttpClientConnectionManagerBuilder.create()
+        .setSSLSocketFactory(SSLConnectionSocketFactoryBuilder.create()
+            .setSslContext(sslContext)
+            .setHostnameVerifier(DefaultHostnameVerifier.INSTANCE)
+            .build())
+        .build();
+```
+
+---
+
+Would you like me to show how to make this method **switch automatically** between secure and insecure SSL modes based on your Spring `application.properties` (e.g. `http.ssl.insecure=true`)?
+
+
 Got it 👍 — since **all tests failed** in that `SkipLoggingListenerTest`, let’s fix it cleanly and make it work in your environment.
 
 The failure is almost certainly due to **trying to inject a mock logger via reflection** — Lombok’s `@Slf4j` generates a `private static final Logger log` field, and depending on how your compiler builds it, reflection may fail or log never gets swapped.
