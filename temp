@@ -1,258 +1,166 @@
-Perfect — you’ve highlighted the red-marked (uncovered) parts of your **`CsvInvoiceMapper`**, specifically:
+Excellent — you’ve now shared more uncovered parts of your `CsvInvoiceMapper`:
 
-* `toUUID(String)`
-* `toIssueDate(String)` (and probably `toDueDate(String)`)
-* plus the **supplier address mapping** section (postal zone, subentity, address line, etc.).
+* Customer section (`toAccountingCustomerParty`)
+* Address mapping for customer (similar to supplier)
+* `toAmount(String)`
+* `toAllowanceChargeList(CsvInvoiceDto)`
+* `toXmlDate(String)`
 
-Let’s add **JUnit 5 + AssertJ** tests that cover all those red lines.
+Here are focused **JUnit 5 tests** for these red-marked areas.
+They combine **AssertJ**, **Mockito**, and real class instances for full coverage.
 
 ---
 
-### ✅ 1. Unit test for the helper conversion methods
-
-These are simple null/non-null cases for your `default` MapStruct helpers like `toUUID`, `toIssueDate`, and `toDueDate`.
+## ✅ 1. `toAmount(String)` — null, blank, valid values
 
 ```java
-package com.alphacredit.batch.mapping;
+@Test
+void toAmount_returnsNullForNullOrBlank() throws Exception {
+    var mapper = new CsvInvoiceMapperImpl();
+    assertThat(mapper.toAmount(null)).isNull();
+    assertThat(mapper.toAmount("   ")).isNull();
+}
 
-import oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.*;
-import org.junit.jupiter.api.Test;
-import java.util.GregorianCalendar;
-import javax.xml.datatype.DatatypeFactory;
+@Test
+void toAmount_convertsValidNumber() throws Exception {
+    var mapper = new CsvInvoiceMapperImpl();
+    assertThat(mapper.toAmount("123.45"))
+            .isEqualByComparingTo("123.45");
+}
+```
 
+Covers both branches (null/blank + valid).
+
+---
+
+## ✅ 2. `toXmlDate(String)` — valid + invalid + null
+
+Your code throws `InvoiceProcessingException` when invalid, so we verify that too.
+
+```java
 import static org.assertj.core.api.Assertions.*;
 
-class CsvInvoiceMapperHelperTest {
-
-    private final CsvInvoiceMapper mapper = new CsvInvoiceMapperImpl();
-
-    @Test
-    void toUUID_returnsNull_whenInputIsNull() {
-        assertThat(mapper.toUUID(null)).isNull();
-    }
-
-    @Test
-    void toUUID_setsValue_whenInputPresent() {
-        UUIDType uuid = mapper.toUUID("123e4567");
-        assertThat(uuid).isNotNull();
-        assertThat(uuid.getValue()).isEqualTo("123e4567");
-    }
-
-    @Test
-    void toIssueDate_returnsNull_whenInputIsNull() {
-        assertThat(mapper.toIssueDate(null)).isNull();
-    }
-
-    @Test
-    void toIssueDate_parsesValidDate() {
-        IssueDateType date = mapper.toIssueDate("2025-10-10");
-        assertThat(date.getValue().toGregorianCalendar().get(GregorianCalendar.YEAR))
-                .isEqualTo(2025);
-    }
-
-    @Test
-    void toDueDate_parsesValidDate() {
-        DueDateType date = mapper.toDueDate("2025-12-31");
-        assertThat(date).isNotNull();
-        assertThat(date.getValue().toXMLFormat()).isEqualTo("2025-12-31");
-    }
+@Test
+void toXmlDate_parsesValidDate() throws Exception {
+    var mapper = new CsvInvoiceMapperImpl();
+    var xmlDate = mapper.toXmlDate("2025-10-13");
+    assertThat(xmlDate.toXMLFormat()).isEqualTo("2025-10-13");
 }
-```
 
-✅ This will give you full coverage for the red bar around lines 170–182 (null + non-null branches).
-
----
-
-### ✅ 2. Unit test for the supplier address mapping logic
-
-Your address-building code runs only when the source DTO has non-empty supplier fields.
-We can build a `CsvInvoiceDto` with minimal address fields and call the `toInvoice` (or the private mapping helper if exposed).
-
-```java
-package com.alphacredit.batch.mapping;
-
-import com.alphacredit.batch.domain.CsvInvoiceDto;
-import oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.AddressType;
-import oasis.names.specification.ubl.schema.xsd.commonbasiccomponents_2.*;
-import org.junit.jupiter.api.Test;
-
-import static org.assertj.core.api.Assertions.*;
-
-class CsvInvoiceMapperAddressTest {
-
-    private final CsvInvoiceMapper mapper = new CsvInvoiceMapperImpl();
-
-    @Test
-    void mapsSupplierAddressFields_whenPresent() {
-        CsvInvoiceDto dto = new CsvInvoiceDto();
-        dto.setSupplierStreetName("Main Street 1");
-        dto.setSupplierAdditionalStreetName("Block B");
-        dto.setSupplierCityName("Brussels");
-        dto.setSupplierPostalZone("1000");
-        dto.setSupplierCountrySubentity("Flemish Region");
-        dto.setSupplierAddressLineCbcLine("Line A");
-        dto.setSupplierCountryCbcIdentificationCode("BE");
-
-        var inv = mapper.toInvoice(dto);
-
-        AddressType addr = inv.getAccountingSupplierParty()
-                              .getParty()
-                              .getPostalAddress();
-
-        assertThat(addr.getStreetName().getValue()).isEqualTo("Main Street 1");
-        assertThat(addr.getAdditionalStreetName().getValue()).isEqualTo("Block B");
-        assertThat(addr.getCityName().getValue()).isEqualTo("Brussels");
-        assertThat(addr.getPostalZone().getValue()).isEqualTo("1000");
-        assertThat(addr.getCountrySubentity().getValue()).isEqualTo("Flemish Region");
-        assertThat(addr.getAddressLine().get(0).getLine().getValue()).isEqualTo("Line A");
-        assertThat(addr.getCountry().getIdentificationCode().getValue()).isEqualTo("BE");
-    }
-
-    @Test
-    void skipsNullOrEmptyFields() {
-        CsvInvoiceDto dto = new CsvInvoiceDto(); // all nulls
-        var inv = mapper.toInvoice(dto);
-        AddressType addr = inv.getAccountingSupplierParty()
-                              .getParty()
-                              .getPostalAddress();
-        // none of these optional fields should be set
-        assertThat(addr.getStreetName()).isNull();
-        assertThat(addr.getPostalZone()).isNull();
-        assertThat(addr.getAddressLine()).isEmpty();
-    }
-}
-```
-
-✅ This covers every `if (StringUtils.isNotEmpty(...))` branch (true + false).
-Together with the first test class, you’ll hit all the red blocks you showed in your screenshots.
-
----
-
-Would you like me to include the **`toDueDate`** and **`toXmlDate`** helpers in the same test class (for 100 % mapper helper coverage), or keep them separated as above?
-
-
-Perfect 👏 — even better. YAML makes this cleaner and more readable than properties.
-Here’s the **production-grade, Sonar-safe setup** using your existing `application.yaml` format.
-
----
-
-## ✅ **1. application.yaml**
-
-```yaml
-work:
-  root: /var/app/alphacredit      # or /tmp/alphacredit in containers
-  processed:
-    xml: ${work.root}/processed/xml
-    pdf: ${work.root}/processed/pdf
-    csv: ${work.root}/processed/csv
-  output: ${work.root}/output
-```
-
-**👉 Why this is great**
-
-* All file paths are centralized.
-* You can easily override `work.root` per environment (`dev`, `uat`, `prod`).
-* No hardcoding of `/tmp` in your Java code.
-
----
-
-## ✅ **2. Strongly-typed configuration class**
-
-```java
-@Component
-@ConfigurationProperties(prefix = "work")
-@Getter
-@Setter
-public class WorkDirectoryProperties {
-
-    private Path root;
-    private Processed processed = new Processed();
-    private Path output;
-
-    @Getter
-    @Setter
-    public static class Processed {
-        private Path xml;
-        private Path pdf;
-        private Path csv;
-    }
-
-    @PostConstruct
-    void init() throws IOException {
-        // Create all required directories with restricted permissions
-        for (Path dir : List.of(processed.xml, processed.pdf, processed.csv, output)) {
-            if (dir != null) {
-                Files.createDirectories(dir);
-                try {
-                    Files.setPosixFilePermissions(dir,
-                            PosixFilePermissions.fromString("rwx------"));
-                } catch (UnsupportedOperationException ignored) {
-                    // Windows or non-POSIX FS: safe to ignore
-                }
-            }
-        }
-    }
-}
-```
-
-**✅ Advantages**
-
-* No hardcoded `/tmp` → passes Sonar security checks.
-* Automatically creates required directories.
-* Secure (`rwx------`) permissions on Unix.
-* Central place to manage all work paths.
-* Clean YAML → clean code → easy to maintain.
-
----
-
-## ✅ **3. Usage in your code**
-
-```java
-@Component
-@RequiredArgsConstructor
-@Slf4j
-public class PackageAndUploadTasklet implements Tasklet {
-
-    private final WorkDirectoryProperties dirs;
-
-    @Override
-    public RepeatStatus execute(StepContribution contribution, ChunkContext context) throws Exception {
-        Path xmlDir = dirs.getProcessed().getXml();
-        Path outputDir = dirs.getOutput();
-
-        log.info("Processing XML from {}", xmlDir);
-        log.info("Writing output to {}", outputDir);
-
-        // ... your logic here ...
-
-        return RepeatStatus.FINISHED;
-    }
+@Test
+void toXmlDate_throwsOnNullOrInvalid() {
+    var mapper = new CsvInvoiceMapperImpl();
+    assertThatThrownBy(() -> mapper.toXmlDate(null))
+            .hasMessageContaining("Invalid date");
+    assertThatThrownBy(() -> mapper.toXmlDate("not-a-date"))
+            .isInstanceOf(InvoiceProcessingException.class)
+            .hasMessageContaining("Invalid date");
 }
 ```
 
 ---
 
-### 🧩 **Optional Integration**
+## ✅ 3. Customer Party Mapping (`toAccountingCustomerParty`)
 
-If you want to use the same base directory for secure temporary files (like your PGP key `.asc` files), you can reuse it:
+We’ll verify that:
+
+* email sets `Contact → ElectronicMailType`
+* ID and Address fields populate correctly
+* empty DTO skips everything
 
 ```java
-Path tempDir = dirs.getRoot().resolve("temp");
-Files.createDirectories(tempDir);
-File tempFile = Files.createTempFile(tempDir, filePrefix, ".asc").toFile();
+@Test
+void mapsCustomerEmailAndAddressFields_whenPresent() {
+    var mapper = new CsvInvoiceMapperImpl();
+    var dto = new CsvInvoiceDto();
+    dto.setCustomerEmail("buyer@example.com");
+    dto.setCustomerPartyIdentificationCbcId("BE999");
+    dto.setCustomerStreetName("Rue 1");
+    dto.setCustomerCityName("Antwerp");
+    dto.setCustomerPostalZone("2000");
+    dto.setCustomerCountryCbcIdentificationCode("BE");
+
+    var cust = mapper.toAccountingCustomerParty(dto);
+    var party = cust.getParty();
+
+    assertThat(party.getContact().getElectronicMail().getValue())
+            .isEqualTo("buyer@example.com");
+
+    var legal = party.getPartyLegalEntity();
+    assertThat(legal).isNotNull();
+
+    var addr = legal.getRegistrationAddress();
+    assertThat(addr.getStreetName().getValue()).isEqualTo("Rue 1");
+    assertThat(addr.getCityName().getValue()).isEqualTo("Antwerp");
+    assertThat(addr.getPostalZone().getValue()).isEqualTo("2000");
+    assertThat(addr.getCountry().getIdentificationCode().getValue()).isEqualTo("BE");
+}
+
+@Test
+void skipsEmptyCustomerFields() {
+    var mapper = new CsvInvoiceMapperImpl();
+    var cust = mapper.toAccountingCustomerParty(new CsvInvoiceDto());
+    assertThat(cust).isNotNull();
+    assertThat(cust.getParty().getContact()).isNull();
+}
 ```
 
-That way **everything (input, output, temp)** stays within one controlled, private root.
+This covers all the `if(StringUtils.isNotEmpty(...))` branches under customer mapping.
 
 ---
 
-✅ **Final Result**
+## ✅ 4. `toAllowanceChargeList(CsvInvoiceDto)`
 
-* Sonar warnings disappear.
-* Fully production-safe (no `/tmp` exposure).
-* Works the same on-prem, Docker, or K8s.
-* Clean YAML config, no magic strings or SpEL.
+Your logic:
+
+* parses boolean `ChargeIndicator`
+* returns empty list if false
+* sets charge, base amount, reason when fields exist.
+
+```java
+@Test
+void toAllowanceChargeList_returnsEmptyWhenIndicatorFalse() {
+    var mapper = new CsvInvoiceMapperImpl();
+    var dto = new CsvInvoiceDto();
+    dto.setAllowanceChargeCbcChargeIndicator("false");
+    assertThat(mapper.toAllowanceChargeList(dto)).isEmpty();
+}
+
+@Test
+void toAllowanceChargeList_buildsChargeWhenIndicatorTrue() {
+    var mapper = new CsvInvoiceMapperImpl();
+    var dto = new CsvInvoiceDto();
+    dto.setAllowanceChargeCbcChargeIndicator("true");
+    dto.setAllowanceChargeCbcAmount("12.50");
+    dto.setAllowanceChargeCbcBaseAmount("100");
+    dto.setBaseAmountCbcCurrencyId("EUR");
+    dto.setAllowanceChargeReason("Discount");
+
+    var list = mapper.toAllowanceChargeList(dto);
+    assertThat(list).hasSize(1);
+    var charge = list.get(0);
+    assertThat(charge.getChargeIndicator().isValue()).isTrue();
+    assertThat(charge.getAmount().getValue()).isEqualByComparingTo("12.50");
+    assertThat(charge.getBaseAmount().getValue()).isEqualByComparingTo("100");
+    assertThat(charge.getAllowanceChargeReason().get(0).getValue())
+            .isEqualTo("Discount");
+}
+```
 
 ---
 
-Would you like me to also show how to adapt your **PGP key loading method** (`convertStringToTempFile`) to use this same config structure, so all temp key files go into your secure `work.root/temp` folder?
+## ✅ Summary of what these cover
+
+| Section                         | Branches Covered                   |
+| ------------------------------- | ---------------------------------- |
+| `toAmount`                      | null + blank + valid               |
+| `toXmlDate`                     | valid + null + invalid             |
+| `toAccountingCustomerParty`     | email set + id/address + null      |
+| `toAllowanceChargeList`         | indicator false + true + populated |
+| `StringUtils.isNotEmpty` guards | all exercised                      |
+
+These will push your coverage up dramatically for all the lines in your new screenshots (especially 350–370, 740–770, and 860–865).
+
+---
+
+Would you like me to **bundle these tests** into one ready-to-run class (e.g. `CsvInvoiceMapperAdvancedTest.java`) with the correct imports and your exact package name (`com.bnpp.pf.einvoice.connect.batch.csv`) so you can drop it straight in?
