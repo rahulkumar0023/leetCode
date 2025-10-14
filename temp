@@ -2,36 +2,39 @@ import org.apache.hc.client5.http.classic.CloseableHttpClient;
 import org.apache.hc.client5.http.classic.HttpClients;
 import org.apache.hc.client5.http.impl.classic.PoolingHttpClientConnectionManager;
 import org.apache.hc.client5.http.impl.classic.PoolingHttpClientConnectionManagerBuilder;
-import org.apache.hc.client5.http.ssl.ClientTlsStrategyBuilder;
-import org.apache.hc.client5.http.ssl.DefaultClientTlsStrategy;
 import org.apache.hc.client5.http.ssl.DefaultHostnameVerifier;
+import org.apache.hc.client5.http.ssl.TlsSocketStrategy;
 import org.apache.hc.core5.ssl.SSLContexts;
 import org.apache.hc.core5.util.TimeValue;
 
 import javax.net.ssl.SSLContext;
 
+/**
+ * Secure, Sonar-clean HttpClient 5.5 factory.
+ *  • Uses JVM default truststore (no keystore files)
+ *  • Enforces hostname verification
+ *  • Uses only non-deprecated APIs
+ */
 public final class SecureHttpClientFactory {
 
     private SecureHttpClientFactory() {}
 
     public static CloseableHttpClient createSecureHttpClient() {
         try {
-            // ✅ System default SSLContext (trusts JVM CA store)
+            // 1️⃣  System default SSL context → trusts JVM CA store
             SSLContext sslContext = SSLContexts.createSystemDefault();
 
-            // ✅ Modern TLS strategy for classic (blocking) client
-            var tlsStrategy = ClientTlsStrategyBuilder.create()
-                    .setSslContext(sslContext)
-                    .setHostnameVerifier(new DefaultHostnameVerifier())
-                    .build();
+            // 2️⃣  Default TLS socket strategy (HttpClient 5.5 API)
+            TlsSocketStrategy tlsSocketStrategy =
+                    TlsSocketStrategy.getDefault(sslContext, new DefaultHostnameVerifier());
 
-            // ✅ Correct builder class for HttpClient 5.5
+            // 3️⃣  Build the connection manager
             PoolingHttpClientConnectionManager connectionManager =
                     PoolingHttpClientConnectionManagerBuilder.create()
-                            .setTlsSocketStrategy(tlsStrategy) // 👈 note the method name in 5.5
+                            .setTlsSocketStrategy(tlsSocketStrategy)
                             .build();
 
-            // ✅ HttpClient builder (current API)
+            // 4️⃣  Build and return the HttpClient
             return HttpClients.custom()
                     .setConnectionManager(connectionManager)
                     .evictExpiredConnections()
