@@ -1,21 +1,44 @@
-            // ✅ Uses system default truststore (production safe)
+import org.apache.hc.client5.http.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.classic.HttpClients;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
+import org.apache.hc.client5.http.ssl.ClientTlsStrategyBuilder;
+import org.apache.hc.client5.http.ssl.DefaultHostnameVerifier;
+import org.apache.hc.core5.ssl.SSLContexts;
+import org.apache.hc.core5.util.Timeout;
+
+import javax.net.ssl.SSLContext;
+
+public final class SecureHttpClientFactory {
+
+    private SecureHttpClientFactory() {}
+
+    public static CloseableHttpClient createSecureHttpClient() {
+        try {
+            // ✅ Use the system default SSLContext (production safe)
             SSLContext sslContext = SSLContexts.createSystemDefault();
 
-            // ✅ Modern TLS strategy (no deprecated classes)
+            // ✅ Modern TLS strategy
             var tlsStrategy = ClientTlsStrategyBuilder.create()
                     .setSslContext(sslContext)
-                    .setHostnameVerifier(new DefaultHostnameVerifier()) // strict host check
+                    .setHostnameVerifier(new DefaultHostnameVerifier())
                     .build();
 
-            // ✅ Connection manager using current API
+            // ✅ Connection manager using the builder (correct class for .setTlsStrategy)
             PoolingHttpClientConnectionManager connectionManager =
                     PoolingHttpClientConnectionManagerBuilder.create()
                             .setTlsStrategy(tlsStrategy)
                             .build();
 
-            // ✅ Build the HttpClient
+            // ✅ Build HttpClient with modern config
             return HttpClients.custom()
                     .setConnectionManager(connectionManager)
                     .evictExpiredConnections()
                     .evictIdleConnections(Timeout.ofSeconds(30))
                     .build();
+
+        } catch (Exception e) {
+            throw new RuntimeException("Error creating secure HTTP client", e);
+        }
+    }
+}
