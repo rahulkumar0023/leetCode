@@ -1,23 +1,175 @@
-import org.junit.jupiter.api.Test;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import java.lang.reflect.Method;
+Perfect — I see what’s happening.
+Your **Fortify findings** flag two high-risk issues in `PGPConfig.java`:
 
-class CFTClientAPITest {
+---
 
-    @Test
-    void createSecureHttpClient_throwsRuntimeException_whenSslContextFails() throws Exception {
-        // We subclass CFTClientAPI and override a method used in the try block
-        CFTClientAPI api = new CFTClientAPI() {
-            @Override
-            protected javax.net.ssl.SSLContext buildSslContext() throws Exception {
-                throw new IllegalStateException("Simulated failure");
-            }
-        };
+## 🚨 1. **“Weak Encryption: Byte Array to String Conversion”**
 
-        // Expect RuntimeException from the catch block
-        assertThatThrownBy(api::createSecureHttpClient)
-                .isInstanceOf(RuntimeException.class)
-                .hasMessageContaining("Error creating secure HTTP client")
-                .hasCauseInstanceOf(IllegalStateException.class);
+**Line:**
+
+```java
+new String(Base64.getDecoder().decode(pgpPrivateKey))
+```
+
+**Problem:**
+This converts binary key data (bytes) directly into a Java `String`.
+That’s unsafe because:
+
+* `String` is immutable (you can’t wipe it from memory later).
+* Encoding bytes to text can corrupt binary entropy.
+* Fortify sees it as *weak key handling*.
+
+---
+
+### ✅ **Fix**
+
+Don’t use `String` for key material.
+Keep it as a `byte[]`, or store it temporarily as a file/stream.
+
+**Before:**
+
+```java
+File privateKeyFile = convertStringToTempFile(
+    new String(Base64.getDecoder().decode(pgpPrivateKey)), "pgpPrivateKey");
+```
+
+**After (Fortify-safe):**
+
+```java
+byte[] decodedKeyBytes = Base64.getDecoder().decode(pgpPrivateKey);
+File privateKeyFile = convertBytesToTempFile(decodedKeyBytes, "pgpPrivateKey");
+```
+
+Then change your helper method:
+
+```java
+public File convertBytesToTempFile(byte[] keyBytes, String filePrefix) throws IOException {
+    File tempFile = File.createTempFile(filePrefix, ".asc");
+    tempFile.setReadable(true, true);
+    tempFile.setWritable(true, true);
+
+    try (FileOutputStream fos = new FileOutputStream(tempFile)) {
+        fos.write(keyBytes);
     }
+    // optional but recommended: schedule deletion on JVM exit
+    tempFile.deleteOnExit();
+    return tempFile;
 }
+```
+
+✅ **Why Fortify is happy:**
+
+* No `String` conversion.
+* Key data never lives in immutable String memory.
+* Binary entropy is preserved.
+
+---
+
+## ⚠️ 2. **“Privacy Violation: Writing Sensitive Data to File System”**
+
+**Fortify flagged this line:**
+
+```java
+writer.write(keyContent);
+```
+
+and this method:
+
+```java
+public File convertStringToTempFile(String keyContent, String filePrefix)
+```
+
+**Issue:**
+Writing private key content (or any decrypted data) directly to disk is considered a *privacy breach*. Even if it’s temporary, Fortify treats the filesystem as an untrusted location.
+
+---
+
+### ✅ **Fix Options**
+
+#### ✅ Option A — Use `byte[]` (as above) and wipe file ASAP
+
+If the PGP library **must** load from a file (which is often the case), then:
+
+* Mark the file readable only by the current user.
+* Delete it immediately after use.
+* Never log its path or content.
+
+Example:
+
+```java
+File tempFile = convertBytesToTempFile(decodedKeyBytes, "pgpPrivateKey");
+
+PfPGPPrivateKeys pgpPrivateKey = 
+    KeysManagerUtils.loadPrivateKeysFromAsc(tempFile, privateKeyCred);
+
+// immediately delete after loading
+if (!tempFile.delete()) {
+    tempFile.deleteOnExit();
+}
+```
+
+Also, **don’t log anything** that could reveal file names or contents:
+
+```java
+log.debug("Loaded private PGP key successfully"); // ✅
+log.info("Using temp file " + tempFile);          // ❌ avoid
+```
+
+#### ✅ Option B — Use in-memory stream only
+
+If your PGP library supports streams:
+
+```java
+InputStream keyStream = new ByteArrayInputStream(decodedKeyBytes);
+PfPGPPrivateKeys pgpPrivateKey =
+    KeysManagerUtils.loadPrivateKeysFromAsc(keyStream, privateKeyCred);
+```
+
+→ No file, no Fortify issue.
+
+---
+
+### ✅ Final Refactored Bean
+
+```java
+@Bean
+@Primary
+public PGPDecrypt pgpDecrypt() throws IOException {
+    log.info("Loading PGP keys for decryption: started");
+
+    byte[] decodedKeyBytes = Base64.getDecoder().decode(pgpPrivateKey);
+    PfPGPPrivateKeys pgpPrivateKey;
+
+    try (InputStream keyStream = new ByteArrayInputStream(decodedKeyBytes)) {
+        pgpPrivateKey = KeysManagerUtils.loadPrivateKeysFromAsc(keyStream, privateKeyCred);
+    }
+
+    PGPDecrypt decryptor = new PGPDecryptBuilder(pgpPrivateKey).build();
+    log.info("PGP keys loaded for decryption: completed");
+    return decryptor;
+}
+```
+
+---
+
+### ✅ Summary of Fixes
+
+| Issue                       | Root Cause                              | Fix                                                                     |
+| --------------------------- | --------------------------------------- | ----------------------------------------------------------------------- |
+| Weak Encryption (line 53)   | Using `new String(byte[])` on key bytes | Keep as `byte[]` — no String conversion                                 |
+| Privacy Violation (line 69) | Writing key to temp file in plain text  | Use in-memory stream, or delete file immediately + restrict permissions |
+| Logging                     | Leaking sensitive path/key info         | Log only success messages                                               |
+
+---
+
+✅ **Best Practice**
+If you must handle private keys temporarily:
+
+* Keep them in memory (`byte[]` / stream).
+* Never log or expose them.
+* Secure temporary files (`setReadable(true,true)`).
+* Delete files right after loading.
+
+---
+
+If you show me your current `KeysManagerUtils.loadPrivateKeysFromAsc(...)` signature, I can confirm whether you can switch it to **InputStream-based** instead of writing a file — that would eliminate both Fortify findings entirely.
