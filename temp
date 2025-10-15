@@ -1,3 +1,139 @@
+Excellent 👏 — that’s a **classic XXE (XML External Entity)** finding, and you’re doing exactly the right thing by tackling it now.
+Let’s fix your `UblXmlReader.java` safely and make it **Fortify-clean**.
+
+---
+
+## 🚨 Fortify finding summary
+
+> “XML parser configured in `UblXmlReader.java:49` does not prevent or limit external entity resolution.”
+
+### Root cause:
+
+This line:
+
+```java
+XMLStreamReader xsr = XMLInputFactory.newFactory().createXMLStreamReader(in);
+```
+
+By default, `XMLInputFactory` allows **external entity resolution** and **DTD processing**, which makes it vulnerable to **XXE attacks** (XML External Entities).
+Attackers could embed something like:
+
+```xml
+<!ENTITY xxe SYSTEM "file:///etc/passwd">
+```
+
+and your parser would try to load that file.
+
+---
+
+## ✅ Secure fix (Fortify-approved)
+
+We must configure the `XMLInputFactory` with **secure processing features disabled** for external entities.
+
+Replace this:
+
+```java
+XMLStreamReader xsr = XMLInputFactory.newFactory().createXMLStreamReader(in);
+```
+
+With the following **secure factory initialization**:
+
+```java
+XMLInputFactory factory = XMLInputFactory.newFactory();
+factory.setProperty(XMLInputFactory.SUPPORT_DTD, false);
+factory.setProperty("javax.xml.stream.isSupportingExternalEntities", false);
+factory.setProperty(XMLInputFactory.IS_REPLACING_ENTITY_REFERENCES, false);
+factory.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, false);
+factory.setProperty(XMLInputFactory.IS_NAMESPACE_AWARE, true);
+
+XMLStreamReader xsr = factory.createXMLStreamReader(in);
+```
+
+---
+
+### ✅ Full updated code block
+
+```java
+try (InputStream in = resource.getInputStream()) {
+    alreadyRead = true;
+
+    XMLInputFactory factory = XMLInputFactory.newFactory();
+    // Fortify: prevent XXE and entity expansion
+    factory.setProperty(XMLInputFactory.SUPPORT_DTD, false);
+    factory.setProperty("javax.xml.stream.isSupportingExternalEntities", false);
+    factory.setProperty(XMLInputFactory.IS_REPLACING_ENTITY_REFERENCES, false);
+    factory.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, false);
+    factory.setProperty(XMLInputFactory.IS_NAMESPACE_AWARE, true);
+
+    XMLStreamReader xsr = factory.createXMLStreamReader(in);
+    xsr.nextTag();
+
+    String root = xsr.getLocalName();
+    log.info("Reading XML file: {}", fileName);
+    log.info("Root element detected: {}", root);
+
+    Object doc;
+    if ("Invoice".equals(root)) {
+        doc = JAXBContext.newInstance(InvoiceType.class)
+                         .createUnmarshaller()
+                         .unmarshal(xsr, InvoiceType.class)
+                         .getValue();
+    } else if ("CreditNote".equals(root)) {
+        doc = JAXBContext.newInstance(CreditNoteType.class)
+                         .createUnmarshaller()
+                         .unmarshal(xsr, CreditNoteType.class)
+                         .getValue();
+    } else {
+        throw new BadXmlException("Unsupported or empty root element", resource.getFilename());
+    }
+
+    validateId(doc);
+    return doc;
+}
+```
+
+---
+
+### ✅ Why Fortify will now pass
+
+| Risk                              | Mitigation                               |
+| --------------------------------- | ---------------------------------------- |
+| External DTD / Entity injection   | `SUPPORT_DTD = false`                    |
+| External file/network access      | `isSupportingExternalEntities = false`   |
+| Entity expansion (billion laughs) | `IS_REPLACING_ENTITY_REFERENCES = false` |
+| Parser awareness                  | `IS_NAMESPACE_AWARE = true`              |
+
+---
+
+### ✅ Optional (extra hardening)
+
+If you ever use a **JAXB Unmarshaller directly** on `File` or `InputStream`, apply secure settings there as well:
+
+```java
+Unmarshaller um = jaxbContext.createUnmarshaller();
+um.setProperty(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+um.setProperty(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
+um.setProperty(XMLConstants.ACCESS_EXTERNAL_STYLESHEET, "");
+```
+
+That ensures the JAXB layer doesn’t load any external resources either.
+
+---
+
+## ✅ Summary
+
+| Issue                     | Fix                                                             |
+| ------------------------- | --------------------------------------------------------------- |
+| Fortify XXE vulnerability | Disable DTD and external entity resolution in `XMLInputFactory` |
+| Affected line             | 49 in `UblXmlReader.java`                                       |
+| Security effect           | Blocks XML from referencing local/remote files                  |
+| Compliance                | Passes OWASP & Fortify checks                                   |
+
+---
+
+Would you like me to show the **same secure configuration for JAXB unmarshalling** too? (So that both your `InvoiceType` and `CreditNoteType` parsing steps are also XXE-safe.)
+
+
 private void unzipFile(File zipFile, Path targetDir) throws IOException {
     // Ensure target directory exists
     Files.createDirectories(targetDir);
