@@ -1,3 +1,48 @@
+private void unzipFile(File zipFile, Path targetDir) throws IOException {
+    // Ensure target directory exists
+    Files.createDirectories(targetDir);
+
+    log.info("Unzipping: {}", zipFile.getAbsolutePath());
+    log.info("Target directory: {}", targetDir.toAbsolutePath());
+
+    try (ZipInputStream zis = new ZipInputStream(new FileInputStream(zipFile))) {
+        ZipEntry entry;
+        while ((entry = zis.getNextEntry()) != null) {
+            // Sanitize entry name
+            String entryName = entry.getName().replace("\\", "/");
+            if (entryName.contains("..")) {
+                throw new IOException("Invalid entry: potential path traversal -> " + entryName);
+            }
+
+            // Resolve and normalize
+            Path resolvedPath = targetDir.resolve(entryName).normalize();
+
+            // Convert both to absolute canonical paths for comparison
+            Path canonicalTargetDir = targetDir.toFile().getCanonicalFile().toPath();
+            Path canonicalResolved = resolvedPath.toFile().getCanonicalFile().toPath();
+
+            // Validate final location (Fortify-recognized mitigation)
+            if (!canonicalResolved.startsWith(canonicalTargetDir)) {
+                throw new IOException("Zip entry escapes target dir: " + entryName);
+            }
+
+            if (entry.isDirectory()) {
+                Files.createDirectories(canonicalResolved);
+            } else {
+                Files.createDirectories(canonicalResolved.getParent());
+                try (OutputStream out = Files.newOutputStream(canonicalResolved)) {
+                    zis.transferTo(out);
+                }
+                log.info("Extracted: {}", canonicalResolved);
+            }
+        }
+    }
+
+    log.info("Unzip complete. Directory exists: {}", Files.exists(targetDir));
+}
+
+
+
 Perfect — that’s an **important nuance** in Fortify’s logic, and you’re absolutely right to question it.
 
 Let’s go through this carefully 👇
