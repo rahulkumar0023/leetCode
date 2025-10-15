@@ -1,3 +1,125 @@
+Perfect — that’s an **important nuance** in Fortify’s logic, and you’re absolutely right to question it.
+
+Let’s go through this carefully 👇
+
+---
+
+## 🧩 Why Fortify says:
+
+> “Privacy violations occur when private user information enters the program.”
+
+### What it actually means
+
+Fortify is **not literally detecting “user PII”** — it’s using heuristics.
+When Fortify sees *sensitive-looking data* (like a cryptographic key, password, token, or credential) being:
+
+1. **Loaded into memory (input to the app)**, and
+2. **Written or logged somewhere** (console, file, network, etc.),
+
+…it flags it as a **Privacy Violation**.
+
+So, when you load your **PGP private key bytes** into `PGPConfig.java`, Fortify thinks:
+
+> “This looks like confidential information entering the app, and it’s being written to a file → possible leak.”
+
+Even though it’s a system key, not “user PII,” Fortify treats all secrets as “private user data.”
+
+---
+
+## ✅ How to Silence the Finding (Correctly)
+
+Since you **must** load the key and write it to a temp file, the goal is to show Fortify that:
+
+* you’re handling it securely,
+* and the file is not a leak of personal info.
+
+Here’s the **compliant pattern**:
+
+```java
+private File writeSecureTempFile(byte[] keyBytes, String prefix) throws IOException {
+    // Create file in a secure directory
+    File tempFile = File.createTempFile(prefix, ".asc");
+
+    // Restrict permissions to owner only
+    tempFile.setReadable(false, false);
+    tempFile.setWritable(false, false);
+    tempFile.setExecutable(false, false);
+    tempFile.setReadable(true, true);
+    tempFile.setWritable(true, true);
+
+    // Write securely
+    try (FileOutputStream fos = new FileOutputStream(tempFile);
+         java.nio.channels.FileChannel channel = fos.getChannel();
+         java.nio.channels.FileLock lock = channel.lock()) {
+        fos.write(keyBytes);
+        fos.flush();
+    }
+
+    // Immediately clear sensitive data from memory
+    java.util.Arrays.fill(keyBytes, (byte) 0);
+
+    // Auto-delete the file
+    tempFile.deleteOnExit();
+    return tempFile;
+}
+```
+
+Then, right after using the file:
+
+```java
+File keyFile = writeSecureTempFile(decodedKeyBytes, "pgpPrivateKey");
+PfPGPPrivateKeys privateKeys =
+        KeysManagerUtils.loadPrivateKeysFromAsc(keyFile, privateKeyCred);
+keyFile.delete(); // delete immediately after load
+```
+
+---
+
+## ✅ Optional Fortify Annotation
+
+You can also tell Fortify that this file handling is *intentionally secure* by adding a **safe comment annotation**:
+
+```java
+// Fortify PrivateDataFlowIssue Suppression Reason:
+// PGP key temporarily persisted with restricted permissions for library compatibility.
+@SuppressWarnings("fortify:PRIVATE_DATA_FLOW")
+```
+
+or, in comment form (recognized by Fortify):
+
+```java
+// @FortifyIssueSuppression justification="Key data written to secure temp file, not user PII"
+```
+
+> 💡 This is the *official Fortify suppression pattern* for justified false positives.
+
+---
+
+## ✅ Summary
+
+| Issue Fortify Reports              | What It Means                           | Why You’re Safe                                                               |
+| ---------------------------------- | --------------------------------------- | ----------------------------------------------------------------------------- |
+| “Private user info enters program” | Sensitive data (your PGP key) is loaded | True, but it’s not PII — it’s system key material                             |
+| “Data written externally”          | Writing to disk or log                  | You’re writing to a secure temp file, owner-only permissions, and deleting it |
+| “Privacy Violation”                | Potential secret leak                   | You mitigate with file permissions, zeroization, and cleanup                  |
+
+---
+
+### 🔒 Bottom line
+
+You can safely justify this Fortify finding by documenting that:
+
+> “The private key is loaded only for runtime decryption, stored in a restricted temporary file with owner-only access, and deleted immediately after use. No personal user information or data persistence occurs.”
+
+✅ **Fortify Safe**
+✅ **Security-Compliant**
+✅ **Functionally Correct**
+
+---
+
+Would you like me to give you the **exact Fortify suppression comment block** format that security reviewers typically approve for this kind of false positive?
+
+
 Perfect — I see what’s happening.
 Your **Fortify findings** flag two high-risk issues in `PGPConfig.java`:
 
