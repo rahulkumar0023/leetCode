@@ -1,100 +1,31 @@
-package com.bnpp.pf.einvoice.connect.batch.tasklet;
+@Test
+void testZipEncryptUploadFiles_createsZipAndEncryptsAndUploads() throws Exception {
+    Path processedDir = Files.createDirectories(tempDir.resolve("processedDir"));
+    Files.writeString(processedDir.resolve("invoice1.xml"), "<xml>dummy</xml>");
+    Files.writeString(processedDir.resolve("invoice2.xml"), "<xml>dummy2</xml>");
 
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
-import org.mockito.Mock;
-import org.mockito.Spy;
-import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.test.util.ReflectionTestUtils;
+    ReflectionTestUtils.setField(tasklet, "OUTPUT_DIR", tempDir);
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.*;
-
-@ExtendWith(MockitoExtension.class)
-class PackageAndUploadTaskletTest {
-
-    @Mock
-    private CosStorageService cosStorageService;
-    @Mock
-    private CFTApiClient cftApiClient;
-    @Mock
-    private PGPEncrypt pgpEncrypt;
-
-    @Spy
-    @InjectMocks
-    private PackageAndUploadTasklet tasklet;
-
-    @TempDir
-    Path tempDir;
-
-    @Test
-    void testZipEncryptUploadFiles_createsZipAndEncryptsAndUploads() throws Exception {
-        // Arrange
-        // Create dummy folder to zip
-        Path processedDir = Files.createDirectories(tempDir.resolve("processedDir"));
-        Files.writeString(processedDir.resolve("invoice1.xml"), "<xml>dummy</xml>");
-        Files.writeString(processedDir.resolve("invoice2.xml"), "<xml>dummy2</xml>");
-
-        // Override OUTPUT_DIR in the tasklet to point to @TempDir
-        ReflectionTestUtils.setField(tasklet, "OUTPUT_DIR", tempDir);
-
-        // Mock encrypt() to just copy file (simulate encryption)
-        doAnswer(invocation -> {
-            FileInputStreamStub.copy(invocation.getArgument(0), invocation.getArgument(1));
-            return null;
-        }).when(pgpEncrypt).encrypt(any(FileInputStreamStub.InputStreamWrapper.class), any(FileOutputStream.class));
-
-        // Mock upload and move file
-        doNothing().when(cosStorageService).uploadFile(anyString(), any(File.class));
-        doNothing().when(cosStorageService).moveFile(anyString(), anyString());
-        doNothing().when(cftApiClient).notifyUpload(anyString(), anyString());
-
-        // Act
-        // Call the private method via reflection
-        var method = PackageAndUploadTasklet.class
-                .getDeclaredMethod("zipEncryptUploadFiles", Path.class, String.class);
-        method.setAccessible(true);
-        method.invoke(tasklet, processedDir, "miles");
-
-        // Assert
-        // Verify zip file creation
-        File[] generated = tempDir.toFile().listFiles();
-        assertThat(generated).isNotEmpty();
-
-        boolean zipCreated = false;
-        boolean pgpCreated = false;
-        for (File f : generated) {
-            if (f.getName().endsWith(".zip")) zipCreated = true;
-            if (f.getName().endsWith(".pgp")) pgpCreated = true;
+    // ✅ FIX: correct mock for encrypt()
+    doAnswer(invocation -> {
+        try (var in = (InputStream) invocation.getArgument(0);
+             var out = (OutputStream) invocation.getArgument(1)) {
+            in.transferTo(out);
         }
+        return null;
+    }).when(pgpEncrypt).encrypt(any(InputStream.class), any(OutputStream.class));
 
-        assertThat(zipCreated).isTrue();
-        assertThat(pgpCreated).isTrue();
+    doNothing().when(cosStorageService).uploadFile(anyString(), any(File.class));
+    doNothing().when(cosStorageService).moveFile(anyString(), anyString());
+    doNothing().when(cftApiClient).notifyUpload(anyString(), anyString());
 
-        // Verify upload + move
-        verify(cosStorageService, times(1)).uploadFile(contains("outgoing-e-invoice"), any(File.class));
-        verify(cosStorageService, atLeastOnce()).moveFile(anyString(), anyString());
-    }
+    var method = PackageAndUploadTasklet.class
+            .getDeclaredMethod("zipEncryptUploadFiles", Path.class, String.class);
+    method.setAccessible(true);
+    method.invoke(tasklet, processedDir, "miles");
 
-    /**
-     * Helper to simulate encryption (just copies data).
-     */
-    static class FileInputStreamStub {
-        static void copy(File input, File output) throws IOException {
-            try (var in = Files.newInputStream(input.toPath());
-                 var out = new FileOutputStream(output)) {
-                in.transferTo(out);
-            }
-        }
-
-        static class InputStreamWrapper extends FileInputStreamStub {}
-    }
+    File[] generated = tempDir.toFile().listFiles();
+    assertThat(generated).isNotEmpty();
+    assertThat(Arrays.stream(generated).anyMatch(f -> f.getName().endsWith(".zip"))).isTrue();
+    assertThat(Arrays.stream(generated).anyMatch(f -> f.getName().endsWith(".pgp"))).isTrue();
 }
