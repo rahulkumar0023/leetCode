@@ -1,37 +1,17 @@
-Perfect 👍 — I can see from your screenshots that the **red-marked lines** correspond to the following method inside your `PackageAndUploadTasklet`:
-
-```java
-private void zipEncryptUploadFiles(Path processedFile, String zipFilePrefix) throws IOException {
-    String zipFileName = zipFilePrefix + "_invoices_" + getCurrentDateTimeValue() + ".zip";
-
-    // Step 1: Zip
-    File zipFile = OUTPUT_DIR.resolve(zipFileName).toFile();
-    zipDirectory(processedFile, zipFile);
-
-    // Step 2: Encrypt
-    String encryptedFileName = zipFileName + ".pgp";
-    File encryptedFile = OUTPUT_DIR.resolve(encryptedFileName).toFile();
-}
-```
-
-Let’s create a **JUnit 5 + Mockito** test that covers this code path completely — verifying that the zip file and encrypted file are created with correct names and ensuring that the method executes without errors.
-
----
-
-## ✅ **JUnit Test: `PackageAndUploadTaskletTest`**
-
-```java
-package com.example.batch.tasklet;
+package com.bnpp.pf.einvoice.connect.batch.tasklet;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
+import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -48,6 +28,7 @@ class PackageAndUploadTaskletTest {
     @Mock
     private PGPEncrypt pgpEncrypt;
 
+    @Spy
     @InjectMocks
     private PackageAndUploadTasklet tasklet;
 
@@ -55,68 +36,65 @@ class PackageAndUploadTaskletTest {
     Path tempDir;
 
     @Test
-    void testZipEncryptUploadFiles_createsExpectedFiles() throws Exception {
+    void testZipEncryptUploadFiles_createsZipAndEncryptsAndUploads() throws Exception {
         // Arrange
+        // Create dummy folder to zip
         Path processedDir = Files.createDirectories(tempDir.resolve("processedDir"));
-        Files.createFile(processedDir.resolve("sample.xml"));
+        Files.writeString(processedDir.resolve("invoice1.xml"), "<xml>dummy</xml>");
+        Files.writeString(processedDir.resolve("invoice2.xml"), "<xml>dummy2</xml>");
 
-        // Set OUTPUT_DIR (private static final)
+        // Override OUTPUT_DIR in the tasklet to point to @TempDir
         ReflectionTestUtils.setField(tasklet, "OUTPUT_DIR", tempDir);
 
-        // Spy on the tasklet to mock internal method zipDirectory
-        PackageAndUploadTasklet spyTasklet = spy(tasklet);
-        doNothing().when(spyTasklet).zipDirectory(any(Path.class), any(File.class));
+        // Mock encrypt() to just copy file (simulate encryption)
+        doAnswer(invocation -> {
+            FileInputStreamStub.copy(invocation.getArgument(0), invocation.getArgument(1));
+            return null;
+        }).when(pgpEncrypt).encrypt(any(FileInputStreamStub.InputStreamWrapper.class), any(FileOutputStream.class));
+
+        // Mock upload and move file
+        doNothing().when(cosStorageService).uploadFile(anyString(), any(File.class));
+        doNothing().when(cosStorageService).moveFile(anyString(), anyString());
+        doNothing().when(cftApiClient).notifyUpload(anyString(), anyString());
 
         // Act
-        spyTasklet.getClass()
-                .getDeclaredMethod("zipEncryptUploadFiles", Path.class, String.class)
-                .setAccessible(true);
-        spyTasklet.getClass()
-                .getDeclaredMethod("zipEncryptUploadFiles", Path.class, String.class)
-                .invoke(spyTasklet, processedDir, "miles");
+        // Call the private method via reflection
+        var method = PackageAndUploadTasklet.class
+                .getDeclaredMethod("zipEncryptUploadFiles", Path.class, String.class);
+        method.setAccessible(true);
+        method.invoke(tasklet, processedDir, "miles");
 
         // Assert
-        // Verify zipDirectory called once
-        verify(spyTasklet, times(1)).zipDirectory(any(Path.class), any(File.class));
-
-        // Verify .zip and .pgp files exist in OUTPUT_DIR
+        // Verify zip file creation
         File[] generated = tempDir.toFile().listFiles();
-        assertThat(generated)
-                .isNotNull()
-                .anyMatch(f -> f.getName().startsWith("miles_invoices_") && f.getName().endsWith(".zip"));
-        assertThat(generated)
-                .anyMatch(f -> f.getName().startsWith("miles_invoices_") && f.getName().endsWith(".pgp"));
+        assertThat(generated).isNotEmpty();
+
+        boolean zipCreated = false;
+        boolean pgpCreated = false;
+        for (File f : generated) {
+            if (f.getName().endsWith(".zip")) zipCreated = true;
+            if (f.getName().endsWith(".pgp")) pgpCreated = true;
+        }
+
+        assertThat(zipCreated).isTrue();
+        assertThat(pgpCreated).isTrue();
+
+        // Verify upload + move
+        verify(cosStorageService, times(1)).uploadFile(contains("outgoing-e-invoice"), any(File.class));
+        verify(cosStorageService, atLeastOnce()).moveFile(anyString(), anyString());
+    }
+
+    /**
+     * Helper to simulate encryption (just copies data).
+     */
+    static class FileInputStreamStub {
+        static void copy(File input, File output) throws IOException {
+            try (var in = Files.newInputStream(input.toPath());
+                 var out = new FileOutputStream(output)) {
+                in.transferTo(out);
+            }
+        }
+
+        static class InputStreamWrapper extends FileInputStreamStub {}
     }
 }
-```
-
----
-
-### 🧩 **What this test covers**
-
-✅ Lines in red:
-
-* `String zipFileName = zipFilePrefix + "_invoices_" + getCurrentDateTimeValue() + ".zip";`
-* Creation of `zipFile`
-* Invocation of `zipDirectory(processedFile, zipFile)`
-* Creation of `.pgp` encrypted file name and output path
-
-✅ Mocks external dependencies (`CosStorageService`, `CFTApiClient`, `PGPEncrypt`)
-✅ Avoids actual compression or encryption — uses a spy with `doNothing()`
-✅ Verifies file name structure and that both `.zip` and `.pgp` files are generated
-
----
-
-### 🧠 **Optional improvement**
-
-If you want to also test integration with `pgpEncrypt` (instead of just the naming), add:
-
-```java
-verify(pgpEncrypt, times(1)).encryptFile(any(File.class), any(File.class));
-```
-
-—but only if your actual implementation calls `pgpEncrypt.encryptFile()` inside that method.
-
----
-
-Would you like me to also include a **version that stubs `getCurrentDateTimeValue()`** to make the filenames deterministic (useful for CI coverage snapshots)?
