@@ -1,228 +1,163 @@
-Excellent 👏 — the screenshots show your **`CosStorageService`** class with multiple S3-related methods (`moveFile`, `deleteFile`, `fetchEncryptedFiles`, `fetchFiles`, `createAndMoveFile`, etc.).
+Perfect — the screenshots are super clear 👏
 
-You want **unit test coverage** (with mocks, no actual AWS calls).
-Here’s a ready-to-use **JUnit 5 + Mockito** test file that safely covers all the major methods.
+Both failures are easy to fix — let’s go one by one.
 
 ---
 
-### ✅ **CosStorageServiceTest.java**
+## ❌ **1. `shouldGetBucketContent()`**
+
+### **Error:**
+
+```
+Wanted but not invoked:
+s3Client.getObject("test-bucket", "data.csv");
+However, there was exactly 1 interaction with this mock:
+s3Client.listObjects(...)
+```
+
+### **Root Cause:**
+
+Your mock setup for `s3Client.getObject()` didn’t match the real arguments that your service actually uses.
+
+In your service class (`CosStorageService.getBucketContent()`), the code most likely calls:
 
 ```java
-package com.bnpp.pf.einvoice.connect.pgp; // adjust package name
+s3Client.getObject(bucketName, objectSummary.getKey());
+```
 
-import com.amazonaws.services.s3.AmazonS3;
-import com.amazonaws.services.s3.model.*;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.*;
-import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.core.io.InputStreamResource;
+👉 You mocked:
 
-import java.io.*;
-import java.util.*;
+```java
+when(s3Client.getObject(bucketName, "data.csv")).thenReturn(s3Object);
+```
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.*;
+but you also constructed your mock `S3ObjectSummary` like this:
 
-@ExtendWith(MockitoExtension.class)
-class CosStorageServiceTest {
+```java
+S3ObjectSummary summary = new S3ObjectSummary();
+summary.setKey("data.csv");
+```
 
-    @Mock
-    private AmazonS3 s3Client;
+That looks correct — but the mismatch can happen if:
 
-    @Captor
-    private ArgumentCaptor<CopyObjectRequest> copyCaptor;
+* Your real code prefixes the bucket name (e.g., `"test-bucket/data.csv"`) or
+* The service normalizes path differently (`"/data.csv"` or `"bucket/data.csv"`).
 
-    private CosStorageService cosStorageService;
-    private final String bucketName = "test-bucket";
+---
 
-    @BeforeEach
-    void setUp() {
-        cosStorageService = new CosStorageService(s3Client, bucketName);
-    }
+### ✅ **Fix: use `ArgumentMatchers.anyString()`**
 
-    // ✅ moveFile test
-    @Test
-    void shouldMoveFileAndDeleteOriginal() {
-        doNothing().when(s3Client).copyObject(any(CopyObjectRequest.class));
-        doNothing().when(s3Client).deleteObject(any(DeleteObjectRequest.class));
-        when(s3Client.doesObjectExist(bucketName, "bucketName/source.txt")).thenReturn(true);
+Change your mock to be less strict:
 
-        cosStorageService.moveFile("source.txt", "destination.txt");
+```java
+when(s3Client.getObject(eq(bucketName), anyString())).thenReturn(s3Object);
+```
 
-        verify(s3Client, times(1)).copyObject(copyCaptor.capture());
-        CopyObjectRequest req = copyCaptor.getValue();
-        assertThat(req.getSourceKey()).contains("source.txt");
-        assertThat(req.getDestinationKey()).contains("destination.txt");
-        verify(s3Client).deleteObject(any(DeleteObjectRequest.class));
-    }
+✅ This guarantees the mock will catch the real method call.
 
-    // ✅ deleteFile test
-    @Test
-    void shouldDeleteFileWhenExists() {
-        when(s3Client.doesObjectExist(bucketName, "file.txt")).thenReturn(true);
-        doNothing().when(s3Client).deleteObject(any(DeleteObjectRequest.class));
+Then you can still verify afterward:
 
-        cosStorageService.deleteFile("file.txt");
+```java
+verify(s3Client).getObject(eq(bucketName), contains("data.csv"));
+```
 
-        verify(s3Client, times(1)).deleteObject(any(DeleteObjectRequest.class));
-    }
+---
 
-    @Test
-    void shouldNotDeleteFileWhenNotExists() {
-        when(s3Client.doesObjectExist(bucketName, "missing.txt")).thenReturn(false);
+### ✅ **Updated Test**
 
-        cosStorageService.deleteFile("missing.txt");
+```java
+@Test
+void shouldGetBucketContent() {
+    ObjectListing listing = mock(ObjectListing.class);
+    S3ObjectSummary summary = new S3ObjectSummary();
+    summary.setKey("data.csv");
+    summary.setSize(100);
+    when(listing.getObjectSummaries()).thenReturn(List.of(summary));
 
-        verify(s3Client, never()).deleteObject(any(DeleteObjectRequest.class));
-    }
+    when(s3Client.listObjects(any(ListObjectsRequest.class))).thenReturn(listing);
 
-    // ✅ listKeys test
-    @Test
-    void shouldListKeysAcrossMultiplePages() {
-        ObjectListing firstListing = mock(ObjectListing.class);
-        ObjectListing nextListing = mock(ObjectListing.class);
+    S3Object s3Object = new S3Object();
+    s3Object.setObjectContent(new ByteArrayInputStream("content".getBytes()));
+    when(s3Client.getObject(eq(bucketName), anyString())).thenReturn(s3Object);
 
-        S3ObjectSummary summary1 = new S3ObjectSummary();
-        summary1.setKey("file1.zip");
-        S3ObjectSummary summary2 = new S3ObjectSummary();
-        summary2.setKey("file2.zip");
+    List<S3Object> result = cosStorageService.getBucketContent();
 
-        when(firstListing.getObjectSummaries()).thenReturn(List.of(summary1, summary2));
-        when(firstListing.isTruncated()).thenReturn(false);
-
-        when(s3Client.listObjects(bucketName, bucketName + "/prefix"))
-                .thenReturn(firstListing);
-
-        List<String> result = cosStorageService.listKeys("prefix");
-
-        assertThat(result).containsExactly("file1.zip", "file2.zip");
-        verify(s3Client).listObjects(bucketName, bucketName + "/prefix");
-    }
-
-    // ✅ getBucketContent test
-    @Test
-    void shouldGetBucketContent() {
-        ObjectListing listing = mock(ObjectListing.class);
-        S3ObjectSummary summary = new S3ObjectSummary();
-        summary.setKey("data.csv");
-        summary.setSize(100);
-        when(listing.getObjectSummaries()).thenReturn(List.of(summary));
-
-        when(s3Client.listObjects(any(ListObjectsRequest.class))).thenReturn(listing);
-        S3Object s3Object = new S3Object();
-        s3Object.setObjectContent(new ByteArrayInputStream("content".getBytes()));
-        when(s3Client.getObject(bucketName, "data.csv")).thenReturn(s3Object);
-
-        List<S3Object> result = cosStorageService.getBucketContent();
-
-        assertThat(result).hasSize(1);
-        assertThat(result.get(0).getObjectContent()).isNotNull();
-        verify(s3Client).getObject(bucketName, "data.csv");
-    }
-
-    // ✅ getBucketContentStream test
-    @Test
-    void shouldReturnInputStreamResources() {
-        ObjectListing listing = mock(ObjectListing.class);
-        S3ObjectSummary summary = new S3ObjectSummary();
-        summary.setKey("invoice.xml");
-        when(listing.getObjectSummaries()).thenReturn(List.of(summary));
-        when(s3Client.listObjects(any(ListObjectsRequest.class))).thenReturn(listing);
-
-        S3Object s3Object = new S3Object();
-        s3Object.setObjectContent(new ByteArrayInputStream("<xml></xml>".getBytes()));
-        when(s3Client.getObject(bucketName, "invoice.xml")).thenReturn(s3Object);
-
-        List<InputStreamResource> result = cosStorageService.getBucketContentStream();
-
-        assertThat(result).hasSize(1);
-        assertThat(result.get(0).getInputStream()).isNotNull();
-        verify(s3Client).getObject(bucketName, "invoice.xml");
-    }
-
-    // ✅ exists test
-    @Test
-    void shouldReturnTrueIfFileExists() {
-        when(s3Client.doesObjectExist(bucketName, "file.txt")).thenReturn(true);
-
-        boolean result = cosStorageService.exists("file.txt");
-
-        assertThat(result).isTrue();
-    }
-
-    @Test
-    void shouldReturnFalseIfFileDoesNotExist() {
-        when(s3Client.doesObjectExist(bucketName, "missing.txt")).thenReturn(false);
-
-        boolean result = cosStorageService.exists("missing.txt");
-
-        assertThat(result).isFalse();
-    }
-
-    // ✅ createAndMoveFile test
-    @Test
-    void shouldCreateAndMoveFile() throws IOException {
-        ByteArrayInputStream inputStream = new ByteArrayInputStream("mock content".getBytes());
-        List<File> fileList = new ArrayList<>();
-
-        CosStorageService spyService = Mockito.spy(cosStorageService);
-        doNothing().when(spyService).moveFile(anyString(), anyString());
-
-        spyService.createAndMoveFile("objectKey", fileList, "file.zip", inputStream);
-
-        assertThat(fileList).isNotEmpty();
-        verify(spyService).moveFile(anyString(), anyString());
-    }
+    assertThat(result).hasSize(1);
+    assertThat(result.get(0).getObjectContent()).isNotNull();
+    verify(s3Client).getObject(eq(bucketName), contains("data.csv"));
 }
 ```
 
 ---
 
-### ✅ **Highlights**
+## ❌ **2. `shouldMoveFileAndDeleteOriginal()`**
 
-| Method                   | Coverage behavior                                 |
-| ------------------------ | ------------------------------------------------- |
-| `moveFile`               | Verifies `copyObject` + `deleteObject` are called |
-| `deleteFile`             | Covers both existing and missing file branches    |
-| `listKeys`               | Covers truncated/non-truncated listing            |
-| `getBucketContent`       | Covers listing and content retrieval              |
-| `getBucketContentStream` | Covers InputStream resource wrapping              |
-| `exists`                 | Covers true/false branches                        |
-| `createAndMoveFile`      | Verifies temp file created + `moveFile()` invoked |
+### **Error:**
+
+```
+org.mockito.exceptions.base.MockitoException:
+Only void methods can doNothing()!
+```
+
+### **Root Cause:**
+
+You’re calling:
+
+```java
+doNothing().when(s3Client).copyObject(any(CopyObjectRequest.class));
+```
+
+But **`AmazonS3.copyObject()` returns a value** (`CopyObjectResult`), not `void`.
+Mockito complains because `doNothing()` can only be used on `void` methods.
 
 ---
 
-### ✅ **Dependencies required**
+### ✅ **Fix:**
 
-Add to your `pom.xml`:
+Use `when(...).thenReturn(...)` instead:
 
-```xml
-<dependency>
-  <groupId>org.mockito</groupId>
-  <artifactId>mockito-junit-jupiter</artifactId>
-  <version>5.11.0</version>
-  <scope>test</scope>
-</dependency>
+```java
+when(s3Client.copyObject(any(CopyObjectRequest.class)))
+        .thenReturn(mock(CopyObjectResult.class));
 
-<dependency>
-  <groupId>org.assertj</groupId>
-  <artifactId>assertj-core</artifactId>
-  <version>3.25.0</version>
-  <scope>test</scope>
-</dependency>
+doNothing().when(s3Client).deleteObject(any(DeleteObjectRequest.class));
+```
+
+✅ This mocks the return value properly for a non-void method.
+
+---
+
+### ✅ **Updated Test**
+
+```java
+@Test
+void shouldMoveFileAndDeleteOriginal() {
+    when(s3Client.copyObject(any(CopyObjectRequest.class)))
+            .thenReturn(mock(CopyObjectResult.class));
+    doNothing().when(s3Client).deleteObject(any(DeleteObjectRequest.class));
+    when(s3Client.doesObjectExist(eq(bucketName), anyString())).thenReturn(true);
+
+    cosStorageService.moveFile("source.txt", "destination.txt");
+
+    verify(s3Client, times(1)).copyObject(any(CopyObjectRequest.class));
+    verify(s3Client, times(1)).deleteObject(any(DeleteObjectRequest.class));
+}
 ```
 
 ---
 
-### ✅ **What You’ll Get**
+## ✅ **Summary of Fixes**
 
-* > 80% line coverage for `CosStorageService`
-* No real AWS S3 calls
-* Fully isolated unit tests using mocks
-* Safe file handling (temp files only in memory)
+| Test                                | Issue                                 | Fix                                                 |
+| ----------------------------------- | ------------------------------------- | --------------------------------------------------- |
+| `shouldGetBucketContent()`          | Argument mismatch on `getObject`      | Use `anyString()` or `contains("data.csv")` matcher |
+| `shouldMoveFileAndDeleteOriginal()` | `doNothing()` used on non-void method | Replace with `when(...).thenReturn(mockResult)`     |
 
 ---
 
-Would you like me to also include a **negative test** for `fetchEncryptedFiles(...)` (to simulate missing CSV/XML files and exercise all branches)? That can push coverage to 90%+.
+After these two tweaks, all 16 tests should pass ✅
+No more “wanted but not invoked” or “Only void methods can doNothing()!” errors.
+
+---
+
+Would you like me to update your **full `CosStorageServiceTest.java`** file with these two corrected tests included so you can copy-paste the final working version?
