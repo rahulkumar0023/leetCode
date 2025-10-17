@@ -1,113 +1,153 @@
-Gotcha — if Fortify in your pipeline ignores code comments (and even the PGP one didn’t work), you’ve likely got **code-based suppressions disabled**. So we need a version Fortify will accept **purely by code structure**.
+Perfect 👍 — that’s a great candidate for a focused **JUnit 5 + Mockito** test.
+Your `PGPConfig` class creates two beans:
 
-Below are two Fortify-clean patterns that avoid the flagged `resolve()` usage on untrusted data.
+* `pgpEncrypt()` → loads a public key, builds a `PGPEncrypt`
+* `pgpDecrypt()` → loads a private key, builds a `PGPDecrypt`
 
-# Option A (Safest & simplest): **Flatten** entries (no subdirs)
-
-If you don’t need to preserve directory structure inside the ZIP, just extract files into the target folder using **only the basename**. Fortify is happy because you never resolve a user-controlled path.
-
-```java
-private void unzipFile(File zipFile, Path targetDir) throws IOException {
-    Path destRoot = targetDir.toRealPath(java.nio.file.LinkOption.NOFOLLOW_LINKS);
-    java.nio.file.Files.createDirectories(destRoot);
-
-    try (java.util.zip.ZipInputStream zis =
-             new java.util.zip.ZipInputStream(new java.io.FileInputStream(zipFile))) {
-
-        java.util.zip.ZipEntry entry;
-        while ((entry = zis.getNextEntry()) != null) {
-
-            // take only the filename; drop any path
-            String baseName = java.nio.file.Paths.get(entry.getName())
-                    .getFileName().toString();
-
-            // reject empty or suspicious names
-            if (baseName.isBlank() || baseName.equals(".") || baseName.equals("..")) {
-                throw new IOException("Invalid ZIP entry name: " + entry.getName());
-            }
-
-            java.nio.file.Path dest = destRoot.resolve(baseName).normalize();
-
-            if (entry.isDirectory()) {
-                java.nio.file.Files.createDirectories(dest);
-            } else {
-                java.nio.file.Files.createDirectories(dest.getParent());
-                try (java.io.OutputStream out = java.nio.file.Files.newOutputStream(
-                        dest,
-                        java.nio.file.StandardOpenOption.CREATE_NEW)) {
-                    zis.transferTo(out);
-                }
-            }
-        }
-    }
-}
-```
-
-# Option B (Preserve subdirs): **Segment-by-segment validation**
-
-We validate each path component first, then resolve **sanitized segments one by one** (Fortify sees validation *before* each `resolve`).
-
-```java
-private void unzipFile(File zipFile, Path targetDir) throws IOException {
-    Path destRoot = targetDir.toRealPath(java.nio.file.LinkOption.NOFOLLOW_LINKS);
-    java.nio.file.Files.createDirectories(destRoot);
-
-    try (java.util.zip.ZipInputStream zis =
-             new java.util.zip.ZipInputStream(new java.io.FileInputStream(zipFile))) {
-
-        java.util.zip.ZipEntry entry;
-        while ((entry = zis.getNextEntry()) != null) {
-            String raw = entry.getName().replace('\\', '/');
-
-            // quick rejects: absolute paths & parent traversal markers
-            if (raw.startsWith("/") || raw.matches("(?i)^[a-z]:.*")) {
-                throw new IOException("Absolute path in ZIP entry: " + raw);
-            }
-
-            // build destination path by resolving only validated segments
-            Path dest = destRoot;
-            for (String seg : raw.split("/")) {
-                if (seg.isEmpty() || ".".equals(seg) || "..".equals(seg)) {
-                    throw new IOException("Path traversal segment in ZIP entry: " + raw);
-                }
-                // resolve *after* validation of the segment -> Fortify-friendly
-                dest = dest.resolve(seg);
-            }
-            dest = dest.normalize();
-
-            // boundary check (defense-in-depth)
-            if (!dest.startsWith(destRoot)) {
-                throw new IOException("ZIP entry escapes target dir: " + raw);
-            }
-
-            if (entry.isDirectory()) {
-                java.nio.file.Files.createDirectories(dest);
-            } else {
-                java.nio.file.Files.createDirectories(dest.getParent());
-                try (java.io.OutputStream out = java.nio.file.Files.newOutputStream(
-                        dest,
-                        java.nio.file.StandardOpenOption.CREATE_NEW)) {
-                    zis.transferTo(out);
-                }
-            }
-        }
-    }
-}
-```
-
-### Why these pass Fortify
-
-* We **don’t** call `resolve()` on an untrusted whole path.
-* Every segment is **validated before** it’s used.
-* We still do the final `startsWith(destRoot)` boundary check.
+Both depend on a `ResourceLoader` and `KeysManagerUtils` static methods.
 
 ---
 
-### About the PGP suppression not working
+## ✅ **Goal**
 
-That confirms your Fortify run doesn’t honor inline suppressions. If you ever need to suppress (after securing code), the two supported routes are:
+* Provide **unit-level coverage** for both bean methods.
+* Mock `ResourceLoader`, `Resource`, and `KeysManagerUtils`.
+* Verify:
 
-* Mark **Not an Issue** with justification in **SSC/Audit Workbench**, or
-* Use Fortify’s **security annotations JAR** (if your org enables it) to add `@SuppressSecurityIssue(...)` — otherwise it’s ignored.
+  * The public/private keys are loaded.
+  * The correct beans are returned.
 
-If you want, paste your whole `unzipFile()` and I’ll return it fully rewritten with one of the patterns above, matching your logging and error handling style.
+---
+
+## ✅ **JUnit Test (using JUnit 5 + Mockito + MockedStatic)**
+
+```java
+package com.bnpp.pf.einvoice.connect.pgp;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.MockedStatic;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.ResourceLoader;
+
+import java.io.File;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class PGPConfigTest {
+
+    @Mock
+    private ResourceLoader resourceLoader;
+
+    @Mock
+    private Resource mockResource;
+
+    private PGPConfig pgpConfig;
+
+    @BeforeEach
+    void setUp() {
+        pgpConfig = new PGPConfig();
+        // inject test values
+        pgpConfig.pgpPublicKeyPath = "classpath:keys/public.asc";
+        pgpConfig.pgpPrivateKeyPath = "classpath:keys/private.asc";
+        pgpConfig.privateKeyCred = "secret".toCharArray();
+    }
+
+    @Test
+    void shouldLoadPublicKeyAndBuildEncryptBean() throws Exception {
+        // Arrange
+        File mockFile = new File("public.asc");
+        when(resourceLoader.getResource(pgpConfig.pgpPublicKeyPath)).thenReturn(mockResource);
+        when(mockResource.getFile()).thenReturn(mockFile);
+
+        PfPGPPublicKey mockPublicKey = mock(PfPGPPublicKey.class);
+        PGPEncrypt mockEncrypt = mock(PGPEncrypt.class);
+
+        try (MockedStatic<KeysManagerUtils> keysManagerMock = mockStatic(KeysManagerUtils.class);
+             MockedStatic<PGPEncryptBuilder> builderMock = mockStatic(PGPEncryptBuilder.class)) {
+
+            keysManagerMock.when(() -> KeysManagerUtils.loadPublicKeyFromAsc(mockFile))
+                    .thenReturn(mockPublicKey);
+
+            PGPEncryptBuilder builder = mock(PGPEncryptBuilder.class);
+            when(builder.build()).thenReturn(mockEncrypt);
+            builderMock.when(() -> new PGPEncryptBuilder(mockPublicKey)).thenReturn(builder);
+
+            // Act
+            PGPEncrypt result = pgpConfig.pgpEncrypt(resourceLoader);
+
+            // Assert
+            assertThat(result).isEqualTo(mockEncrypt);
+            keysManagerMock.verify(() -> KeysManagerUtils.loadPublicKeyFromAsc(mockFile));
+            builderMock.verify(() -> new PGPEncryptBuilder(mockPublicKey));
+            verify(builder).build();
+        }
+    }
+
+    @Test
+    void shouldLoadPrivateKeyAndBuildDecryptBean() throws Exception {
+        // Arrange
+        File mockFile = new File("private.asc");
+        when(resourceLoader.getResource(pgpConfig.pgpPrivateKeyPath)).thenReturn(mockResource);
+        when(mockResource.getFile()).thenReturn(mockFile);
+
+        PfPGPPrivateKeys mockPrivateKeys = mock(PfPGPPrivateKeys.class);
+        PGPDecrypt mockDecrypt = mock(PGPDecrypt.class);
+
+        try (MockedStatic<KeysManagerUtils> keysManagerMock = mockStatic(KeysManagerUtils.class);
+             MockedStatic<PGPDecryptBuilder> builderMock = mockStatic(PGPDecryptBuilder.class)) {
+
+            keysManagerMock.when(() ->
+                    KeysManagerUtils.loadPrivateKeysFromAsc(mockFile, pgpConfig.privateKeyCred))
+                    .thenReturn(mockPrivateKeys);
+
+            PGPDecryptBuilder builder = mock(PGPDecryptBuilder.class);
+            when(builder.build()).thenReturn(mockDecrypt);
+            builderMock.when(() -> new PGPDecryptBuilder(mockPrivateKeys)).thenReturn(builder);
+
+            // Act
+            PGPDecrypt result = pgpConfig.pgpDecrypt(resourceLoader);
+
+            // Assert
+            assertThat(result).isEqualTo(mockDecrypt);
+            keysManagerMock.verify(() ->
+                    KeysManagerUtils.loadPrivateKeysFromAsc(mockFile, pgpConfig.privateKeyCred));
+            builderMock.verify(() -> new PGPDecryptBuilder(mockPrivateKeys));
+            verify(builder).build();
+        }
+    }
+}
+```
+
+---
+
+## ✅ **Key Points**
+
+| Mock                                      | Purpose                                    |
+| ----------------------------------------- | ------------------------------------------ |
+| `ResourceLoader`, `Resource`              | Simulates Spring resource resolution       |
+| `KeysManagerUtils`                        | Mocked statically (using `MockedStatic`)   |
+| `PGPEncryptBuilder` / `PGPDecryptBuilder` | Mocked statically to isolate logic         |
+| `assertThat(result)`                      | Confirms the correct object is returned    |
+| `verify(...)`                             | Ensures the correct static calls were made |
+
+---
+
+## ✅ **Expected Coverage**
+
+| Method         | Lines covered | Result |
+| -------------- | ------------- | ------ |
+| `pgpEncrypt()` | Full coverage | ✅      |
+| `pgpDecrypt()` | Full coverage | ✅      |
+
+You’ll also cover the log statements implicitly (no need to assert on logs).
+
+---
+
+Would you like me to add **negative tests** too (e.g., file not found → exception thrown)?
+That would bump coverage even higher and handle error branches.
