@@ -1,73 +1,6 @@
-Perfect — the screenshots are super clear 👏
-
-Both failures are easy to fix — let’s go one by one.
-
----
-
-## ❌ **1. `shouldGetBucketContent()`**
-
-### **Error:**
-
-```
-Wanted but not invoked:
-s3Client.getObject("test-bucket", "data.csv");
-However, there was exactly 1 interaction with this mock:
-s3Client.listObjects(...)
-```
-
-### **Root Cause:**
-
-Your mock setup for `s3Client.getObject()` didn’t match the real arguments that your service actually uses.
-
-In your service class (`CosStorageService.getBucketContent()`), the code most likely calls:
-
-```java
-s3Client.getObject(bucketName, objectSummary.getKey());
-```
-
-👉 You mocked:
-
-```java
-when(s3Client.getObject(bucketName, "data.csv")).thenReturn(s3Object);
-```
-
-but you also constructed your mock `S3ObjectSummary` like this:
-
-```java
-S3ObjectSummary summary = new S3ObjectSummary();
-summary.setKey("data.csv");
-```
-
-That looks correct — but the mismatch can happen if:
-
-* Your real code prefixes the bucket name (e.g., `"test-bucket/data.csv"`) or
-* The service normalizes path differently (`"/data.csv"` or `"bucket/data.csv"`).
-
----
-
-### ✅ **Fix: use `ArgumentMatchers.anyString()`**
-
-Change your mock to be less strict:
-
-```java
-when(s3Client.getObject(eq(bucketName), anyString())).thenReturn(s3Object);
-```
-
-✅ This guarantees the mock will catch the real method call.
-
-Then you can still verify afterward:
-
-```java
-verify(s3Client).getObject(eq(bucketName), contains("data.csv"));
-```
-
----
-
-### ✅ **Updated Test**
-
-```java
 @Test
 void shouldGetBucketContent() {
+    // Arrange
     ObjectListing listing = mock(ObjectListing.class);
     S3ObjectSummary summary = new S3ObjectSummary();
     summary.setKey("data.csv");
@@ -76,88 +9,26 @@ void shouldGetBucketContent() {
 
     when(s3Client.listObjects(any(ListObjectsRequest.class))).thenReturn(listing);
 
+    // Mock the S3Object returned by getObject
     S3Object s3Object = new S3Object();
-    s3Object.setObjectContent(new ByteArrayInputStream("content".getBytes()));
+    s3Object.setObjectContent(new ByteArrayInputStream("mock-content".getBytes()));
+    ObjectMetadata metadata = new ObjectMetadata();
+    metadata.setContentType("text/csv");
+    metadata.setContentLength(100);
+    s3Object.setObjectMetadata(metadata);
+
     when(s3Client.getObject(eq(bucketName), anyString())).thenReturn(s3Object);
 
-    List<S3Object> result = cosStorageService.getBucketContent();
+    // Act
+    List<FileS3> result = cosStorageService.getBucketContent();
 
-    assertThat(result).hasSize(1);
-    assertThat(result.get(0).getObjectContent()).isNotNull();
+    // Assert
+    assertThat(result).isNotEmpty();
+    FileS3 fileS3 = result.get(0);
+    assertThat(fileS3.getKey()).isEqualTo("data.csv");
+    assertThat(fileS3.getContentLength()).isEqualTo(100L);
+    assertThat(fileS3.getContentType()).isEqualTo("text/csv");
+
+    // Verify interaction
     verify(s3Client).getObject(eq(bucketName), contains("data.csv"));
 }
-```
-
----
-
-## ❌ **2. `shouldMoveFileAndDeleteOriginal()`**
-
-### **Error:**
-
-```
-org.mockito.exceptions.base.MockitoException:
-Only void methods can doNothing()!
-```
-
-### **Root Cause:**
-
-You’re calling:
-
-```java
-doNothing().when(s3Client).copyObject(any(CopyObjectRequest.class));
-```
-
-But **`AmazonS3.copyObject()` returns a value** (`CopyObjectResult`), not `void`.
-Mockito complains because `doNothing()` can only be used on `void` methods.
-
----
-
-### ✅ **Fix:**
-
-Use `when(...).thenReturn(...)` instead:
-
-```java
-when(s3Client.copyObject(any(CopyObjectRequest.class)))
-        .thenReturn(mock(CopyObjectResult.class));
-
-doNothing().when(s3Client).deleteObject(any(DeleteObjectRequest.class));
-```
-
-✅ This mocks the return value properly for a non-void method.
-
----
-
-### ✅ **Updated Test**
-
-```java
-@Test
-void shouldMoveFileAndDeleteOriginal() {
-    when(s3Client.copyObject(any(CopyObjectRequest.class)))
-            .thenReturn(mock(CopyObjectResult.class));
-    doNothing().when(s3Client).deleteObject(any(DeleteObjectRequest.class));
-    when(s3Client.doesObjectExist(eq(bucketName), anyString())).thenReturn(true);
-
-    cosStorageService.moveFile("source.txt", "destination.txt");
-
-    verify(s3Client, times(1)).copyObject(any(CopyObjectRequest.class));
-    verify(s3Client, times(1)).deleteObject(any(DeleteObjectRequest.class));
-}
-```
-
----
-
-## ✅ **Summary of Fixes**
-
-| Test                                | Issue                                 | Fix                                                 |
-| ----------------------------------- | ------------------------------------- | --------------------------------------------------- |
-| `shouldGetBucketContent()`          | Argument mismatch on `getObject`      | Use `anyString()` or `contains("data.csv")` matcher |
-| `shouldMoveFileAndDeleteOriginal()` | `doNothing()` used on non-void method | Replace with `when(...).thenReturn(mockResult)`     |
-
----
-
-After these two tweaks, all 16 tests should pass ✅
-No more “wanted but not invoked” or “Only void methods can doNothing()!” errors.
-
----
-
-Would you like me to update your **full `CosStorageServiceTest.java`** file with these two corrected tests included so you can copy-paste the final working version?
