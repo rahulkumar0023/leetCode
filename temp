@@ -1,3 +1,179 @@
+✅ **Absolutely — that’s actually the *best* and cleanest approach** — and SonarQube will also consider it safe when you externalize the directory paths.
+
+Let’s go step-by-step so you can do this the right way for your `AlphaCredit` project structure.
+
+---
+
+## 🧩 Why this works
+
+Sonar flags hard-coded `/tmp/...` because it’s a *publicly writable system directory*.
+If you move those into your **`application.yaml`** (or `application.properties`) and read them using `@Value` or a `@ConfigurationProperties` bean, then:
+
+* you can easily override the path in each environment (dev, UAT, prod),
+* you can move away from `/tmp` in production (e.g. `/opt/alphacredit/work`),
+* Sonar stops marking it as a “security hotspot” because it’s now configurable and reviewable.
+
+---
+
+## ✅ **1. Define properties in `application.yaml`**
+
+You can centralize all temp paths under one key (for example `alphacredit.paths`):
+
+```yaml
+alphacredit:
+  paths:
+    base: /opt/alphacredit
+    processed:
+      xml: ${alphacredit.paths.base}/processed/xml
+      pdf: ${alphacredit.paths.base}/processed/pdf
+      csv: ${alphacredit.paths.base}/processed/csv
+    output: ${alphacredit.paths.base}/output
+    unzipped:
+      xml: ${alphacredit.paths.base}/unzipped/xml
+      csv: ${alphacredit.paths.base}/unzipped/csv
+```
+
+✅ For local/dev, you can override in `application-local.yaml`:
+
+```yaml
+alphacredit:
+  paths:
+    base: ${java.io.tmpdir}/alphacredit
+```
+
+---
+
+## ✅ **2. Create a configuration class**
+
+```java
+package com.bnpp.pf.einvoice.connect.config;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.context.annotation.Configuration;
+import java.nio.file.Path;
+
+@Configuration
+@ConfigurationProperties(prefix = "alphacredit.paths")
+public class PathConfig {
+    private Path base;
+    private Processed processed = new Processed();
+    private Path output;
+    private Unzipped unzipped = new Unzipped();
+
+    public static class Processed {
+        private Path xml;
+        private Path pdf;
+        private Path csv;
+        // getters + setters
+    }
+
+    public static class Unzipped {
+        private Path xml;
+        private Path csv;
+        // getters + setters
+    }
+
+    // getters + setters
+}
+```
+
+This bean now holds all your directory locations.
+
+---
+
+## ✅ **3. Inject the config where needed**
+
+### Example in `PackageAndUploadTasklet.java`
+
+```java
+@Component
+@Slf4j
+public class PackageAndUploadTasklet implements Tasklet, StepExecutionListener {
+
+    private final PathConfig pathConfig;
+
+    @Autowired
+    public PackageAndUploadTasklet(PathConfig pathConfig) {
+        this.pathConfig = pathConfig;
+    }
+
+    @Override
+    public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext) throws Exception {
+        Path xmlDir = pathConfig.getProcessed().getXml();
+        Path outputDir = pathConfig.getOutput();
+        Files.createDirectories(xmlDir);
+        Files.createDirectories(outputDir);
+
+        log.info("Using secure output path: {}", outputDir.toAbsolutePath());
+        // rest of logic
+        return RepeatStatus.FINISHED;
+    }
+}
+```
+
+### Example in `CosStorageService.java`
+
+```java
+@Service
+public class CosStorageService {
+    private final PathConfig pathConfig;
+
+    @Autowired
+    public CosStorageService(PathConfig pathConfig) {
+        this.pathConfig = pathConfig;
+    }
+
+    public void createAndMoveFile(String fileName, InputStream inputStream) throws IOException {
+        Path outputDir = pathConfig.getOutput();
+        Files.createDirectories(outputDir);
+        Path tempFile = Files.createTempFile(outputDir, "encryptedFile_", "_" + fileName);
+        Files.setPosixFilePermissions(tempFile, PosixFilePermissions.fromString("rw-------"));
+        // rest of logic
+    }
+}
+```
+
+---
+
+## ✅ **4. Benefits**
+
+| Benefit              | Description                                                                 |
+| -------------------- | --------------------------------------------------------------------------- |
+| **Sonar clean**      | No hard-coded `/tmp` → flagged warnings disappear                           |
+| **Environment-safe** | Different paths for local, QA, prod                                         |
+| **Container-ready**  | In Docker/Kubernetes, you can mount `/opt/alphacredit` as a writable volume |
+| **Secure**           | You can ensure paths have restricted permissions (600/700)                  |
+| **Flexible testing** | In tests, override via `@TestPropertySource` or `@DynamicPropertySource`    |
+
+---
+
+## ✅ **5. Test override example**
+
+In JUnit:
+
+```java
+@TestPropertySource(properties = {
+  "alphacredit.paths.base=${java.io.tmpdir}/test-alpha"
+})
+@SpringBootTest
+class PackageAndUploadTaskletTest { ... }
+```
+
+---
+
+### 🧠 TL;DR
+
+✅ Yes — move all `/tmp/...` paths into `application.yaml`.
+✅ Use a `@ConfigurationProperties` bean to inject them.
+✅ Use `${java.io.tmpdir}` for dev defaults, `/opt/...` for prod.
+✅ Sonar will mark these as reviewed and secure.
+
+---
+
+Would you like me to show you the **exact replacement diff** for your current `PackageAndUploadTasklet.java` using this new `PathConfig` (ready-to-commit version)?
+
+
+
 Excellent 👏 — these SonarQube “Security Hotspots” are all the same category:
 
 > **“Make sure publicly writable directories are used safely here.”**
