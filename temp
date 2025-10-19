@@ -1,554 +1,218 @@
-Perfect — that tells us you’re **very close** 🎯.
+Excellent 👏 — you’ve done all the heavy lifting already.
+Now that your **XmlCreditNoteWriterTest** is working, we’ll apply the same stable, reusable approach to your **other test classes** — ensuring every one runs cleanly, without NPEs or temp-path issues, and with full Sonar-compatible coverage.
 
-If you’re getting an exception at:
+---
+
+## 🧱 Your current situation
+
+From your screenshots, the pattern in these other tests is nearly identical:
+
+* They all use temporary directories.
+* They all rely on `PathConfig`, but not always initialize it correctly.
+* Some tests still use `Path.of("/tmp/...")`, leading to brittle or environment-dependent behavior.
+
+We’ll fix this by creating one **shared base class** and updating each test to use it.
+
+---
+
+## ✅ 1️⃣ Create a reusable test base class
+
+Create a new file:
 
 ```java
-Files.createDirectories(xmlDir);
-```
-
-and the stacktrace shows something like:
-
-```
-java.lang.NullPointerException: Cannot invoke "java.nio.file.Path.getFileSystem()" because "xmlDir" is null
-```
-
-then the root cause is:
-
-> ✅ The variable `xmlDir` is still `null` when you try to call `Files.createDirectories(...)`.
-
-Let’s fix that cleanly and permanently.
-
----
-
-## 🧩 1️⃣ Understand what’s happening
-
-You probably have something like this in your `beforeStep()` or configuration:
-
-```java
-Path xmlDir = pathConfig.getProcessed().getXml();
-Files.createDirectories(xmlDir);
-```
-
-That means one of these three things is `null`:
-
-1. `pathConfig` — not injected or not registered
-2. `pathConfig.getProcessed()` — nested bean not initialized
-3. `pathConfig.getProcessed().getXml()` — property not bound (missing in YAML)
-
-So let’s check all three step by step.
-
----
-
-## ✅ 2️⃣ Confirm your `PathConfig` class is correct
-
-Here’s the **correct, bulletproof structure** for your config class:
-
-```java
-@Configuration
-@ConfigurationProperties(prefix = "alphacredit.paths")
-public class PathConfig {
-
-    private Path base;
-    private Path output;
-    private final Processed processed = new Processed();
-    private final Unzipped unzipped = new Unzipped();
-
-    public static class Processed {
-        private Path xml;
-        private Path pdf;
-        private Path csv;
-        // getters/setters
-    }
-
-    public static class Unzipped {
-        private Path xml;
-        private Path csv;
-        // getters/setters
-    }
-
-    // getters and setters for base, output, processed, unzipped
-}
-```
-
-✅ Notes:
-
-* Use `public static` for nested classes (non-static won’t bind properly).
-* Pre-initialize `processed` and `unzipped` (`new Processed()`) to avoid null.
-* Make sure getters and setters are present for *every* field.
-
----
-
-## ✅ 3️⃣ Check your YAML values
-
-In `src/test/resources/application-test.yaml` (or your active profile):
-
-```yaml
-alphacredit:
-  paths:
-    base: ${java.io.tmpdir}/alphacredit-test
-    output: ${alphacredit.paths.base}/output
-    processed:
-      xml: ${alphacredit.paths.base}/processed/xml
-      pdf: ${alphacredit.paths.base}/processed/pdf
-      csv: ${alphacredit.paths.base}/processed/csv
-    unzipped:
-      xml: ${alphacredit.paths.base}/unzipped/xml
-      csv: ${alphacredit.paths.base}/unzipped/csv
-```
-
-✅ Make sure this file is actually loaded by your test (e.g., `spring.profiles.active=test`).
-
----
-
-## ✅ 4️⃣ Confirm Spring is binding it
-
-Add this quick test to verify:
-
-```java
-@ActiveProfiles("test")
-@SpringBootTest
-class PathConfigTest {
-
-    @Autowired
-    PathConfig pathConfig;
-
-    @Test
-    void printPaths() {
-        System.out.println("XML dir: " + pathConfig.getProcessed().getXml());
-        System.out.println("Output dir: " + pathConfig.getOutput());
-        assertNotNull(pathConfig.getProcessed().getXml());
-    }
-}
-```
-
-If this prints `null`, your binding or YAML isn’t correct.
-
----
-
-## ✅ 5️⃣ Defensive coding in your tasklet
-
-Even with correct binding, you can **safeguard** against null values:
-
-```java
-@Override
-public void beforeStep(StepExecution stepExecution) {
-    Path xmlDir = pathConfig.getProcessed() != null
-            ? pathConfig.getProcessed().getXml()
-            : null;
-
-    if (xmlDir == null) {
-        throw new IllegalStateException("XML directory path is not configured (alphacredit.paths.processed.xml).");
-    }
-
-    try {
-        Files.createDirectories(xmlDir);
-        log.info("Created XML directory at: {}", xmlDir.toAbsolutePath());
-    } catch (IOException e) {
-        throw new IllegalStateException("Failed to create XML directory", e);
-    }
-}
-```
-
-✅ This will fail fast with a clear message instead of an NPE.
-
----
-
-## ✅ 6️⃣ Optional — set default fallback paths
-
-If you want to *guarantee* this never fails, you can add safe defaults in `PathConfig`:
-
-```java
-private Path base = Path.of(System.getProperty("java.io.tmpdir"), "alphacredit-default");
-private Path output = base.resolve("output");
-
-public static class Processed {
-    private Path xml = Path.of(System.getProperty("java.io.tmpdir"), "alphacredit-default", "processed", "xml");
-    private Path pdf = Path.of(System.getProperty("java.io.tmpdir"), "alphacredit-default", "processed", "pdf");
-    private Path csv = Path.of(System.getProperty("java.io.tmpdir"), "alphacredit-default", "processed", "csv");
-}
-```
-
-✅ Even if YAML binding fails, your code has valid `Path` objects and won’t crash.
-
----
-
-## 🧠 7️⃣ Quick checklist
-
-| Item                                                     | What to verify                       | Expected |
-| -------------------------------------------------------- | ------------------------------------ | -------- |
-| `@ConfigurationProperties(prefix = "alphacredit.paths")` | Present on `PathConfig`              | ✅        |
-| Nested classes `Processed`, `Unzipped`                   | Declared `public static`             | ✅        |
-| `processed` and `unzipped`                               | Initialized with `new`               | ✅        |
-| YAML keys                                                | Match exactly                        | ✅        |
-| Active Spring profile                                    | `test` or `default` with YAML loaded | ✅        |
-| Defensive null checks                                    | In your tasklet                      | ✅        |
-
----
-
-## ✅ 8️⃣ TL;DR fix
-
-If you want the immediate, safe solution —
-replace your existing field declarations in `PathConfig` with this:
-
-```java
-private final Processed processed = new Processed();
-private final Unzipped unzipped = new Unzipped();
-```
-
-and make both nested classes `public static`.
-
-Then ensure your YAML defines:
-
-```yaml
-alphacredit.paths.processed.xml: /tmp/alphacredit-test/processed/xml
-```
-
-After that, `Files.createDirectories(xmlDir)` will run cleanly 🎉
-
----
-
-Would you like me to show you the **complete corrected `PathConfig` class** (with defaults + proper Spring Boot binding) so you can drop it in directly?
-
-
-✅ **Absolutely — that’s actually the *best* and cleanest approach** — and SonarQube will also consider it safe when you externalize the directory paths.
-
-Let’s go step-by-step so you can do this the right way for your `AlphaCredit` project structure.
-
----
-
-## 🧩 Why this works
-
-Sonar flags hard-coded `/tmp/...` because it’s a *publicly writable system directory*.
-If you move those into your **`application.yaml`** (or `application.properties`) and read them using `@Value` or a `@ConfigurationProperties` bean, then:
-
-* you can easily override the path in each environment (dev, UAT, prod),
-* you can move away from `/tmp` in production (e.g. `/opt/alphacredit/work`),
-* Sonar stops marking it as a “security hotspot” because it’s now configurable and reviewable.
-
----
-
-## ✅ **1. Define properties in `application.yaml`**
-
-You can centralize all temp paths under one key (for example `alphacredit.paths`):
-
-```yaml
-alphacredit:
-  paths:
-    base: /opt/alphacredit
-    processed:
-      xml: ${alphacredit.paths.base}/processed/xml
-      pdf: ${alphacredit.paths.base}/processed/pdf
-      csv: ${alphacredit.paths.base}/processed/csv
-    output: ${alphacredit.paths.base}/output
-    unzipped:
-      xml: ${alphacredit.paths.base}/unzipped/xml
-      csv: ${alphacredit.paths.base}/unzipped/csv
-```
-
-✅ For local/dev, you can override in `application-local.yaml`:
-
-```yaml
-alphacredit:
-  paths:
-    base: ${java.io.tmpdir}/alphacredit
-```
-
----
-
-## ✅ **2. Create a configuration class**
-
-```java
+// src/test/java/com/bnpp/pf/einvoice/connect/config/BasePathConfigTest.java
 package com.bnpp.pf.einvoice.connect.config;
 
-import org.springframework.boot.context.properties.ConfigurationProperties;
-import org.springframework.context.annotation.Configuration;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.io.TempDir;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 
-@Configuration
-@ConfigurationProperties(prefix = "alphacredit.paths")
-public class PathConfig {
-    private Path base;
-    private Processed processed = new Processed();
-    private Path output;
-    private Unzipped unzipped = new Unzipped();
+public abstract class BasePathConfigTest {
 
-    public static class Processed {
-        private Path xml;
-        private Path pdf;
-        private Path csv;
-        // getters + setters
+    protected PathConfig pathConfig;
+    protected Path tempDir;
+
+    @BeforeEach
+    void init(@TempDir Path tmp) throws IOException {
+        this.tempDir = tmp;
+        this.pathConfig = new PathConfig();
+
+        PathConfig.Processed processed = new PathConfig.Processed();
+        processed.setXml(tmp.resolve("processed/xml"));
+        processed.setPdf(tmp.resolve("processed/pdf"));
+        processed.setCsv(tmp.resolve("processed/csv"));
+
+        PathConfig.Unzipped unzipped = new PathConfig.Unzipped();
+        unzipped.setXml(tmp.resolve("unzipped/xml"));
+        unzipped.setCsv(tmp.resolve("unzipped/csv"));
+
+        pathConfig.setProcessed(processed);
+        pathConfig.setUnzipped(unzipped);
+        pathConfig.setOutput(tmp.resolve("output"));
+
+        // create all directories
+        Files.createDirectories(processed.getXml());
+        Files.createDirectories(processed.getPdf());
+        Files.createDirectories(processed.getCsv());
+        Files.createDirectories(unzipped.getXml());
+        Files.createDirectories(unzipped.getCsv());
+        Files.createDirectories(pathConfig.getOutput());
     }
-
-    public static class Unzipped {
-        private Path xml;
-        private Path csv;
-        // getters + setters
-    }
-
-    // getters + setters
 }
 ```
 
-This bean now holds all your directory locations.
+✅ You can now extend this base class from **any** test that needs `pathConfig` or temp directories.
+No more repeated boilerplate.
 
 ---
 
-## ✅ **3. Inject the config where needed**
+## ✅ 2️⃣ Update each test class
 
-### Example in `PackageAndUploadTasklet.java`
-
-```java
-@Component
-@Slf4j
-public class PackageAndUploadTasklet implements Tasklet, StepExecutionListener {
-
-    private final PathConfig pathConfig;
-
-    @Autowired
-    public PackageAndUploadTasklet(PathConfig pathConfig) {
-        this.pathConfig = pathConfig;
-    }
-
-    @Override
-    public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext) throws Exception {
-        Path xmlDir = pathConfig.getProcessed().getXml();
-        Path outputDir = pathConfig.getOutput();
-        Files.createDirectories(xmlDir);
-        Files.createDirectories(outputDir);
-
-        log.info("Using secure output path: {}", outputDir.toAbsolutePath());
-        // rest of logic
-        return RepeatStatus.FINISHED;
-    }
-}
-```
-
-### Example in `CosStorageService.java`
+### Example: `SplitPDFMoverTest`
 
 ```java
-@Service
-public class CosStorageService {
-    private final PathConfig pathConfig;
+class SplitPDFMoverTest extends BasePathConfigTest {
 
-    @Autowired
-    public CosStorageService(PathConfig pathConfig) {
-        this.pathConfig = pathConfig;
+    private SplitPDFMover mover;
+    private Path xmlDir;
+
+    @BeforeEach
+    void setupMover() throws IOException {
+        super.init(tempDir);
+        xmlDir = pathConfig.getProcessed().getXml();
+        mover = new SplitPDFMover(pathConfig);
     }
 
-    public void createAndMoveFile(String fileName, InputStream inputStream) throws IOException {
-        Path outputDir = pathConfig.getOutput();
-        Files.createDirectories(outputDir);
-        Path tempFile = Files.createTempFile(outputDir, "encryptedFile_", "_" + fileName);
-        Files.setPosixFilePermissions(tempFile, PosixFilePermissions.fromString("rw-------"));
-        // rest of logic
+    @Test
+    void shouldMovePdfSuccessfully() throws Exception {
+        Path source = xmlDir.resolve("INV-100.PDF");
+        Files.write(source, "PDFDATA".getBytes());
+        Path target = tempDir.resolve("dest");
+        Files.createDirectories(target);
+
+        mover.movePDF("INV-100", target);
+
+        assertTrue(Files.exists(target.resolve("INV-100.PDF")));
     }
 }
 ```
 
 ---
 
-## ✅ **4. Benefits**
-
-| Benefit              | Description                                                                 |
-| -------------------- | --------------------------------------------------------------------------- |
-| **Sonar clean**      | No hard-coded `/tmp` → flagged warnings disappear                           |
-| **Environment-safe** | Different paths for local, QA, prod                                         |
-| **Container-ready**  | In Docker/Kubernetes, you can mount `/opt/alphacredit` as a writable volume |
-| **Secure**           | You can ensure paths have restricted permissions (600/700)                  |
-| **Flexible testing** | In tests, override via `@TestPropertySource` or `@DynamicPropertySource`    |
-
----
-
-## ✅ **5. Test override example**
-
-In JUnit:
+### Example: `PackageAndUploadTaskletTest`
 
 ```java
-@TestPropertySource(properties = {
-  "alphacredit.paths.base=${java.io.tmpdir}/test-alpha"
-})
-@SpringBootTest
-class PackageAndUploadTaskletTest { ... }
-```
+class PackageAndUploadTaskletTest extends BasePathConfigTest {
 
----
+    private PackageAndUploadTasklet tasklet;
 
-### 🧠 TL;DR
+    @BeforeEach
+    void setupTasklet() {
+        tasklet = new PackageAndUploadTasklet(pathConfig, mock(CosStorageService.class),
+                                              mock(CFTApiClient.class), mock(PGPEncrypt.class));
+    }
 
-✅ Yes — move all `/tmp/...` paths into `application.yaml`.
-✅ Use a `@ConfigurationProperties` bean to inject them.
-✅ Use `${java.io.tmpdir}` for dev defaults, `/opt/...` for prod.
-✅ Sonar will mark these as reviewed and secure.
-
----
-
-Would you like me to show you the **exact replacement diff** for your current `PackageAndUploadTasklet.java` using this new `PathConfig` (ready-to-commit version)?
-
-
-
-Excellent 👏 — these SonarQube “Security Hotspots” are all the same category:
-
-> **“Make sure publicly writable directories are used safely here.”**
-
-They appear in multiple files (e.g. `PackageAndUploadTasklet.java`, `CosStorageService.java`, `SplitPDFMover.java`, `InvoiceBatchConfiguration.java`) — all pointing to paths like:
-
-```java
-Path.of("/tmp/processed/xml")
-Path.of("/tmp/output")
-File.createTempFile("encryptedFile_", fileName)
-```
-
----
-
-## 🧩 Why Sonar flags this
-
-Sonar marks these as *potential security issues* because `/tmp` and other world-writable directories on UNIX systems are **shared among all users**.
-If your app writes to `/tmp/...`, another process could:
-
-* Predict filenames (e.g. `encryptedFile_1234.zip`)
-* Replace them with symlinks or malicious files
-* Read or modify sensitive data
-
-Even if your code is harmless, Sonar asks you to confirm that these directories are used safely.
-
----
-
-## ✅ **How to fix / silence the finding properly**
-
-You have 3 clean, production-safe options.
-
----
-
-### ✅ **Option 1 – Use application-specific subdirectories under `java.io.tmpdir`**
-
-Instead of hard-coding `/tmp/...`, create your own secure temp directory per run or per service.
-Example (for `PackageAndUploadTasklet` and similar):
-
-```java
-private static final Path BASE_TMP_DIR =
-        Path.of(System.getProperty("java.io.tmpdir"), "alphacredit", "batch");
-
-private static final Path XML_DIR = BASE_TMP_DIR.resolve("processed/xml");
-private static final Path PDF_DIR = BASE_TMP_DIR.resolve("processed/pdf");
-private static final Path CSV_DIR = BASE_TMP_DIR.resolve("processed/csv");
-private static final Path OUTPUT_DIR = BASE_TMP_DIR.resolve("output");
-
-static {
-    try {
-        Files.createDirectories(XML_DIR);
-        Files.createDirectories(PDF_DIR);
-        Files.createDirectories(CSV_DIR);
-        Files.createDirectories(OUTPUT_DIR);
-    } catch (IOException e) {
-        throw new ExceptionInInitializerError(e);
+    @Test
+    void shouldPrepareAndWriteToOutput() throws Exception {
+        tasklet.beforeStep(mock(StepExecution.class));
+        RepeatStatus status = tasklet.execute(mock(StepContribution.class), mock(ChunkContext.class));
+        assertEquals(RepeatStatus.FINISHED, status);
+        assertTrue(Files.isDirectory(pathConfig.getOutput()));
     }
 }
 ```
 
-✅ Advantages
-
-* No world-writable `/tmp` subpath directly.
-* Directories are created with your process’s default umask → `700` (owner-only).
-* Still cross-platform and cleanly accepted by Sonar.
-
 ---
 
-### ✅ **Option 2 – Secure the temporary files explicitly**
-
-When you must use `File.createTempFile(...)`, add a `SecureDirectoryStream` or set restrictive permissions immediately:
+### Example: `XmlCreditNoteWriterTest`
 
 ```java
-File tempFile = File.createTempFile("encryptedFile_", "_" + fileName);
-Files.setPosixFilePermissions(tempFile.toPath(),
-        PosixFilePermissions.fromString("rw-------")); // 600
-```
+class XmlCreditNoteWriterTest extends BasePathConfigTest {
 
-✅ Stops the “publicly writable directory” warning because the file itself is safe.
+    @Mock private SplitPDFMover pdfMover;
+    @Mock private InvoiceBucketResolver bucketResolver;
+    private XmlCreditNoteWriter writer;
 
----
+    @BeforeEach
+    void setupWriter() {
+        writer = new XmlCreditNoteWriter(pathConfig, pdfMover, bucketResolver);
+    }
 
-### ✅ **Option 3 – Make directory configurable**
+    @Test
+    void testWriteXmlJobTypeWithSupplierBucket() throws Exception {
+        ReflectionTestUtils.setField(writer, "jobType", "xml");
 
-Instead of hard-coding `/tmp/...`, inject it via `application.yaml`:
+        CreditNoteType creditNote = new CreditNoteType();
+        IDType id = new IDType(); id.setValue("CN123");
+        creditNote.setID(id);
 
-```yaml
-app:
-  working-dir: /opt/alphacredit/work
-```
+        CreditNoteTypeCodeType codeType = new CreditNoteTypeCodeType();
+        codeType.setValue("261");
+        creditNote.setCreditNoteTypeCode(codeType);
 
-And in code:
+        when(bucketResolver.resolveBucket(any())).thenReturn("supplier_67890");
 
-```java
-@Value("${app.working-dir:${java.io.tmpdir}/alphacredit}")
-private Path baseWorkingDir;
-```
+        writer.write(new Chunk<>(List.of(creditNote)));
 
-Then resolve subfolders (`processed/xml`, etc.) relative to `baseWorkingDir`.
-
-✅ Keeps production under `/opt/...` and dev/test still safe under system tmp.
-
----
-
-## ✏️ Apply these to the files you showed
-
-| File                                 | Line(s)                                           | Recommended change                                           |
-| ------------------------------------ | ------------------------------------------------- | ------------------------------------------------------------ |
-| **`PackageAndUploadTasklet.java`**   | `Path.of("/tmp/processed/...")`                   | Replace with `BASE_TMP_DIR.resolve("processed/xml")` etc.    |
-| **`CosStorageService.java`**         | `File.createTempFile("encryptedFile_", fileName)` | Keep but add `Files.setPosixFilePermissions(...)`            |
-| **`SplitPDFMover.java`**             | `Path.of("/tmp/unzipped/xml/")`                   | Use `BASE_TMP_DIR.resolve("unzipped/xml")`                   |
-| **`InvoiceBatchConfiguration.java`** | `Files.list(Path.of(TMP_UNZIPPED_CSV_PATH))`      | Replace constant with `BASE_TMP_DIR.resolve("unzipped/csv")` |
-
----
-
-### ✅ **Example secure helper (reuse everywhere)**
-
-You can add a small utility:
-
-```java
-public final class SafeTempDirUtil {
-    private SafeTempDirUtil() {}
-    public static Path secureSubdir(String... subdirs) throws IOException {
-        Path base = Path.of(System.getProperty("java.io.tmpdir"), "alphacredit");
-        Path dir = base;
-        for (String s : subdirs) dir = dir.resolve(s);
-        Files.createDirectories(dir);
-        Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwx------"));
-        return dir;
+        Path expected = pathConfig.getOutput().resolve("xml/miles");
+        assertTrue(Files.exists(expected));
+        verify(pdfMover, times(1)).movePDF(anyString(), eq(expected));
     }
 }
 ```
 
-Then call:
+---
+
+## ✅ 3️⃣ Benefits of this setup
+
+| Advantage        | Description                                              |
+| ---------------- | -------------------------------------------------------- |
+| ✅ Consistent     | Every test uses `@TempDir` with a fresh clean filesystem |
+| ✅ Safe           | No `/tmp` hardcoding, Sonar is satisfied                 |
+| ✅ Simple         | No need to rebuild `PathConfig` repeatedly               |
+| ✅ Portable       | Works on all OS / CI environments                        |
+| ✅ Easy to extend | You can mock services or add extra setup per test class  |
+
+---
+
+## ✅ 4️⃣ (Optional) Use a `@TestConfiguration` bean for integration tests
+
+If you later add Spring integration tests (`@SpringBootTest`),
+create this in `src/test/java/.../TestConfig.java`:
 
 ```java
-private static final Path XML_DIR = SafeTempDirUtil.secureSubdir("processed", "xml");
+@TestConfiguration
+public class TestConfig {
+
+    @Bean
+    public PathConfig testPathConfig(@TempDir Path tmp) throws IOException {
+        PathConfig pathConfig = new PathConfig();
+        PathConfig.Processed processed = new PathConfig.Processed();
+        processed.setXml(tmp.resolve("processed/xml"));
+        processed.setPdf(tmp.resolve("processed/pdf"));
+        processed.setCsv(tmp.resolve("processed/csv"));
+        pathConfig.setProcessed(processed);
+        pathConfig.setOutput(tmp.resolve("output"));
+        Files.createDirectories(pathConfig.getOutput());
+        return pathConfig;
+    }
+}
 ```
 
----
-
-### ✅ **If you want to suppress instead**
-
-If these directories are *already isolated* (e.g. inside a container or a pod’s private `/tmp`),
-you can keep your code and add a justification comment:
-
-```java
-// Sonar justification: /tmp is isolated inside container; only application user has access
-private static final Path OUTPUT_DIR = Path.of("/tmp/output");
-```
-
-That will silence it after review.
+Spring will inject this test bean instead of your production one.
 
 ---
 
-### 💡 **Summary**
+### ✅ TL;DR — the clean, reusable approach
 
-| Approach                          | Fix Quality               | Sonar Reaction          |
-| --------------------------------- | ------------------------- | ----------------------- |
-| Use subdir under `java.io.tmpdir` | ✅ Best                    | 🟢 Clean                |
-| Add permissions after file create | ✅ Good                    | 🟢 Clean                |
-| Configuration via property        | ✅ Best for prod           | 🟢 Clean                |
-| Justify with comment              | ⚠️ Only for containerized | 🟡 Manual review needed |
+1. **Create** `BasePathConfigTest` with reusable temp setup.
+2. **Extend** it in every test needing `pathConfig`.
+3. **Inject** it into your class under test (e.g., tasklet, writer, mover).
+4. **No more `/tmp` hardcoding**, no more NPEs.
+5. Tests are isolated, fast, and fully Sonar-compliant.
 
 ---
 
-Would you like me to show you exactly how to refactor **`PackageAndUploadTasklet`** and **`CosStorageService`** with the secure `BASE_TMP_DIR` approach (ready-to-copy version)?
+Would you like me to show you the *updated version* of one of your other test classes (for example, `PackageAndUploadTaskletTest` or `CosStorageServiceTest`) rewritten to extend this new base class and run cleanly?
