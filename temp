@@ -1,3 +1,215 @@
+Perfect — that tells us you’re **very close** 🎯.
+
+If you’re getting an exception at:
+
+```java
+Files.createDirectories(xmlDir);
+```
+
+and the stacktrace shows something like:
+
+```
+java.lang.NullPointerException: Cannot invoke "java.nio.file.Path.getFileSystem()" because "xmlDir" is null
+```
+
+then the root cause is:
+
+> ✅ The variable `xmlDir` is still `null` when you try to call `Files.createDirectories(...)`.
+
+Let’s fix that cleanly and permanently.
+
+---
+
+## 🧩 1️⃣ Understand what’s happening
+
+You probably have something like this in your `beforeStep()` or configuration:
+
+```java
+Path xmlDir = pathConfig.getProcessed().getXml();
+Files.createDirectories(xmlDir);
+```
+
+That means one of these three things is `null`:
+
+1. `pathConfig` — not injected or not registered
+2. `pathConfig.getProcessed()` — nested bean not initialized
+3. `pathConfig.getProcessed().getXml()` — property not bound (missing in YAML)
+
+So let’s check all three step by step.
+
+---
+
+## ✅ 2️⃣ Confirm your `PathConfig` class is correct
+
+Here’s the **correct, bulletproof structure** for your config class:
+
+```java
+@Configuration
+@ConfigurationProperties(prefix = "alphacredit.paths")
+public class PathConfig {
+
+    private Path base;
+    private Path output;
+    private final Processed processed = new Processed();
+    private final Unzipped unzipped = new Unzipped();
+
+    public static class Processed {
+        private Path xml;
+        private Path pdf;
+        private Path csv;
+        // getters/setters
+    }
+
+    public static class Unzipped {
+        private Path xml;
+        private Path csv;
+        // getters/setters
+    }
+
+    // getters and setters for base, output, processed, unzipped
+}
+```
+
+✅ Notes:
+
+* Use `public static` for nested classes (non-static won’t bind properly).
+* Pre-initialize `processed` and `unzipped` (`new Processed()`) to avoid null.
+* Make sure getters and setters are present for *every* field.
+
+---
+
+## ✅ 3️⃣ Check your YAML values
+
+In `src/test/resources/application-test.yaml` (or your active profile):
+
+```yaml
+alphacredit:
+  paths:
+    base: ${java.io.tmpdir}/alphacredit-test
+    output: ${alphacredit.paths.base}/output
+    processed:
+      xml: ${alphacredit.paths.base}/processed/xml
+      pdf: ${alphacredit.paths.base}/processed/pdf
+      csv: ${alphacredit.paths.base}/processed/csv
+    unzipped:
+      xml: ${alphacredit.paths.base}/unzipped/xml
+      csv: ${alphacredit.paths.base}/unzipped/csv
+```
+
+✅ Make sure this file is actually loaded by your test (e.g., `spring.profiles.active=test`).
+
+---
+
+## ✅ 4️⃣ Confirm Spring is binding it
+
+Add this quick test to verify:
+
+```java
+@ActiveProfiles("test")
+@SpringBootTest
+class PathConfigTest {
+
+    @Autowired
+    PathConfig pathConfig;
+
+    @Test
+    void printPaths() {
+        System.out.println("XML dir: " + pathConfig.getProcessed().getXml());
+        System.out.println("Output dir: " + pathConfig.getOutput());
+        assertNotNull(pathConfig.getProcessed().getXml());
+    }
+}
+```
+
+If this prints `null`, your binding or YAML isn’t correct.
+
+---
+
+## ✅ 5️⃣ Defensive coding in your tasklet
+
+Even with correct binding, you can **safeguard** against null values:
+
+```java
+@Override
+public void beforeStep(StepExecution stepExecution) {
+    Path xmlDir = pathConfig.getProcessed() != null
+            ? pathConfig.getProcessed().getXml()
+            : null;
+
+    if (xmlDir == null) {
+        throw new IllegalStateException("XML directory path is not configured (alphacredit.paths.processed.xml).");
+    }
+
+    try {
+        Files.createDirectories(xmlDir);
+        log.info("Created XML directory at: {}", xmlDir.toAbsolutePath());
+    } catch (IOException e) {
+        throw new IllegalStateException("Failed to create XML directory", e);
+    }
+}
+```
+
+✅ This will fail fast with a clear message instead of an NPE.
+
+---
+
+## ✅ 6️⃣ Optional — set default fallback paths
+
+If you want to *guarantee* this never fails, you can add safe defaults in `PathConfig`:
+
+```java
+private Path base = Path.of(System.getProperty("java.io.tmpdir"), "alphacredit-default");
+private Path output = base.resolve("output");
+
+public static class Processed {
+    private Path xml = Path.of(System.getProperty("java.io.tmpdir"), "alphacredit-default", "processed", "xml");
+    private Path pdf = Path.of(System.getProperty("java.io.tmpdir"), "alphacredit-default", "processed", "pdf");
+    private Path csv = Path.of(System.getProperty("java.io.tmpdir"), "alphacredit-default", "processed", "csv");
+}
+```
+
+✅ Even if YAML binding fails, your code has valid `Path` objects and won’t crash.
+
+---
+
+## 🧠 7️⃣ Quick checklist
+
+| Item                                                     | What to verify                       | Expected |
+| -------------------------------------------------------- | ------------------------------------ | -------- |
+| `@ConfigurationProperties(prefix = "alphacredit.paths")` | Present on `PathConfig`              | ✅        |
+| Nested classes `Processed`, `Unzipped`                   | Declared `public static`             | ✅        |
+| `processed` and `unzipped`                               | Initialized with `new`               | ✅        |
+| YAML keys                                                | Match exactly                        | ✅        |
+| Active Spring profile                                    | `test` or `default` with YAML loaded | ✅        |
+| Defensive null checks                                    | In your tasklet                      | ✅        |
+
+---
+
+## ✅ 8️⃣ TL;DR fix
+
+If you want the immediate, safe solution —
+replace your existing field declarations in `PathConfig` with this:
+
+```java
+private final Processed processed = new Processed();
+private final Unzipped unzipped = new Unzipped();
+```
+
+and make both nested classes `public static`.
+
+Then ensure your YAML defines:
+
+```yaml
+alphacredit.paths.processed.xml: /tmp/alphacredit-test/processed/xml
+```
+
+After that, `Files.createDirectories(xmlDir)` will run cleanly 🎉
+
+---
+
+Would you like me to show you the **complete corrected `PathConfig` class** (with defaults + proper Spring Boot binding) so you can drop it in directly?
+
+
 ✅ **Absolutely — that’s actually the *best* and cleanest approach** — and SonarQube will also consider it safe when you externalize the directory paths.
 
 Let’s go step-by-step so you can do this the right way for your `AlphaCredit` project structure.
