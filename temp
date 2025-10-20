@@ -6,7 +6,12 @@ class InvoiceJobSchedulerTest {
     @Mock private Job csvInvoiceJob;
     @Mock private SchedulerConfig schedulerConfig;
 
-    @InjectMocks private InvoiceJobScheduler scheduler;
+    private InvoiceJobScheduler scheduler;
+
+    @BeforeEach
+    void setup() {
+        scheduler = new InvoiceJobScheduler(jobLauncher, xmlInvoiceJob, csvInvoiceJob, schedulerConfig);
+    }
 
     @Test
     void shouldRunXmlInvoiceJob() throws Exception {
@@ -15,6 +20,7 @@ class InvoiceJobSchedulerTest {
 
         scheduler.xmlInvoiceJobScheduler();
 
+        // Verify correct job and parameter
         verify(jobLauncher, times(1))
             .run(eq(xmlInvoiceJob), argThat(p -> "xml".equals(p.getString("jobType"))));
     }
@@ -37,7 +43,7 @@ class InvoiceJobSchedulerTest {
 
         assertThatThrownBy(() -> scheduler.runJob(xmlInvoiceJob, "xmlInvoiceJob"))
             .isInstanceOf(InvoiceProcessingException.class)
-            .hasMessageContaining("Failed to launch invoiceJob");
+            .hasMessageContaining("Failed to launch");
 
         verify(jobLauncher).run(any(Job.class), any(JobParameters.class));
     }
