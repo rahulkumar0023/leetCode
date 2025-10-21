@@ -1,22 +1,33 @@
-// 3 Pre-validate entry name
+// 3️⃣ Pre-validate entry name
 if (entryName == null || entryName.trim().isEmpty()) {
-    continue;
+    continue; // Skip blanks
 }
-if (entryName.contains("..") || entryName.startsWith("/") || entryName.startsWith("\\")) {
+
+// Reject traversal attempts or weird absolute names
+if (entryName.contains("..") || entryName.contains(":") ||
+    entryName.startsWith("/") || entryName.startsWith("\\") ||
+    entryName.contains("//") || entryName.contains("\\\\")) {
     throw new IOException("Unsafe ZIP entry name: " + entryName);
 }
 
-// 4 Canonical path validation (safe version)
-Path targetPath = baseDir.toPath().resolve(entryName).normalize();
-if (!targetPath.startsWith(baseDir.toPath())) {
+// 4️⃣ Manual canonical validation before creating Path
+File baseCanonical = baseDir.getCanonicalFile();
+File outFile = new File(baseCanonical, entryName);
+File outCanonical = outFile.getCanonicalFile();
+
+// If the canonicalized output path is not within base, reject it
+if (!outCanonical.getPath().startsWith(baseCanonical.getPath() + File.separator)) {
     throw new IOException("Entry is outside target dir: " + entryName);
 }
 
-// ✅ Only now create file
-File outFile = targetPath.toFile();
-
-// 5 If entry is a directory
+// 5️⃣ Proceed safely
 if (entry.isDirectory()) {
-    Files.createDirectories(outFile.toPath());
+    Files.createDirectories(outCanonical.toPath());
     continue;
+}
+Files.createDirectories(outCanonical.getParentFile().toPath());
+
+// Now write safely
+try (OutputStream out = Files.newOutputStream(outCanonical.toPath())) {
+    zis.transferTo(out);
 }
