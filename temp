@@ -1,33 +1,91 @@
-// 3️⃣ Pre-validate entry name
-if (entryName == null || entryName.trim().isEmpty()) {
-    continue; // Skip blanks
-}
+private void unzipFile(File zipFile, File baseDir) throws IOException {
+    // 1️⃣ Ensure controlled extraction directory exists (e.g. /tmp/alphacredit/unzipped)
+    File safeBaseDir = baseDir.getCanonicalFile();
+    if (!safeBaseDir.exists()) {
+        Files.createDirectories(safeBaseDir.toPath());
+    }
 
-// Reject traversal attempts or weird absolute names
-if (entryName.contains("..") || entryName.contains(":") ||
-    entryName.startsWith("/") || entryName.startsWith("\\") ||
-    entryName.contains("//") || entryName.contains("\\\\")) {
-    throw new IOException("Unsafe ZIP entry name: " + entryName);
-}
+    log.info("Unzipping: {}", zipFile.getAbsolutePath());
+    log.info("Target base directory: {}", safeBaseDir.getAbsolutePath());
 
-// 4️⃣ Manual canonical validation before creating Path
-File baseCanonical = baseDir.getCanonicalFile();
-File outFile = new File(baseCanonical, entryName);
-File outCanonical = outFile.getCanonicalFile();
+    // 2️⃣ Security thresholds
+    final int    THRESHOLD_ENTRIES = 10_000;          // Max entries allowed
+    final long   THRESHOLD_SIZE    = 1_000_000_000L;  // 1 GB uncompressed
+    final double THRESHOLD_RATIO   = 10.0;            // Max compression ratio
 
-// If the canonicalized output path is not within base, reject it
-if (!outCanonical.getPath().startsWith(baseCanonical.getPath() + File.separator)) {
-    throw new IOException("Entry is outside target dir: " + entryName);
-}
+    int  entryCount        = 0;
+    long totalUncompressed = 0;
 
-// 5️⃣ Proceed safely
-if (entry.isDirectory()) {
-    Files.createDirectories(outCanonical.toPath());
-    continue;
-}
-Files.createDirectories(outCanonical.getParentFile().toPath());
+    byte[] buffer = new byte[2048];
 
-// Now write safely
-try (OutputStream out = Files.newOutputStream(outCanonical.toPath())) {
-    zis.transferTo(out);
+    try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(new FileInputStream(zipFile)))) {
+        ZipEntry entry;
+        while ((entry = zis.getNextEntry()) != null) {
+
+            String entryName = entry.getName();
+
+            // 3️⃣ Pre-validate entry name (reject weird or malicious paths)
+            if (entryName == null || entryName.trim().isEmpty()) {
+                continue;
+            }
+            if (entryName.contains("..") || entryName.contains(":")
+                    || entryName.startsWith("/") || entryName.startsWith("\\")
+                    || entryName.contains("//") || entryName.contains("\\\\")) {
+                throw new IOException("Unsafe ZIP entry name: " + entryName);
+            }
+
+            // 4️⃣ Build and validate canonical path before touching filesystem
+            File outFile = new File(safeBaseDir, entryName);
+            File outCanonical = outFile.getCanonicalFile();
+
+            if (!outCanonical.getPath().startsWith(safeBaseDir.getPath() + File.separator)) {
+                throw new IOException("Entry is outside target dir: " + entryName);
+            }
+
+            // 5️⃣ If entry is a directory, create and continue
+            if (entry.isDirectory()) {
+                Files.createDirectories(outCanonical.toPath());
+                zis.closeEntry();
+                continue;
+            }
+
+            // 6️⃣ Create parent directories for nested files
+            Files.createDirectories(outCanonical.getParentFile().toPath());
+
+            // 7️⃣ Extract file safely with anti-zip-bomb checks
+            try (OutputStream out = new BufferedOutputStream(Files.newOutputStream(outCanonical.toPath()))) {
+                int bytesRead;
+                long entrySize = 0;
+
+                while ((bytesRead = zis.read(buffer)) > 0) {
+                    out.write(buffer, 0, bytesRead);
+                    entrySize += bytesRead;
+                    totalUncompressed += bytesRead;
+
+                    // Check compression ratio (if compressed size > 0)
+                    if (entry.getCompressedSize() > 0) {
+                        double ratio = (double) entrySize / entry.getCompressedSize();
+                        if (ratio > THRESHOLD_RATIO) {
+                            throw new IOException("Zip bomb detected (ratio > " + THRESHOLD_RATIO + ")");
+                        }
+                    }
+
+                    // Check total uncompressed data size
+                    if (totalUncompressed > THRESHOLD_SIZE) {
+                        throw new IOException("Archive too large (>" + THRESHOLD_SIZE + " bytes)");
+                    }
+                }
+            }
+
+            entryCount++;
+            if (entryCount > THRESHOLD_ENTRIES) {
+                throw new IOException("Too many entries in archive (" + entryCount + ")");
+            }
+
+            zis.closeEntry();
+        }
+    }
+
+    log.info("✅ Unzip completed: {} entries, {} bytes extracted",
+            entryCount, totalUncompressed);
 }
