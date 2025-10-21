@@ -1,86 +1,22 @@
-private void unzipFile(File zipFile, Path targetDir) throws IOException {
-    // 1️⃣ Ensure target directory exists (e.g., /tmp/alphacredit/unzipped)
-    Files.createDirectories(targetDir);
-    File baseDir = targetDir.toFile();
+// 3 Pre-validate entry name
+if (entryName == null || entryName.trim().isEmpty()) {
+    continue;
+}
+if (entryName.contains("..") || entryName.startsWith("/") || entryName.startsWith("\\")) {
+    throw new IOException("Unsafe ZIP entry name: " + entryName);
+}
 
-    log.info("Unzipping: {}", zipFile.getAbsolutePath());
-    log.info("Target directory: {}", baseDir.getAbsolutePath());
+// 4 Canonical path validation (safe version)
+Path targetPath = baseDir.toPath().resolve(entryName).normalize();
+if (!targetPath.startsWith(baseDir.toPath())) {
+    throw new IOException("Entry is outside target dir: " + entryName);
+}
 
-    // 2️⃣ Security thresholds (tunable)
-    final int    THRESHOLD_ENTRIES = 10_000;          // Max number of entries
-    final long   THRESHOLD_SIZE    = 1_000_000_000L;  // 1 GB total uncompressed
-    final double THRESHOLD_RATIO   = 10.0;            // Compression ratio limit
+// ✅ Only now create file
+File outFile = targetPath.toFile();
 
-    int entryCount = 0;
-    long totalUncompressed = 0L;
-
-    try (ZipInputStream zis = new ZipInputStream(new FileInputStream(zipFile))) {
-        ZipEntry entry;
-        byte[] buffer = new byte[2048];
-
-        while ((entry = zis.getNextEntry()) != null) {
-            String entryName = entry.getName();
-
-            // 3️⃣ Pre-validate entry name (prevents traversal or weird characters)
-            if (entryName == null || entryName.trim().isEmpty()) {
-                continue; // skip blank entries
-            }
-            if (entryName.contains("..") || entryName.startsWith("/") || entryName.startsWith("\\")) {
-                throw new IOException("Unsafe ZIP entry name: " + entryName);
-            }
-
-            // 4️⃣ Canonical path validation (replaces resolve/normalize)
-            File outFile = new File(baseDir, entryName);
-            String baseCanonicalPath = baseDir.getCanonicalPath();
-            String outCanonicalPath  = outFile.getCanonicalPath();
-
-            if (!outCanonicalPath.startsWith(baseCanonicalPath + File.separator)) {
-                throw new IOException("Entry is outside target dir: " + entryName);
-            }
-
-            // 5️⃣ If entry is a directory — create and continue
-            if (entry.isDirectory()) {
-                Files.createDirectories(outFile.toPath());
-                continue;
-            }
-
-            // 6️⃣ Ensure parent directories exist
-            Files.createDirectories(outFile.toPath().getParent());
-
-            // 7️⃣ Extract file safely with anti-bomb protection
-            try (OutputStream out = new BufferedOutputStream(Files.newOutputStream(outFile.toPath()))) {
-                int bytesRead;
-                long entryUncompressed = 0L;
-
-                while ((bytesRead = zis.read(buffer)) > 0) {
-                    out.write(buffer, 0, bytesRead);
-                    entryUncompressed += bytesRead;
-                    totalUncompressed += bytesRead;
-
-                    // Check compression ratio (avoid Zip Bomb)
-                    long compressedSize = entry.getCompressedSize();
-                    if (compressedSize > 0) {
-                        double ratio = (double) entryUncompressed / compressedSize;
-                        if (ratio > THRESHOLD_RATIO) {
-                            throw new IOException("Zip bomb detected (ratio > " + THRESHOLD_RATIO + ")");
-                        }
-                    }
-
-                    // Check total size threshold
-                    if (totalUncompressed > THRESHOLD_SIZE) {
-                        throw new IOException("Archive too large (> " + THRESHOLD_SIZE + " bytes)");
-                    }
-                }
-            }
-
-            entryCount++;
-            if (entryCount > THRESHOLD_ENTRIES) {
-                throw new IOException("Too many entries in archive (" + entryCount + ")");
-            }
-
-            zis.closeEntry();
-        }
-    }
-
-    log.info("✅ Unzip completed: {} entries, {} bytes extracted", entryCount, totalUncompressed);
+// 5 If entry is a directory
+if (entry.isDirectory()) {
+    Files.createDirectories(outFile.toPath());
+    continue;
 }
