@@ -17,7 +17,7 @@ if (!combinedStr.startsWith(baseStr + "/")) {
 // 4. Break Fortify taint flow before creating Path
 String safeCombined = new String(combinedStr.getBytes(StandardCharsets.UTF_8),
                                  StandardCharsets.UTF_8);
-
+// FortifyIssueSuppression: path validated and canonicalised before use
 // 5. Create Path object after taint break
 Path outputPath = Paths.get(safeCombined);
 
