@@ -1,186 +1,88 @@
 private void unzipFile(File zipFile, Path targetDir) throws IOException {
-    // Validate zipFile input
+    // 1. Validate the zip input
     if (!zipFile.exists() || !zipFile.isFile() || !zipFile.canRead()) {
         throw new IOException("Invalid zip file: " + zipFile);
     }
 
-    // Ensure target directory exists
+    // 2. Ensure target directory exists
     Files.createDirectories(targetDir);
     String canonicalTarget = targetDir.toFile().getCanonicalPath();
 
     log.info("Unzipping: {}", zipFile.getCanonicalPath());
     log.info("Target directory: {}", canonicalTarget);
 
-    final int    THRESHOLD_ENTRIES   = 10_000;
-    final long   THRESHOLD_SIZE      = 1_000_000_000L;
-    final double THRESHOLD_RATIO     = 10.0;
+    final int    MAX_ENTRIES     = 10_000;
+    final long   MAX_TOTAL_SIZE  = 1_000_000_000L; // 1 GB
+    final double MAX_RATIO       = 10.0;
 
-    int  entryCount        = 0;
-    long totalUncompressed = 0;
+    int entryCount = 0;
+    long totalSize = 0;
 
     try (ZipInputStream zis = new ZipInputStream(new FileInputStream(zipFile))) {
         ZipEntry entry;
-        byte[] buffer = new byte[2048];
+        byte[] buffer = new byte[4096];
 
         while ((entry = zis.getNextEntry()) != null) {
-            // Get validated safe path string
-            String safePath = buildSafePathString(canonicalTarget, entry);
+            String entryName = entry.getName();
 
+            // 3. Basic validation - reject dangerous patterns
+            if (entryName == null || entryName.isBlank()) {
+                throw new IOException("Invalid entry name");
+            }
+            if (entryName.contains("..") || entryName.contains(":")
+                    || entryName.startsWith("/") || entryName.startsWith("\\")) {
+                throw new IOException("Unsafe entry name: " + entryName);
+            }
+
+            // 4. Build the output file and validate canonical location
+            File outFile = new File(targetDir.toFile(), entryName);
+            String canonicalOutput = outFile.getCanonicalPath();
+
+            if (!canonicalOutput.startsWith(canonicalTarget + File.separator)) {
+                throw new IOException("Entry is outside target dir: " + entryName);
+            }
+
+            // 5. Create directories safely (after validation)
             if (entry.isDirectory()) {
-                Files.createDirectories(Paths.get(safePath));
+                Files.createDirectories(outFile.toPath());
+                zis.closeEntry();
                 continue;
             }
 
-            // Create parent directories using Paths.get (no File constructor)
-            Path outputPath = Paths.get(safePath);
-            Path parent = outputPath.getParent();
-            if (parent != null) {
-                Files.createDirectories(parent);
-            }
+            Files.createDirectories(outFile.getParentFile().toPath());
 
-            // Extract file with anti-bomb checks
-            try (OutputStream os = new BufferedOutputStream(Files.newOutputStream(outputPath))) {
+            // 6. Extract file with anti-zip-bomb checks
+            try (OutputStream os =
+                         new BufferedOutputStream(Files.newOutputStream(outFile.toPath()))) {
                 int bytesRead;
                 long entrySize = 0;
                 long compressedSize = entry.getCompressedSize();
 
                 while ((bytesRead = zis.read(buffer)) > 0) {
                     os.write(buffer, 0, bytesRead);
-                    entrySize      += bytesRead;
-                    totalUncompressed += bytesRead;
+                    entrySize += bytesRead;
+                    totalSize += bytesRead;
 
-                    // Zip bomb ratio check
-                    if (compressedSize > 0) {
-                        double ratio = (double) entrySize / compressedSize;
-                        if (ratio > THRESHOLD_RATIO) {
-                            throw new IOException("Zip bomb detected (ratio > " + THRESHOLD_RATIO + ")");
-                        }
-                    } else if (compressedSize == -1 && entrySize > THRESHOLD_SIZE / 10) {
-                        throw new IOException("Entry size suspicious (compressed size unknown)");
+                    if (compressedSize > 0 &&
+                            (double) entrySize / compressedSize > MAX_RATIO) {
+                        throw new IOException("Zip bomb detected (ratio > " + MAX_RATIO + ")");
                     }
 
-                    // Total size check
-                    if (totalUncompressed > THRESHOLD_SIZE) {
-                        throw new IOException("Archive too large (>" + THRESHOLD_SIZE + " bytes)");
+                    if (totalSize > MAX_TOTAL_SIZE) {
+                        throw new IOException("Archive too large (>" + MAX_TOTAL_SIZE + " bytes)");
                     }
                 }
             }
 
             entryCount++;
-            if (entryCount > THRESHOLD_ENTRIES) {
-                throw new IOException("Too many entries in archive (" + entryCount + ")");
+            if (entryCount > MAX_ENTRIES) {
+                throw new IOException("Too many entries (" + entryCount + ")");
             }
 
             zis.closeEntry();
         }
     }
 
-    log.info("✅ Unzip completed: {} entries, {} bytes extracted", entryCount, totalUncompressed);
-}
-
-/**
- * Builds a safe absolute path string using only string operations and validation.
- * No File objects created with untrusted data.
- */
-private String buildSafePathString(String canonicalTargetDir, ZipEntry entry) throws IOException {
-    String name = entry.getName();
-    if (name == null || name.isEmpty()) {
-        throw new IOException("Invalid entry name");
-    }
-
-    // Validate and sanitize - this cleanses the taint
-    String sanitized = validateAndSanitize(name);
-
-    // Build the full path using string concatenation only
-    String fullPath = canonicalTargetDir + File.separator + sanitized;
-
-    // Validate using string operations only - no File object creation
-    if (!isPathWithinDirectory(fullPath, canonicalTargetDir)) {
-        throw new IOException("Entry is outside target dir: " + name);
-    }
-
-    return fullPath;
-}
-
-/**
- * Validates and sanitizes a ZIP entry name.
- * Returns a clean string that can be safely used in path construction.
- */
-private String validateAndSanitize(String name) throws IOException {
-    // Reject null bytes
-    if (name.indexOf('\u0000') >= 0) {
-        throw new IOException("Null byte in entry name");
-    }
-
-    // Reject absolute paths
-    if (name.startsWith("/") || name.startsWith("\\") || name.contains(":")) {
-        throw new IOException("Absolute path not allowed: " + name);
-    }
-
-    // Reject path traversal sequences
-    if (name.contains("..")) {
-        throw new IOException("Path traversal detected: " + name);
-    }
-
-    // Normalize path separators to forward slash
-    String cleaned = name.replace('\\', '/');
-
-    // Remove leading slashes
-    while (cleaned.startsWith("/")) {
-        cleaned = cleaned.substring(1);
-    }
-
-    if (cleaned.isEmpty()) {
-        throw new IOException("Empty entry name after sanitization");
-    }
-
-    // Validate and rebuild each segment
-    String[] segments = cleaned.split("/");
-    StringBuilder validated = new StringBuilder();
-
-    for (int i = 0; i < segments.length; i++) {
-        String segment = segments[i];
-
-        // Skip empty segments
-        if (segment.isEmpty()) {
-            continue;
-        }
-
-        // Reject . and ..
-        if (segment.equals(".") || segment.equals("..")) {
-            throw new IOException("Invalid segment: " + segment);
-        }
-
-        // Whitelist validation - only allow safe characters
-        if (!segment.matches("^[a-zA-Z0-9._\\-\\s]+$")) {
-            throw new IOException("Illegal characters in segment: " + segment);
-        }
-
-        // Build the validated path with platform-specific separator
-        if (validated.length() > 0) {
-            validated.append(File.separator);
-        }
-        validated.append(segment);
-    }
-
-    return validated.toString();
-}
-
-/**
- * Checks if a path is within a directory using only string operations.
- * Avoids creating File objects.
- */
-private boolean isPathWithinDirectory(String childPath, String parentPath) {
-    // Normalize separators for comparison
-    String normalizedChild = childPath.replace('\\', '/');
-    String normalizedParent = parentPath.replace('\\', '/');
-
-    // Ensure parent ends with separator for proper prefix check
-    if (!normalizedParent.endsWith("/")) {
-        normalizedParent += "/";
-    }
-
-    // Check if child starts with parent
-    return normalizedChild.startsWith(normalizedParent) || 
-           normalizedChild.equals(parentPath);
+    log.info("Unzip completed: {} entries, {} bytes extracted",
+            entryCount, totalSize);
 }
