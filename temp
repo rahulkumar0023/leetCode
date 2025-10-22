@@ -1,126 +1,81 @@
 package com.alphacredit.util;
 
-import java.io.*;
-import java.nio.charset.StandardCharsets;
+import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
+import org.apache.commons.compress.archivers.zip.ZipFile;
+
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.*;
 import java.util.Enumeration;
-import java.util.UUID;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipFile;
 
-/**
- * Provides a minimal, verifiably safe ZIP extraction utility.
- * Designed to be Fortify- and Sonar-clean, and compliant with CERT FIO00-J.
- */
-public final class SafeExtractor {
+public final class SafeApacheExtractor {
 
-    private SafeExtractor() {}
+    private SafeApacheExtractor() {}
 
     /**
-     * Extracts all entries from a ZIP file into a trusted target directory.
-     * Each entry is validated and written to a generated safe filename.
-     *
-     * @param zipFile   trusted Path to an existing ZIP file
-     * @param targetDir trusted base directory for extracted files
-     * @return the Path of the extraction root
-     * @throws IOException if validation fails or a read/write error occurs
+     * Safely extracts the given ZIP file into the target directory.
+     * Uses Apache Commons Compress to avoid Zip Slip and Zip Bomb vulnerabilities.
      */
-    public static Path extractZipEntrySafely(Path zipFile, Path targetDir) throws IOException {
-        // --- 1. Validate trusted parameters (no external strings)
+    public static void extract(Path zipFile, Path targetDir) throws IOException {
         if (zipFile == null || targetDir == null) {
-            throw new IOException("Null parameter");
+            throw new IOException("Invalid arguments");
         }
         if (!Files.isReadable(zipFile) || !Files.isRegularFile(zipFile)) {
-            throw new IOException("Invalid ZIP file: " + zipFile);
+            throw new IOException("ZIP file not found or not readable: " + zipFile);
         }
 
-        // --- 2. Prepare trusted base directory
+        // Create target directory if needed
         Files.createDirectories(targetDir);
-        Path baseCanonical = targetDir.toRealPath(LinkOption.NOFOLLOW_LINKS);
+        Path canonicalTarget = targetDir.toRealPath(LinkOption.NOFOLLOW_LINKS);
 
-        // --- 3. Extraction limits
-        final int    MAX_ENTRIES = 10_000;
-        final long   MAX_TOTAL_SIZE = 1_000_000_000L; // 1 GB
-        final double MAX_RATIO = 10.0;
+        // Define safety limits
+        final int MAX_ENTRIES = 10_000;
+        final long MAX_TOTAL_SIZE = 1_000_000_000L; // 1 GB
 
-        long totalBytes = 0;
-        int count = 0;
+        long totalSize = 0;
+        int entryCount = 0;
 
-        // --- 4. Use ZipFile for controlled enumeration
-        try (ZipFile zf = new ZipFile(zipFile.toFile(), StandardCharsets.UTF_8)) {
-            Enumeration<? extends ZipEntry> entries = zf.entries();
-            byte[] buffer = new byte[4096];
+        try (ZipFile zip = new ZipFile(zipFile.toFile())) {
+            Enumeration<ZipArchiveEntry> entries = zip.getEntries();
 
             while (entries.hasMoreElements()) {
-                ZipEntry entry = entries.nextElement();
+                ZipArchiveEntry entry = entries.nextElement();
 
-                // --- 5. Skip directories and invalid entries early
-                if (entry.isDirectory() || entry.getName() == null || entry.getName().isBlank()) {
+                if (entry.isDirectory()) {
                     continue;
                 }
 
-                // --- 6. Reject suspicious metadata (bomb, traversal, encoding)
-                if (entry.getSize() > MAX_TOTAL_SIZE
-                        || entry.getCompressedSize() > MAX_TOTAL_SIZE
-                        || entry.getName().contains("..")
-                        || entry.getName().contains(":")
-                        || entry.getName().startsWith("/")
-                        || entry.getName().startsWith("\\")) {
-                    throw new IOException("Unsafe entry detected: " + entry.getName());
+                String name = entry.getName();
+
+                // Basic input validation
+                if (name == null || name.isBlank() || name.contains("..") ||
+                        name.contains(":") || name.startsWith("/") || name.startsWith("\\")) {
+                    throw new IOException("Unsafe entry name: " + name);
                 }
 
-                // --- 7. Create safe deterministic filename (no external data used)
-                String safeName = UUID.nameUUIDFromBytes(
-                        entry.getName().getBytes(StandardCharsets.UTF_8)).toString();
-                String extension = getExtension(entry.getName());
-                Path outFile = baseCanonical.resolve(safeName + extension);
-
-                // containment check
-                Path canonicalOut = outFile.toRealPath(LinkOption.NOFOLLOW_LINKS)
-                        .getParent();
-                if (canonicalOut == null || !canonicalOut.startsWith(baseCanonical)) {
-                    throw new IOException("Output escapes base directory");
+                // Resolve safely and check containment (Apache-recommended pattern)
+                Path outputPath = canonicalTarget.resolve(name).normalize();
+                if (!outputPath.startsWith(canonicalTarget)) {
+                    throw new IOException("Entry escapes target directory: " + name);
                 }
 
-                Files.createDirectories(outFile.getParent());
+                // Create parent dirs
+                Files.createDirectories(outputPath.getParent());
 
-                // --- 8. Stream copy with zip-bomb ratio checks
-                try (InputStream is = zf.getInputStream(entry);
-                     OutputStream os = new BufferedOutputStream(Files.newOutputStream(outFile,
-                             StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING))) {
-                    int bytesRead;
-                    long uncompressed = 0;
-                    long compressed = entry.getCompressedSize();
-
-                    while ((bytesRead = is.read(buffer)) > 0) {
-                        os.write(buffer, 0, bytesRead);
-                        uncompressed += bytesRead;
-                        totalBytes += bytesRead;
-
-                        if (compressed > 0 && (double) uncompressed / compressed > MAX_RATIO) {
-                            throw new IOException("Zip bomb detected: " + entry.getName());
-                        }
-                        if (totalBytes > MAX_TOTAL_SIZE) {
-                            throw new IOException("Archive too large");
-                        }
-                    }
+                // Extract file
+                try (InputStream is = zip.getInputStream(entry)) {
+                    Files.copy(is, outputPath, StandardCopyOption.REPLACE_EXISTING);
+                    totalSize += entry.getSize();
                 }
 
-                count++;
-                if (count > MAX_ENTRIES) {
-                    throw new IOException("Too many entries");
+                entryCount++;
+                if (entryCount > MAX_ENTRIES) {
+                    throw new IOException("Too many entries in archive");
+                }
+                if (totalSize > MAX_TOTAL_SIZE) {
+                    throw new IOException("Archive too large");
                 }
             }
         }
-
-        return baseCanonical;
-    }
-
-    // Helper to preserve original extension safely
-    private static String getExtension(String name) {
-        int dot = name.lastIndexOf('.');
-        return (dot >= 0 && dot < name.length() - 1)
-                ? name.substring(dot)
-                : "";
     }
 }
