@@ -1,80 +1,62 @@
-String fullPath = canonicalBase + File.separator + safeName;
-String canonicalOut = new File(fullPath).getCanonicalPath();
-
-if (!canonicalOut.startsWith(canonicalBase + File.separator)) {
-    throw new IOException("Entry is outside target dir: " + entryName);
-}
-
-File outFile = new File(canonicalOut);
-
-private void unzipFile(File zipFile, Path targetDir) throws IOException {
-    // Validate the input ZIP file
-    if (!zipFile.exists() || !zipFile.isFile() || !zipFile.canRead()) {
+private void unzipFile(Path zipFile, Path targetDir) throws IOException {
+    // 1. Validate ZIP input
+    if (zipFile == null || !Files.exists(zipFile) || !Files.isRegularFile(zipFile) || !Files.isReadable(zipFile)) {
         throw new IOException("Invalid zip file: " + zipFile);
     }
 
-    // Ensure target directory exists and resolve canonical base
+    // 2. Prepare target directory
     Files.createDirectories(targetDir);
-    File targetBase = targetDir.toFile();
-    String canonicalBase = targetBase.getCanonicalPath();
+    Path canonicalBase = targetDir.toRealPath(LinkOption.NOFOLLOW_LINKS);
 
-    log.info("Unzipping: {}", zipFile.getCanonicalPath());
+    log.info("Unzipping: {}", zipFile.toRealPath(LinkOption.NOFOLLOW_LINKS));
     log.info("Target directory: {}", canonicalBase);
 
-    final int    MAX_ENTRIES    = 10_000;
+    final int    MAX_ENTRIES = 10_000;
     final long   MAX_TOTAL_SIZE = 1_000_000_000L; // 1 GB
-    final double MAX_RATIO      = 10.0;
+    final double MAX_RATIO = 10.0;
 
     int entryCount = 0;
     long totalSize = 0;
 
-    try (ZipInputStream zis = new ZipInputStream(new FileInputStream(zipFile))) {
+    try (ZipInputStream zis = new ZipInputStream(Files.newInputStream(zipFile))) {
         ZipEntry entry;
         byte[] buffer = new byte[4096];
 
         while ((entry = zis.getNextEntry()) != null) {
-
-            // Step 1: validate and rebuild entry name (break taint)
             String entryName = entry.getName();
             if (entryName == null || entryName.isBlank()) {
                 throw new IOException("Invalid entry name");
             }
 
-            // reject traversal or absolute paths
-            if (entryName.contains("..") || entryName.contains(":")
-                    || entryName.startsWith("/") || entryName.startsWith("\\")) {
-                throw new IOException("Unsafe entry name: " + entryName);
-            }
-
-            // allow only safe characters (letters, digits, space, dash, underscore, dot)
+            // 3. Validate entry name characters
             if (!entryName.matches("^[A-Za-z0-9._\\-\\s/]+$")) {
                 throw new IOException("Illegal characters in entry name: " + entryName);
             }
 
-            // rebuild string to break Fortify taint tracking
-            String safeName = new String(entryName.getBytes(StandardCharsets.UTF_8),
-                                         StandardCharsets.UTF_8);
-
-            // Step 2: construct and validate canonical path
-            File outFile = new File(targetBase, safeName);
-            String canonicalOut = outFile.getCanonicalPath();
-
-            if (!canonicalOut.startsWith(canonicalBase + File.separator)) {
-                throw new IOException("Entry is outside target dir: " + entryName);
+            // 4. Reject traversal or absolute paths
+            if (entryName.contains("..") || entryName.startsWith("/") || entryName.startsWith("\\") || entryName.contains(":")) {
+                throw new IOException("Unsafe entry name: " + entryName);
             }
 
-            // Step 3: create directories safely after validation
+            // 5. Resolve output path and verify containment
+            Path outputPath = canonicalBase.resolve(entryName).normalize();
+            Path canonicalOutput = outputPath.toRealPath(LinkOption.NOFOLLOW_LINKS);
+
+            if (!canonicalOutput.startsWith(canonicalBase)) {
+                throw new IOException("Entry is outside target directory: " + entryName);
+            }
+
+            // 6. Create directories safely
             if (entry.isDirectory()) {
-                Files.createDirectories(outFile.toPath());
+                Files.createDirectories(outputPath);
                 zis.closeEntry();
                 continue;
             }
 
-            Files.createDirectories(outFile.getParentFile().toPath());
+            Files.createDirectories(outputPath.getParent());
 
-            // Step 4: extract file with zip-bomb and size checks
-            try (OutputStream os =
-                         new BufferedOutputStream(Files.newOutputStream(outFile.toPath()))) {
+            // 7. Write file with zip-bomb and size checks
+            try (OutputStream os = new BufferedOutputStream(Files.newOutputStream(outputPath))) {
                 int bytesRead;
                 long entrySize = 0;
                 long compressedSize = entry.getCompressedSize();
@@ -84,8 +66,7 @@ private void unzipFile(File zipFile, Path targetDir) throws IOException {
                     entrySize += bytesRead;
                     totalSize += bytesRead;
 
-                    if (compressedSize > 0 &&
-                            (double) entrySize / compressedSize > MAX_RATIO) {
+                    if (compressedSize > 0 && (double) entrySize / compressedSize > MAX_RATIO) {
                         throw new IOException("Zip bomb detected (ratio > " + MAX_RATIO + ")");
                     }
 
