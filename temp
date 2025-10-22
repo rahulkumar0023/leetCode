@@ -1,3 +1,12 @@
+String fullPath = canonicalBase + File.separator + safeName;
+String canonicalOut = new File(fullPath).getCanonicalPath();
+
+if (!canonicalOut.startsWith(canonicalBase + File.separator)) {
+    throw new IOException("Entry is outside target dir: " + entryName);
+}
+
+File outFile = new File(canonicalOut);
+
 private void unzipFile(File zipFile, Path targetDir) throws IOException {
     // Validate the input ZIP file
     if (!zipFile.exists() || !zipFile.isFile() || !zipFile.canRead()) {
