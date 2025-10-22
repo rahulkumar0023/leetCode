@@ -1,81 +1,50 @@
-package com.alphacredit.util;
+try (ZipFile zip = ZipFile.builder()
+        .setFile(zipFile.toFile())
+        .setCharset(StandardCharsets.UTF_8)
+        .setUseRandomAccess(true)
+        .get()) {
 
-import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
-import org.apache.commons.compress.archivers.zip.ZipFile;
+    Enumeration<ZipArchiveEntry> entries = zip.getEntries();
+    while (entries.hasMoreElements()) {
+        ZipArchiveEntry entry = entries.nextElement();
+        if (entry.isDirectory()) continue;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.nio.file.*;
-import java.util.Enumeration;
-
-public final class SafeApacheExtractor {
-
-    private SafeApacheExtractor() {}
-
-    /**
-     * Safely extracts the given ZIP file into the target directory.
-     * Uses Apache Commons Compress to avoid Zip Slip and Zip Bomb vulnerabilities.
-     */
-    public static void extract(Path zipFile, Path targetDir) throws IOException {
-        if (zipFile == null || targetDir == null) {
-            throw new IOException("Invalid arguments");
-        }
-        if (!Files.isReadable(zipFile) || !Files.isRegularFile(zipFile)) {
-            throw new IOException("ZIP file not found or not readable: " + zipFile);
+        String name = entry.getName();
+        if (name == null || name.isBlank() || name.contains("..")
+                || name.startsWith("/") || name.startsWith("\\") || name.contains(":")) {
+            throw new IOException("Unsafe entry name: " + name);
         }
 
-        // Create target directory if needed
-        Files.createDirectories(targetDir);
-        Path canonicalTarget = targetDir.toRealPath(LinkOption.NOFOLLOW_LINKS);
+        Path outputPath = canonicalTarget.resolve(name).normalize();
+        if (!outputPath.startsWith(canonicalTarget)) {
+            throw new IOException("Entry escapes target directory: " + name);
+        }
 
-        // Define safety limits
-        final int MAX_ENTRIES = 10_000;
-        final long MAX_TOTAL_SIZE = 1_000_000_000L; // 1 GB
+        Files.createDirectories(outputPath.getParent());
 
-        long totalSize = 0;
-        int entryCount = 0;
+        long entryBytes = 0;
+        int bytesRead;
+        byte[] buffer = new byte[4096];
 
-        try (ZipFile zip = new ZipFile(zipFile.toFile())) {
-            Enumeration<ZipArchiveEntry> entries = zip.getEntries();
+        try (InputStream is = zip.getInputStream(entry);
+             OutputStream os = new BufferedOutputStream(
+                     Files.newOutputStream(outputPath,
+                             StandardOpenOption.CREATE,
+                             StandardOpenOption.TRUNCATE_EXISTING))) {
 
-            while (entries.hasMoreElements()) {
-                ZipArchiveEntry entry = entries.nextElement();
+            while ((bytesRead = is.read(buffer)) != -1) {
+                os.write(buffer, 0, bytesRead);
+                entryBytes += bytesRead;
 
-                if (entry.isDirectory()) {
-                    continue;
+                if (entryBytes > MAX_ENTRY_SIZE) {
+                    throw new IOException("Entry too large: " + entry.getName());
                 }
-
-                String name = entry.getName();
-
-                // Basic input validation
-                if (name == null || name.isBlank() || name.contains("..") ||
-                        name.contains(":") || name.startsWith("/") || name.startsWith("\\")) {
-                    throw new IOException("Unsafe entry name: " + name);
-                }
-
-                // Resolve safely and check containment (Apache-recommended pattern)
-                Path outputPath = canonicalTarget.resolve(name).normalize();
-                if (!outputPath.startsWith(canonicalTarget)) {
-                    throw new IOException("Entry escapes target directory: " + name);
-                }
-
-                // Create parent dirs
-                Files.createDirectories(outputPath.getParent());
-
-                // Extract file
-                try (InputStream is = zip.getInputStream(entry)) {
-                    Files.copy(is, outputPath, StandardCopyOption.REPLACE_EXISTING);
-                    totalSize += entry.getSize();
-                }
-
-                entryCount++;
-                if (entryCount > MAX_ENTRIES) {
-                    throw new IOException("Too many entries in archive");
-                }
-                if (totalSize > MAX_TOTAL_SIZE) {
+                if (totalSize + entryBytes > MAX_TOTAL_SIZE) {
                     throw new IOException("Archive too large");
                 }
             }
         }
+
+        totalSize += entryBytes;
     }
 }
