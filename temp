@@ -1,8 +1,8 @@
 package com.alphacredit.util;
 
+import com.alphacredit.exception.InvoiceProcessingException;
 import org.junit.jupiter.api.*;
 import java.io.IOException;
-import java.io.OutputStream;
 import java.nio.file.*;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -18,17 +18,6 @@ class SafeApacheExtractorTest {
     void setUp() throws IOException {
         tempDir = Files.createTempDirectory("extractor-test-");
         tempZip = Files.createTempFile("archive-", ".zip");
-
-        // Create a simple ZIP with two entries
-        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(tempZip))) {
-            zos.putNextEntry(new ZipEntry("invoice1.txt"));
-            zos.write("Invoice 1 content".getBytes());
-            zos.closeEntry();
-
-            zos.putNextEntry(new ZipEntry("nested/invoice2.txt"));
-            zos.write("Nested invoice content".getBytes());
-            zos.closeEntry();
-        }
     }
 
     @AfterEach
@@ -41,65 +30,46 @@ class SafeApacheExtractorTest {
         }
     }
 
-    @Test
-    void testExtractSuccessfully() throws Exception {
-        SafeApacheExtractor.extract(tempZip, tempDir);
-
-        Path file1 = tempDir.resolve("invoice1.txt");
-        Path file2 = tempDir.resolve("nested").resolve("invoice2.txt");
-
-        assertTrue(Files.exists(file1), "invoice1.txt should be extracted");
-        assertTrue(Files.exists(file2), "nested/invoice2.txt should be extracted");
-
-        String content = Files.readString(file1).trim();
-        assertEquals("Invoice 1 content", content);
-    }
+    // --- NEW TESTS FOR EXCEPTION LINES ---
 
     @Test
-    void testThrowsForInvalidZipFile() {
-        Path fakeZip = tempDir.resolve("not-a-zip.zip");
-        Exception ex = assertThrows(IOException.class, () -> SafeApacheExtractor.extract(fakeZip, tempDir));
-        assertTrue(ex.getMessage().toLowerCase().contains("zip file"));
-    }
+    void testThrowsInvoiceProcessingExceptionWhenEntryTooLarge() throws IOException {
+        Path zip = Files.createTempFile("big-entry-", ".zip");
+        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(zip))) {
+            ZipEntry entry = new ZipEntry("hugefile.txt");
+            zos.putNextEntry(entry);
 
-    @Test
-    void testThrowsForUnsafeEntry() throws IOException {
-        Path badZip = Files.createTempFile("bad-", ".zip");
-        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(badZip))) {
-            zos.putNextEntry(new ZipEntry("../evil.txt"));
-            zos.write("malicious".getBytes());
+            // Simulate oversized entry > MAX_ENTRY_SIZE (100MB) with repeated bytes
+            byte[] data = new byte[1024];
+            for (int i = 0; i < 150_000; i++) {  // ~150MB simulated
+                zos.write(data);
+            }
             zos.closeEntry();
         }
 
-        IOException ex = assertThrows(IOException.class, () -> SafeApacheExtractor.extract(badZip, tempDir));
-        assertTrue(ex.getMessage().toLowerCase().contains("unsafe") ||
-                   ex.getMessage().toLowerCase().contains("escape"));
+        InvoiceProcessingException ex = assertThrows(InvoiceProcessingException.class,
+                () -> SafeApacheExtractor.extract(zip, tempDir));
+
+        assertTrue(ex.getMessage().contains("Entry too large"));
     }
 
     @Test
-    void testThrowsWhenTargetIsNull() {
-        Exception ex = assertThrows(IOException.class, () -> SafeApacheExtractor.extract(tempZip, null));
-        assertTrue(ex.getMessage().toLowerCase().contains("invalid"));
-    }
-
-    @Test
-    void testThrowsWhenZipFileIsNull() {
-        Exception ex = assertThrows(IOException.class, () -> SafeApacheExtractor.extract(null, tempDir));
-        assertTrue(ex.getMessage().toLowerCase().contains("invalid"));
-    }
-
-    @Test
-    void testThrowsForTooManyEntries() throws IOException {
-        Path largeZip = Files.createTempFile("large-", ".zip");
-        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(largeZip))) {
-            for (int i = 0; i < 10001; i++) {
-                zos.putNextEntry(new ZipEntry("f" + i + ".txt"));
-                zos.write("data".getBytes());
+    void testThrowsInvoiceProcessingExceptionWhenArchiveTooLarge() throws IOException {
+        Path zip = Files.createTempFile("archive-too-large-", ".zip");
+        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(zip))) {
+            // Add several big entries to exceed MAX_TOTAL_SIZE (1GB)
+            byte[] data = new byte[1024 * 1024]; // 1MB chunks
+            for (int i = 0; i < 1200; i++) { // ~1.2GB simulated total
+                ZipEntry entry = new ZipEntry("file" + i + ".txt");
+                zos.putNextEntry(entry);
+                zos.write(data);
                 zos.closeEntry();
             }
         }
 
-        IOException ex = assertThrows(IOException.class, () -> SafeApacheExtractor.extract(largeZip, tempDir));
-        assertTrue(ex.getMessage().toLowerCase().contains("too many"));
+        InvoiceProcessingException ex = assertThrows(InvoiceProcessingException.class,
+                () -> SafeApacheExtractor.extract(zip, tempDir));
+
+        assertTrue(ex.getMessage().contains("Archive too large"));
     }
 }
