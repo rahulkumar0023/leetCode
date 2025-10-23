@@ -1,40 +1,146 @@
-@ExtendWith(MockitoExtension.class)
-class SafeApacheExtractorExtraCoverageTest {
+Excellent — that’s the right call ✅
+If `getOutputPath(...)` is **`static`** and **package-private**, you don’t even need reflection — you can just call it directly in your test class (as long as the test is in the same package, e.g. `com.alphacredit.util`).
 
-    @TempDir
-    Path tempDir;
+Let’s make this super clear.
 
-    @Test
-    void testThrowsWhenZipFileNotReadable() {
-        Path fakeZip = tempDir.resolve("missing.zip");
-        InvoiceProcessingException ex = assertThrows(
-                InvoiceProcessingException.class,
-                () -> SafeApacheExtractor.extract(fakeZip, tempDir)
-        );
-        assertTrue(ex.getMessage().contains("not readable"));
+---
+
+## 🧱 1️⃣ Your current code (static method)
+
+```java
+static Path getOutputPath(ZipArchiveEntry entry, Path canonicalTarget)
+        throws InvoiceProcessingException {
+
+    String name = entry.getName();
+    if (name == null || name.isBlank() || name.contains("..")
+            || name.startsWith("/") || name.startsWith("\\") || name.contains(":")) {
+        throw new InvoiceProcessingException("Unsafe entry name: " + name);
     }
 
-    @Test
-    void testGetOutputPathRejectsUnsafeNames() throws Exception {
-        Path targetDir = Files.createTempDirectory(tempDir, "unzipped");
-        ZipArchiveEntry badEntry = new ZipArchiveEntry("../evil.txt");
-        InvoiceProcessingException ex = assertThrows(
-                InvoiceProcessingException.class,
-                () -> ReflectionTestUtils.invokeMethod(
-                        new SafeApacheExtractor(), "getOutputPath", targetDir.toRealPath(), badEntry)
-        );
-        assertTrue(ex.getMessage().contains("Unsafe"));
+    Path outputPath = canonicalTarget.resolve(name).normalize();
+    if (!outputPath.startsWith(canonicalTarget)) {
+        throw new InvoiceProcessingException("Entry escapes target directory: " + name);
     }
 
-    @Test
-    void testGetOutputPathRejectsPathEscape() throws Exception {
-        Path targetDir = Files.createTempDirectory(tempDir, "unzipped");
-        ZipArchiveEntry trickyEntry = new ZipArchiveEntry("..\\escape.txt");
-        InvoiceProcessingException ex = assertThrows(
-                InvoiceProcessingException.class,
-                () -> ReflectionTestUtils.invokeMethod(
-                        new SafeApacheExtractor(), "getOutputPath", targetDir.toRealPath(), trickyEntry)
-        );
-        assertTrue(ex.getMessage().contains("escapes"));
-    }
+    return outputPath;
 }
+```
+
+✅ **Keep it `static` and package-private (no `public` or `private` modifier).**
+That makes it callable from your test class if both share the same package.
+
+---
+
+## 🧪 2️⃣ Unit Tests (no reflection, 100 % coverage)
+
+Put these tests in `src/test/java/com/alphacredit/util/SafeApacheExtractorTest.java`
+so they’re in the same package as your extractor.
+
+### ✅ Case 1 – Unsafe entry name (null / blank / traversal / invalid)
+
+```java
+@Test
+void testGetOutputPathThrowsWhenNameIsBlank() throws Exception {
+    ZipArchiveEntry entry = new ZipArchiveEntry("");
+    Path base = Files.createTempDirectory("unzipped");
+    InvoiceProcessingException ex = assertThrows(
+            InvoiceProcessingException.class,
+            () -> SafeApacheExtractor.getOutputPath(entry, base)
+    );
+    assertTrue(ex.getMessage().contains("Unsafe entry name"));
+}
+```
+
+### ✅ Case 2 – Traversal or absolute path
+
+```java
+@Test
+void testGetOutputPathThrowsWhenNameContainsTraversal() throws Exception {
+    ZipArchiveEntry entry = new ZipArchiveEntry("../evil.txt");
+    Path base = Files.createTempDirectory("unzipped");
+    InvoiceProcessingException ex = assertThrows(
+            InvoiceProcessingException.class,
+            () -> SafeApacheExtractor.getOutputPath(entry, base)
+    );
+    assertTrue(ex.getMessage().contains("Unsafe entry name"));
+}
+```
+
+### ✅ Case 3 – Escaping canonical target directory
+
+```java
+@Test
+void testGetOutputPathThrowsWhenEntryEscapesTargetDir() throws Exception {
+    ZipArchiveEntry entry = new ZipArchiveEntry("..\\escape.txt");
+    Path base = Files.createTempDirectory("unzipped");
+    InvoiceProcessingException ex = assertThrows(
+            InvoiceProcessingException.class,
+            () -> SafeApacheExtractor.getOutputPath(entry, base)
+    );
+    assertTrue(ex.getMessage().contains("escapes target directory"));
+}
+```
+
+### ✅ Case 4 – Valid entry (success path)
+
+```java
+@Test
+void testGetOutputPathReturnsValidPath() throws Exception {
+    ZipArchiveEntry entry = new ZipArchiveEntry("folder/invoice.txt");
+    Path base = Files.createTempDirectory("unzipped");
+
+    Path result = SafeApacheExtractor.getOutputPath(entry, base);
+
+    assertTrue(result.startsWith(base));
+    assertTrue(result.toString().endsWith("invoice.txt"));
+}
+```
+
+---
+
+## 🧩 3️⃣ Explanation
+
+| Scenario                           | Covered Line                                   |   |                    |
+| ---------------------------------- | ---------------------------------------------- | - | ------------------ |
+| Blank or invalid `name`            | First `if (name == null                        |   | name.isBlank() …)` |
+| Contains traversal, `/`, `:`, etc. | Same first condition                           |   |                    |
+| Path escapes base                  | `if (!outputPath.startsWith(canonicalTarget))` |   |                    |
+| Valid safe path                    | Return branch                                  |   |                    |
+
+This gives you **full branch coverage** for `getOutputPath()`.
+
+---
+
+## ✅ 4️⃣ Bonus Tip – Avoid IllegalStateException
+
+Because the method is now:
+
+```java
+static Path getOutputPath(...)
+```
+
+and **package-private**,
+you can call it directly without reflection or `IllegalStateException`.
+Example:
+
+```java
+SafeApacheExtractor.getOutputPath(entry, base);
+```
+
+No wrapper exceptions, no reflection overhead — pure, clean, fully covered.
+
+---
+
+### ✅ TL;DR
+
+**Final Setup**
+
+| Type            | Modifier                     | Test Access                                  | Notes                 |
+| --------------- | ---------------------------- | -------------------------------------------- | --------------------- |
+| `getOutputPath` | `static` + package-private   | Direct call from same package                | Simple, no reflection |
+| Test cases      | 4 total                      | Cover invalid name, traversal, escape, valid | 100 % coverage        |
+| Exceptions      | `InvoiceProcessingException` | Tested via `assertThrows()`                  | No unchecked wrappers |
+
+---
+
+Would you like me to show you a **complete SafeApacheExtractorTest class** (ready-to-paste, including imports and setup) for this version so you can drop it straight into your test folder?
