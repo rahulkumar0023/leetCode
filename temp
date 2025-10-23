@@ -1,106 +1,105 @@
 package com.alphacredit.util;
 
-import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
-import org.apache.commons.compress.archivers.zip.ZipFile;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import java.io.BufferedOutputStream;
+import org.junit.jupiter.api.*;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
-import java.util.Enumeration;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
-public final class SafeApacheExtractor {
+import static org.junit.jupiter.api.Assertions.*;
 
-    private static final Logger log = LoggerFactory.getLogger(SafeApacheExtractor.class);
+class SafeApacheExtractorTest {
 
-    private SafeApacheExtractor() {}
+    private Path tempZip;
+    private Path tempDir;
 
-    /**
-     * Safely extracts a ZIP archive into the given target directory.
-     * Compatible with Apache Commons Compress 1.26+ (builder API).
-     */
-    public static void extract(Path zipFile, Path targetDir) throws IOException {
-        if (zipFile == null || targetDir == null) {
-            throw new IOException("Invalid arguments: zipFile or targetDir is null");
+    @BeforeEach
+    void setUp() throws IOException {
+        tempDir = Files.createTempDirectory("extractor-test-");
+        tempZip = Files.createTempFile("archive-", ".zip");
+
+        // Create a simple ZIP with two entries
+        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(tempZip))) {
+            zos.putNextEntry(new ZipEntry("invoice1.txt"));
+            zos.write("Invoice 1 content".getBytes());
+            zos.closeEntry();
+
+            zos.putNextEntry(new ZipEntry("nested/invoice2.txt"));
+            zos.write("Nested invoice content".getBytes());
+            zos.closeEntry();
         }
-        if (!Files.isReadable(zipFile) || !Files.isRegularFile(zipFile)) {
-            throw new IOException("ZIP file not found or not readable: " + zipFile);
+    }
+
+    @AfterEach
+    void tearDown() throws IOException {
+        if (Files.exists(tempZip)) Files.deleteIfExists(tempZip);
+        if (Files.exists(tempDir)) {
+            Files.walk(tempDir)
+                 .sorted((a, b) -> b.compareTo(a))
+                 .forEach(p -> p.toFile().delete());
+        }
+    }
+
+    @Test
+    void testExtractSuccessfully() throws Exception {
+        SafeApacheExtractor.extract(tempZip, tempDir);
+
+        Path file1 = tempDir.resolve("invoice1.txt");
+        Path file2 = tempDir.resolve("nested").resolve("invoice2.txt");
+
+        assertTrue(Files.exists(file1), "invoice1.txt should be extracted");
+        assertTrue(Files.exists(file2), "nested/invoice2.txt should be extracted");
+
+        String content = Files.readString(file1).trim();
+        assertEquals("Invoice 1 content", content);
+    }
+
+    @Test
+    void testThrowsForInvalidZipFile() {
+        Path fakeZip = tempDir.resolve("not-a-zip.zip");
+        Exception ex = assertThrows(IOException.class, () -> SafeApacheExtractor.extract(fakeZip, tempDir));
+        assertTrue(ex.getMessage().toLowerCase().contains("zip file"));
+    }
+
+    @Test
+    void testThrowsForUnsafeEntry() throws IOException {
+        Path badZip = Files.createTempFile("bad-", ".zip");
+        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(badZip))) {
+            zos.putNextEntry(new ZipEntry("../evil.txt"));
+            zos.write("malicious".getBytes());
+            zos.closeEntry();
         }
 
-        Files.createDirectories(targetDir);
-        Path canonicalTarget = targetDir.toRealPath(LinkOption.NOFOLLOW_LINKS);
+        IOException ex = assertThrows(IOException.class, () -> SafeApacheExtractor.extract(badZip, tempDir));
+        assertTrue(ex.getMessage().toLowerCase().contains("unsafe") ||
+                   ex.getMessage().toLowerCase().contains("escape"));
+    }
 
-        final int MAX_ENTRIES = 10_000;
-        final long MAX_ENTRY_SIZE = 100_000_000L; // 100 MB per file
-        final long MAX_TOTAL_SIZE = 1_000_000_000L; // 1 GB total
+    @Test
+    void testThrowsWhenTargetIsNull() {
+        Exception ex = assertThrows(IOException.class, () -> SafeApacheExtractor.extract(tempZip, null));
+        assertTrue(ex.getMessage().toLowerCase().contains("invalid"));
+    }
 
-        long totalSize = 0;
-        int entryCount = 0;
+    @Test
+    void testThrowsWhenZipFileIsNull() {
+        Exception ex = assertThrows(IOException.class, () -> SafeApacheExtractor.extract(null, tempDir));
+        assertTrue(ex.getMessage().toLowerCase().contains("invalid"));
+    }
 
-        try (ZipFile zip = ZipFile.builder()
-                .setFile(zipFile.toFile())
-                .setCharset(StandardCharsets.UTF_8)
-                .setUseRandomAccess(true)
-                .get()) {
-
-            Enumeration<ZipArchiveEntry> entries = zip.getEntries();
-
-            while (entries.hasMoreElements()) {
-                ZipArchiveEntry entry = entries.nextElement();
-                if (entry.isDirectory()) continue;
-
-                String name = entry.getName();
-                if (name == null || name.isBlank() || name.contains("..")
-                        || name.startsWith("/") || name.startsWith("\\") || name.contains(":")) {
-                    throw new IOException("Unsafe entry name: " + name);
-                }
-
-                Path outputPath = canonicalTarget.resolve(name).normalize();
-                if (!outputPath.startsWith(canonicalTarget)) {
-                    throw new IOException("Entry escapes target directory: " + name);
-                }
-
-                Files.createDirectories(outputPath.getParent());
-
-                // ---- Safe byte-counted extraction ----
-                long entryBytes = 0;
-                int bytesRead;
-                byte[] buffer = new byte[4096];
-
-                try (InputStream is = zip.getInputStream(entry);
-                     OutputStream os = new BufferedOutputStream(
-                             Files.newOutputStream(outputPath,
-                                     StandardOpenOption.CREATE,
-                                     StandardOpenOption.TRUNCATE_EXISTING))) {
-
-                    while ((bytesRead = is.read(buffer)) != -1) {
-                        os.write(buffer, 0, bytesRead);
-                        entryBytes += bytesRead;
-
-                        if (entryBytes > MAX_ENTRY_SIZE) {
-                            throw new IOException("Entry too large: " + entry.getName());
-                        }
-                        if (totalSize + entryBytes > MAX_TOTAL_SIZE) {
-                            throw new IOException("Archive too large");
-                        }
-                    }
-                }
-
-                totalSize += entryBytes;
-                entryCount++;
-
-                if (entryCount > MAX_ENTRIES) {
-                    throw new IOException("Too many entries in archive");
-                }
-
-                log.debug("Extracted {} ({} bytes)", entry.getName(), entryBytes);
+    @Test
+    void testThrowsForTooManyEntries() throws IOException {
+        Path largeZip = Files.createTempFile("large-", ".zip");
+        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(largeZip))) {
+            for (int i = 0; i < 10001; i++) {
+                zos.putNextEntry(new ZipEntry("f" + i + ".txt"));
+                zos.write("data".getBytes());
+                zos.closeEntry();
             }
         }
 
-        log.info("Extraction completed: {} entries, {} bytes total", entryCount, totalSize);
+        IOException ex = assertThrows(IOException.class, () -> SafeApacheExtractor.extract(largeZip, tempDir));
+        assertTrue(ex.getMessage().toLowerCase().contains("too many"));
     }
 }
