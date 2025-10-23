@@ -1,75 +1,40 @@
-package com.alphacredit.util;
+@ExtendWith(MockitoExtension.class)
+class SafeApacheExtractorExtraCoverageTest {
 
-import com.alphacredit.exception.InvoiceProcessingException;
-import org.junit.jupiter.api.*;
-import java.io.IOException;
-import java.nio.file.*;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
-
-import static org.junit.jupiter.api.Assertions.*;
-
-class SafeApacheExtractorTest {
-
-    private Path tempZip;
-    private Path tempDir;
-
-    @BeforeEach
-    void setUp() throws IOException {
-        tempDir = Files.createTempDirectory("extractor-test-");
-        tempZip = Files.createTempFile("archive-", ".zip");
-    }
-
-    @AfterEach
-    void tearDown() throws IOException {
-        if (Files.exists(tempZip)) Files.deleteIfExists(tempZip);
-        if (Files.exists(tempDir)) {
-            Files.walk(tempDir)
-                 .sorted((a, b) -> b.compareTo(a))
-                 .forEach(p -> p.toFile().delete());
-        }
-    }
-
-    // --- NEW TESTS FOR EXCEPTION LINES ---
+    @TempDir
+    Path tempDir;
 
     @Test
-    void testThrowsInvoiceProcessingExceptionWhenEntryTooLarge() throws IOException {
-        Path zip = Files.createTempFile("big-entry-", ".zip");
-        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(zip))) {
-            ZipEntry entry = new ZipEntry("hugefile.txt");
-            zos.putNextEntry(entry);
-
-            // Simulate oversized entry > MAX_ENTRY_SIZE (100MB) with repeated bytes
-            byte[] data = new byte[1024];
-            for (int i = 0; i < 150_000; i++) {  // ~150MB simulated
-                zos.write(data);
-            }
-            zos.closeEntry();
-        }
-
-        InvoiceProcessingException ex = assertThrows(InvoiceProcessingException.class,
-                () -> SafeApacheExtractor.extract(zip, tempDir));
-
-        assertTrue(ex.getMessage().contains("Entry too large"));
+    void testThrowsWhenZipFileNotReadable() {
+        Path fakeZip = tempDir.resolve("missing.zip");
+        InvoiceProcessingException ex = assertThrows(
+                InvoiceProcessingException.class,
+                () -> SafeApacheExtractor.extract(fakeZip, tempDir)
+        );
+        assertTrue(ex.getMessage().contains("not readable"));
     }
 
     @Test
-    void testThrowsInvoiceProcessingExceptionWhenArchiveTooLarge() throws IOException {
-        Path zip = Files.createTempFile("archive-too-large-", ".zip");
-        try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(zip))) {
-            // Add several big entries to exceed MAX_TOTAL_SIZE (1GB)
-            byte[] data = new byte[1024 * 1024]; // 1MB chunks
-            for (int i = 0; i < 1200; i++) { // ~1.2GB simulated total
-                ZipEntry entry = new ZipEntry("file" + i + ".txt");
-                zos.putNextEntry(entry);
-                zos.write(data);
-                zos.closeEntry();
-            }
-        }
+    void testGetOutputPathRejectsUnsafeNames() throws Exception {
+        Path targetDir = Files.createTempDirectory(tempDir, "unzipped");
+        ZipArchiveEntry badEntry = new ZipArchiveEntry("../evil.txt");
+        InvoiceProcessingException ex = assertThrows(
+                InvoiceProcessingException.class,
+                () -> ReflectionTestUtils.invokeMethod(
+                        new SafeApacheExtractor(), "getOutputPath", targetDir.toRealPath(), badEntry)
+        );
+        assertTrue(ex.getMessage().contains("Unsafe"));
+    }
 
-        InvoiceProcessingException ex = assertThrows(InvoiceProcessingException.class,
-                () -> SafeApacheExtractor.extract(zip, tempDir));
-
-        assertTrue(ex.getMessage().contains("Archive too large"));
+    @Test
+    void testGetOutputPathRejectsPathEscape() throws Exception {
+        Path targetDir = Files.createTempDirectory(tempDir, "unzipped");
+        ZipArchiveEntry trickyEntry = new ZipArchiveEntry("..\\escape.txt");
+        InvoiceProcessingException ex = assertThrows(
+                InvoiceProcessingException.class,
+                () -> ReflectionTestUtils.invokeMethod(
+                        new SafeApacheExtractor(), "getOutputPath", targetDir.toRealPath(), trickyEntry)
+        );
+        assertTrue(ex.getMessage().contains("escapes"));
     }
 }
