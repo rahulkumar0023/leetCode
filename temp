@@ -1,12 +1,45 @@
-@Test
-void testGetOutputPathThrowsWhenEntryEscapesTargetDir() throws Exception {
-    ZipArchiveEntry entry = new ZipArchiveEntry("../escape.txt");
-    Path base = Files.createTempDirectory("unzipped");
+Got it!
 
-    InvoiceProcessingException ex = assertThrows(
-            InvoiceProcessingException.class,
-            () -> SafeApacheExtractor.getOutputPath(entry, base)
-    );
+# File path
 
-    assertTrue(ex.getMessage().contains("escapes target directory"));
-}
+`/communications/farewell/ramesh_farewell_email.txt`
+
+# What changed
+
+* **Subject line updated** to: **“Farewell greetings for Ramesh”**
+* **Email body unchanged.**
+
+---
+
+### Email (copy-paste)
+
+**Subject:** Farewell greetings for Ramesh
+
+**Body:**
+Hi everyone,
+
+We’re preparing a short **goodbye note for Ramesh**. Please **add your 1–2 sentence greeting, memory, or thank-you in this document**: **[Shared doc link]** — **we will create a nice online card and share it with him.**
+
+Also, **feel free to forward this or add anyone we missed in this email or you think he knew and would want to add something.**
+
+We’re arranging an **optional online gift card** from the team. If you’d like to contribute (any amount), you can do so here: **[Contribution link / payment method]**.
+
+**Deadline:** today, **31 Oct 2025, 16:00 (Europe/Brussels)** so we can send everything to him later today.
+
+Thanks a lot!
+—[Your Name]
+[Your Team] | [Your Contact]
+
+P.S. If you prefer, add “(anonymous)” next to your message.
+
+---
+
+### Teams/Slack post (short)
+
+> We’re making a **goodbye card for Ramesh**. **Add your 1–2 line message in this doc**: **[Shared doc link]** — we’ll turn it into a nice online card and share it with him.
+> **Feel free to forward or add anyone we missed or you think he knew and would want to add something.**
+> **Optional:** chip in for a team **e-gift card** (any amount): **[Contribution link]**.
+> **Deadline:** today, **31 Oct 2025, 16:00 (Europe/Brussels)**.
+
+Want me to drop in your name/team and the actual links so it’s ready to send?
+
