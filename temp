@@ -1,45 +1,63 @@
-Got it!
+void zipEncryptUploadFiles(Path processedFile, String zipFilePrefix) throws IOException {
+  Files.createDirectories(outputDir);
 
-# File path
+  // Step 1: Zip
+  String zipFileName = zipFilePrefix + "_invoices_" + getCurrentDateTimeValue() + ".zip";
+  File zipFile = outputDir.resolve(zipFileName).toFile();
+  zipDirectory(processedFile, zipFile);
 
-`/communications/farewell/ramesh_farewell_email.txt`
+  // Step 2: Encrypt
+  String encryptedFileName = zipFileName + ".pgp";
+  File encryptedFile = outputDir.resolve(encryptedFileName).toFile();
+  pgpEncrypt.encrypt(new FileInputStream(zipFile), new FileOutputStream(encryptedFile));
+  log.info("Encrypted ZIP at: {}", encryptedFile.getAbsolutePath());
 
-# What changed
+  // Step 3: Upload
+  String key = "outgoing_e-invoice/" + encryptedFileName;
+  cosStorageService.uploadFile(key, encryptedFile);
+  log.info("Uploaded to COS: {}", key);
 
-* **Subject line updated** to: **“Farewell greetings for Ramesh”**
-* **Email body unchanged.**
+  // Step 4: Notify CFT (no waiting inside this method)
+  log.info("CFT notify enabled: {}", cftEnabled);
+  if (cftEnabled) {
+    cftApiClient.notifyUpload(key, encryptedFileName); // returns 201 asynchronously
+  }
 
----
+  // ---- SIZE-BASED GRACE before moving to processed ----
+  long bytes = encryptedFile.length();
+  Duration grace = pickWaitByEstimate(bytes); // or pickWaitByTier(bytes)
+  log.info("Payload size = {} bytes ({}). Grace wait before move = {}",
+      bytes, human(bytes), grace);
+  if (!grace.isZero()) {
+    try { Thread.sleep(grace.toMillis()); } catch (InterruptedException ie) {
+      Thread.currentThread().interrupt();
+    }
+  }
 
-### Email (copy-paste)
+  // Step 5: Move to processed
+  moveToProcessed(encryptedFileName, key);
+}
 
-**Subject:** Farewell greetings for Ramesh
+// ---------- helpers (tweak thresholds to taste) ----------
+private static Duration pickWaitByTier(long bytes) {
+  long MB = 1024L * 1024L;
+  if (bytes < 50 * MB)  return Duration.ZERO;           // <50MB: no wait
+  if (bytes < 200 * MB) return Duration.ofSeconds(6);   // 50–200MB
+  if (bytes < 1024 * MB)return Duration.ofSeconds(20);  // 200MB–1GB
+  return Duration.ofMinutes(2);                         // 1GB+
+}
 
-**Body:**
-Hi everyone,
+private static Duration pickWaitByEstimate(long bytes) {
+  // Replace 50 MB/s with your observed end-to-end throughput
+  double assumedBps = 50 * 1024 * 1024d;
+  double secs = 6 + 1.5 * (bytes / assumedBps);         // base + scaled wait
+  long clamped = Math.max(0, Math.min((long)Math.ceil(secs), 2 * 60 * 60)); // cap 2h
+  return Duration.ofSeconds(clamped);
+}
 
-We’re preparing a short **goodbye note for Ramesh**. Please **add your 1–2 sentence greeting, memory, or thank-you in this document**: **[Shared doc link]** — **we will create a nice online card and share it with him.**
-
-Also, **feel free to forward this or add anyone we missed in this email or you think he knew and would want to add something.**
-
-We’re arranging an **optional online gift card** from the team. If you’d like to contribute (any amount), you can do so here: **[Contribution link / payment method]**.
-
-**Deadline:** today, **31 Oct 2025, 16:00 (Europe/Brussels)** so we can send everything to him later today.
-
-Thanks a lot!
-—[Your Name]
-[Your Team] | [Your Contact]
-
-P.S. If you prefer, add “(anonymous)” next to your message.
-
----
-
-### Teams/Slack post (short)
-
-> We’re making a **goodbye card for Ramesh**. **Add your 1–2 line message in this doc**: **[Shared doc link]** — we’ll turn it into a nice online card and share it with him.
-> **Feel free to forward or add anyone we missed or you think he knew and would want to add something.**
-> **Optional:** chip in for a team **e-gift card** (any amount): **[Contribution link]**.
-> **Deadline:** today, **31 Oct 2025, 16:00 (Europe/Brussels)**.
-
-Want me to drop in your name/team and the actual links so it’s ready to send?
-
+private static String human(long bytes) {
+  String[] u = {"B","KB","MB","GB","TB"};
+  int i = 0; double v = bytes;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return String.format("%.1f %s", v, u[i]);
+}
