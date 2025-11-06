@@ -1,3 +1,58 @@
+
+Yes—totally. Here are two clean “pick wait by tier” options that match what you suggested. Paste one of these helpers and call it right after your CFT notify (before you move to processed/).
+
+Option 1: Tier + linear after 5MB
+	•	< 1 MB → 2 s
+	•	1–<5 MB → 5 s
+	•	≥ 5 MB → 2 s + 1 s per MB (capped)
+
+import java.time.Duration;
+
+private static final long MB = 1024L * 1024L;
+private static final long MAX_WAIT_SEC = 10 * 60; // cap at 10 min (tune as needed)
+
+public static Duration pickWaitByTier(long bytes) {
+  if (bytes < 1 * MB) return Duration.ofSeconds(2);     // tiny
+  if (bytes < 5 * MB) return Duration.ofSeconds(5);     // small
+
+  long sizeMB = (long) Math.ceil((double) bytes / MB);
+  long secs = 2 + sizeMB;                               // 2s base + 1s/MB
+  if (secs > MAX_WAIT_SEC) secs = MAX_WAIT_SEC;         // safety cap
+  return Duration.ofSeconds(secs);
+}
+
+Examples
+	•	0.7 MB → 2 s
+	•	3.2 MB → 5 s
+	•	10 MB → 12 s
+	•	120 MB → 122 s (~2m02s), capped if it exceeds MAX_WAIT_SEC
+
+⸻
+
+Option 2: Pure “1 second per MB” with a 2 s floor
+	•	< 1 MB → 2 s
+	•	≥ 1 MB → 2 s + 1 s per MB
+
+public static Duration pickWaitPerMB(long bytes) {
+  long sizeMB = (long) Math.ceil(bytes / (double) MB);
+  long secs = (bytes < MB) ? 2 : 2 + sizeMB;            // 1MB→3s, 2MB→4s, ...
+  if (secs > MAX_WAIT_SEC) secs = MAX_WAIT_SEC;
+  return Duration.ofSeconds(secs);
+}
+
+
+⸻
+
+How to use in your tasklet
+
+long bytes = encryptedFile.length();
+Duration wait = pickWaitByTier(bytes); // or pickWaitPerMB(bytes)
+log.info("Payload size = {} bytes (~{} MB). Waiting {} before move.",
+         bytes, Math.ceil(bytes / (double) MB), wait);
+try { Thread.sleep(wait.toMillis()); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+
+Tip: keep the cap (MAX_WAIT_SEC) so huge backlogs don’t block this step forever. If you later want even more safety, you can follow this wait with a quick HEAD check on the COS object before the move.
+
 void zipEncryptUploadFiles(Path processedFile, String zipFilePrefix) throws IOException {
   Files.createDirectories(outputDir);
 
