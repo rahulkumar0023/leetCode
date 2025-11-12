@@ -1,118 +1,109 @@
+Awesome—here’s a compact JUnit 5 test suite that covers your updated rule (`long secs = 6 + sizeMB`) plus all the edge tiers and the safety cap.
 
-Yes—totally. Here are two clean “pick wait by tier” options that match what you suggested. Paste one of these helpers and call it right after your CFT notify (before you move to processed/).
+It assumes your method lives in a class like `WaitPolicy.pickWaitByTier(long bytes)`. If your class name differs, just change the import/qualifier.
 
-Option 1: Tier + linear after 5MB
-	•	< 1 MB → 2 s
-	•	1–<5 MB → 5 s
-	•	≥ 5 MB → 2 s + 1 s per MB (capped)
+```java
+// src/test/java/your/pkg/WaitPolicyTest.java
+package your.pkg;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+import java.time.Duration;
+import org.junit.jupiter.api.Test;
+
+class WaitPolicyTest {
+
+  private static final long MB = 1024L * 1024L;
+  private static final long MAX_WAIT_SEC = 10 * 60; // must match production
+
+  // Helper to call the method under test. Adjust class name/package if needed.
+  private static Duration pick(long bytes) {
+    return WaitPolicy.pickWaitByTier(bytes);
+  }
+
+  @Test
+  void tinyFile_under1MB_returns2s() {
+    assertEquals(Duration.ofSeconds(2), pick(700 * 1024L)); // 0.68 MB
+    assertEquals(Duration.ofSeconds(2), pick(0));           // 0 bytes
+  }
+
+  @Test
+  void boundary_exactly1MB_usesLinearBase6Plus1MB() {
+    assertEquals(Duration.ofSeconds(7), pick(1 * MB)); // 6 + 1 = 7
+  }
+
+  @Test
+  void justOver1MB_ceilsToNextMB_thenBase6Plus2MB() {
+    long bytes = 1 * MB + 100 * 1024L; // ~1.10 MB -> ceil -> 2 MB
+    assertEquals(Duration.ofSeconds(8), pick(bytes));  // 6 + 2 = 8
+  }
+
+  @Test
+  void smallFile_under5MB_returns5s() {
+    assertEquals(Duration.ofSeconds(5), pick(2 * MB));          // in the 1–<5 MB band
+    assertEquals(Duration.ofSeconds(5), pick(5 * MB - 1));      // just below 5 MB
+  }
+
+  @Test
+  void boundary_exactly5MB_entersLinearRule() {
+    assertEquals(Duration.ofSeconds(11), pick(5 * MB)); // 6 + 5 = 11
+  }
+
+  @Test
+  void typical_midSize_120MB_waits6Plus120s() {
+    assertEquals(Duration.ofSeconds(126), pick(120 * MB)); // 6 + 120 = 126
+  }
+
+  @Test
+  void linearRule_isCappedAtMaxWait() {
+    // 700 MB -> 6 + 700 = 706 seconds, but capped at 600s (10 minutes)
+    assertEquals(Duration.ofSeconds(MAX_WAIT_SEC), pick(700 * MB));
+  }
+
+  @Test
+  void rounding_ceilBehavior_forFractionalMB() {
+    // 4.01 MB is still in the 1–<5 MB band => 5s (tiered branch)
+    long fourPointOhOneMB = (long) Math.ceil(4.01 * MB);
+    assertEquals(Duration.ofSeconds(5), pick(fourPointOhOneMB));
+
+    // 5.01 MB -> linear path: ceil to 6 MB => 6 + 6 = 12s
+    long fivePointOhOneMB = (long) Math.ceil(5.01 * MB);
+    assertEquals(Duration.ofSeconds(12), pick(fivePointOhOneMB));
+  }
+}
+```
+
+If you don’t already have a class, here’s a minimal one that matches your change (so the tests compile):
+
+```java
+// src/main/java/your/pkg/WaitPolicy.java
+package your.pkg;
 
 import java.time.Duration;
 
-private static final long MB = 1024L * 1024L;
-private static final long MAX_WAIT_SEC = 10 * 60; // cap at 10 min (tune as needed)
+public final class WaitPolicy {
+  private WaitPolicy() {}
 
-public static Duration pickWaitByTier(long bytes) {
-  if (bytes < 1 * MB) return Duration.ofSeconds(2);     // tiny
-  if (bytes < 5 * MB) return Duration.ofSeconds(5);     // small
+  private static final long MB = 1024L * 1024L;
+  private static final long MAX_WAIT_SEC = 10 * 60;
 
-  long sizeMB = (long) Math.ceil((double) bytes / MB);
-  long secs = 2 + sizeMB;                               // 2s base + 1s/MB
-  if (secs > MAX_WAIT_SEC) secs = MAX_WAIT_SEC;         // safety cap
-  return Duration.ofSeconds(secs);
-}
-
-Examples
-	•	0.7 MB → 2 s
-	•	3.2 MB → 5 s
-	•	10 MB → 12 s
-	•	120 MB → 122 s (~2m02s), capped if it exceeds MAX_WAIT_SEC
-
-⸻
-
-Option 2: Pure “1 second per MB” with a 2 s floor
-	•	< 1 MB → 2 s
-	•	≥ 1 MB → 2 s + 1 s per MB
-
-public static Duration pickWaitPerMB(long bytes) {
-  long sizeMB = (long) Math.ceil(bytes / (double) MB);
-  long secs = (bytes < MB) ? 2 : 2 + sizeMB;            // 1MB→3s, 2MB→4s, ...
-  if (secs > MAX_WAIT_SEC) secs = MAX_WAIT_SEC;
-  return Duration.ofSeconds(secs);
-}
-
-
-⸻
-
-How to use in your tasklet
-
-long bytes = encryptedFile.length();
-Duration wait = pickWaitByTier(bytes); // or pickWaitPerMB(bytes)
-log.info("Payload size = {} bytes (~{} MB). Waiting {} before move.",
-         bytes, Math.ceil(bytes / (double) MB), wait);
-try { Thread.sleep(wait.toMillis()); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
-
-Tip: keep the cap (MAX_WAIT_SEC) so huge backlogs don’t block this step forever. If you later want even more safety, you can follow this wait with a quick HEAD check on the COS object before the move.
-
-void zipEncryptUploadFiles(Path processedFile, String zipFilePrefix) throws IOException {
-  Files.createDirectories(outputDir);
-
-  // Step 1: Zip
-  String zipFileName = zipFilePrefix + "_invoices_" + getCurrentDateTimeValue() + ".zip";
-  File zipFile = outputDir.resolve(zipFileName).toFile();
-  zipDirectory(processedFile, zipFile);
-
-  // Step 2: Encrypt
-  String encryptedFileName = zipFileName + ".pgp";
-  File encryptedFile = outputDir.resolve(encryptedFileName).toFile();
-  pgpEncrypt.encrypt(new FileInputStream(zipFile), new FileOutputStream(encryptedFile));
-  log.info("Encrypted ZIP at: {}", encryptedFile.getAbsolutePath());
-
-  // Step 3: Upload
-  String key = "outgoing_e-invoice/" + encryptedFileName;
-  cosStorageService.uploadFile(key, encryptedFile);
-  log.info("Uploaded to COS: {}", key);
-
-  // Step 4: Notify CFT (no waiting inside this method)
-  log.info("CFT notify enabled: {}", cftEnabled);
-  if (cftEnabled) {
-    cftApiClient.notifyUpload(key, encryptedFileName); // returns 201 asynchronously
+  public static Duration pickWaitByTier(long bytes) {
+    if (bytes < 1 * MB)  return Duration.ofSeconds(2); // tiny
+    if (bytes < 5 * MB)  return Duration.ofSeconds(5); // small
+    long sizeMB = (long) Math.ceil(bytes / (double) MB);
+    long secs = 6 + sizeMB;                            // <-- your tweak
+    if (secs > MAX_WAIT_SEC) secs = MAX_WAIT_SEC;      // cap
+    return Duration.ofSeconds(secs);
   }
-
-  // ---- SIZE-BASED GRACE before moving to processed ----
-  long bytes = encryptedFile.length();
-  Duration grace = pickWaitByEstimate(bytes); // or pickWaitByTier(bytes)
-  log.info("Payload size = {} bytes ({}). Grace wait before move = {}",
-      bytes, human(bytes), grace);
-  if (!grace.isZero()) {
-    try { Thread.sleep(grace.toMillis()); } catch (InterruptedException ie) {
-      Thread.currentThread().interrupt();
-    }
-  }
-
-  // Step 5: Move to processed
-  moveToProcessed(encryptedFileName, key);
 }
+```
 
-// ---------- helpers (tweak thresholds to taste) ----------
-private static Duration pickWaitByTier(long bytes) {
-  long MB = 1024L * 1024L;
-  if (bytes < 50 * MB)  return Duration.ZERO;           // <50MB: no wait
-  if (bytes < 200 * MB) return Duration.ofSeconds(6);   // 50–200MB
-  if (bytes < 1024 * MB)return Duration.ofSeconds(20);  // 200MB–1GB
-  return Duration.ofMinutes(2);                         // 1GB+
-}
+This suite hits:
 
-private static Duration pickWaitByEstimate(long bytes) {
-  // Replace 50 MB/s with your observed end-to-end throughput
-  double assumedBps = 50 * 1024 * 1024d;
-  double secs = 6 + 1.5 * (bytes / assumedBps);         // base + scaled wait
-  long clamped = Math.max(0, Math.min((long)Math.ceil(secs), 2 * 60 * 60)); // cap 2h
-  return Duration.ofSeconds(clamped);
-}
+* both tier branches (`<1MB`, `1–<5MB`)
+* linear branch (`≥5MB`)
+* exact boundaries (1MB, 5MB)
+* ceil behavior just over a boundary
+* a large file case that triggers the cap
 
-private static String human(long bytes) {
-  String[] u = {"B","KB","MB","GB","TB"};
-  int i = 0; double v = bytes;
-  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-  return String.format("%.1f %s", v, u[i]);
-}
+If you want it parameterized instead, I can flip it to a `@MethodSource` table, but discrete tests like these make failures very obvious.
