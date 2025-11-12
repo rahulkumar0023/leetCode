@@ -1,109 +1,51 @@
-Awesome—here’s a compact JUnit 5 test suite that covers your updated rule (`long secs = 6 + sizeMB`) plus all the edge tiers and the safety cap.
-
-It assumes your method lives in a class like `WaitPolicy.pickWaitByTier(long bytes)`. If your class name differs, just change the import/qualifier.
-
-```java
-// src/test/java/your/pkg/WaitPolicyTest.java
-package your.pkg;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-
-import java.time.Duration;
-import org.junit.jupiter.api.Test;
-
-class WaitPolicyTest {
-
-  private static final long MB = 1024L * 1024L;
-  private static final long MAX_WAIT_SEC = 10 * 60; // must match production
-
-  // Helper to call the method under test. Adjust class name/package if needed.
-  private static Duration pick(long bytes) {
+private static Duration pick(long bytes) {
     return WaitPolicy.pickWaitByTier(bytes);
   }
 
   @Test
-  void tinyFile_under1MB_returns2s() {
-    assertEquals(Duration.ofSeconds(2), pick(700 * 1024L)); // 0.68 MB
-    assertEquals(Duration.ofSeconds(2), pick(0));           // 0 bytes
+  void tinyFile_under1MB_returns3s() {
+    assertEquals(Duration.ofSeconds(3), pick(700 * 1024L)); // ~0.68 MB
+    assertEquals(Duration.ofSeconds(3), pick(0));           // 0 bytes
   }
 
   @Test
-  void boundary_exactly1MB_usesLinearBase6Plus1MB() {
-    assertEquals(Duration.ofSeconds(7), pick(1 * MB)); // 6 + 1 = 7
+  void smallFile_between1AndUnder5MB_returns6s() {
+    assertEquals(Duration.ofSeconds(6), pick(1 * WaitPolicy.MB));            // exactly 1 MB
+    assertEquals(Duration.ofSeconds(6), pick(2 * WaitPolicy.MB));            // 2 MB
+    assertEquals(Duration.ofSeconds(6), pick(5 * WaitPolicy.MB - 1));        // just under 5 MB
   }
 
   @Test
-  void justOver1MB_ceilsToNextMB_thenBase6Plus2MB() {
-    long bytes = 1 * MB + 100 * 1024L; // ~1.10 MB -> ceil -> 2 MB
-    assertEquals(Duration.ofSeconds(8), pick(bytes));  // 6 + 2 = 8
+  void boundary_exactly5MB_entersLinearRule_base6PlusMB() {
+    // 5 MB -> ceil(5) = 5 => 6 + 5 = 11s
+    assertEquals(Duration.ofSeconds(11), pick(5 * WaitPolicy.MB));
   }
 
   @Test
-  void smallFile_under5MB_returns5s() {
-    assertEquals(Duration.ofSeconds(5), pick(2 * MB));          // in the 1–<5 MB band
-    assertEquals(Duration.ofSeconds(5), pick(5 * MB - 1));      // just below 5 MB
-  }
-
-  @Test
-  void boundary_exactly5MB_entersLinearRule() {
-    assertEquals(Duration.ofSeconds(11), pick(5 * MB)); // 6 + 5 = 11
+  void justOver5MB_ceilsToNextMB_thenLinear() {
+    long bytes = 5 * WaitPolicy.MB + 1; // ~5.000001 MB -> ceil -> 6 MB
+    // 6 + 6 = 12s
+    assertEquals(Duration.ofSeconds(12), pick(bytes));
   }
 
   @Test
   void typical_midSize_120MB_waits6Plus120s() {
-    assertEquals(Duration.ofSeconds(126), pick(120 * MB)); // 6 + 120 = 126
+    assertEquals(Duration.ofSeconds(126), pick(120 * WaitPolicy.MB)); // 6 + 120
   }
 
   @Test
   void linearRule_isCappedAtMaxWait() {
-    // 700 MB -> 6 + 700 = 706 seconds, but capped at 600s (10 minutes)
-    assertEquals(Duration.ofSeconds(MAX_WAIT_SEC), pick(700 * MB));
+    // 700 MB -> 6 + 700 = 706 seconds, but cap is 600s (10 minutes)
+    assertEquals(Duration.ofSeconds(WaitPolicy.MAX_WAIT_SEC), pick(700 * WaitPolicy.MB));
   }
 
   @Test
-  void rounding_ceilBehavior_forFractionalMB() {
-    // 4.01 MB is still in the 1–<5 MB band => 5s (tiered branch)
-    long fourPointOhOneMB = (long) Math.ceil(4.01 * MB);
-    assertEquals(Duration.ofSeconds(5), pick(fourPointOhOneMB));
-
-    // 5.01 MB -> linear path: ceil to 6 MB => 6 + 6 = 12s
-    long fivePointOhOneMB = (long) Math.ceil(5.01 * MB);
+  void rounding_behavior_for_fractionalMB_in_linear_path() {
+    // 5.01 MB -> ceil to 6 MB => 6 + 6 = 12s
+    long fivePointOhOneMB = (long) Math.ceil(5.01 * WaitPolicy.MB);
     assertEquals(Duration.ofSeconds(12), pick(fivePointOhOneMB));
+
+    // 9.9 MB -> ceil to 10 MB => 6 + 10 = 16s
+    long ninePointNineMB = (long) Math.ceil(9.9 * WaitPolicy.MB);
+    assertEquals(Duration.ofSeconds(16), pick(ninePointNineMB));
   }
-}
-```
-
-If you don’t already have a class, here’s a minimal one that matches your change (so the tests compile):
-
-```java
-// src/main/java/your/pkg/WaitPolicy.java
-package your.pkg;
-
-import java.time.Duration;
-
-public final class WaitPolicy {
-  private WaitPolicy() {}
-
-  private static final long MB = 1024L * 1024L;
-  private static final long MAX_WAIT_SEC = 10 * 60;
-
-  public static Duration pickWaitByTier(long bytes) {
-    if (bytes < 1 * MB)  return Duration.ofSeconds(2); // tiny
-    if (bytes < 5 * MB)  return Duration.ofSeconds(5); // small
-    long sizeMB = (long) Math.ceil(bytes / (double) MB);
-    long secs = 6 + sizeMB;                            // <-- your tweak
-    if (secs > MAX_WAIT_SEC) secs = MAX_WAIT_SEC;      // cap
-    return Duration.ofSeconds(secs);
-  }
-}
-```
-
-This suite hits:
-
-* both tier branches (`<1MB`, `1–<5MB`)
-* linear branch (`≥5MB`)
-* exact boundaries (1MB, 5MB)
-* ceil behavior just over a boundary
-* a large file case that triggers the cap
-
-If you want it parameterized instead, I can flip it to a `@MethodSource` table, but discrete tests like these make failures very obvious.
