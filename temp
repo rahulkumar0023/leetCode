@@ -1,5 +1,80 @@
 package com.yourcompany.batch.cos;
 
+import org.junit.jupiter.api.Test;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.StepExecution;
+import org.springframework.batch.test.MetaDataInstanceFactory;
+
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class CosProcessedContextSupportTest {
+
+    // Anonymous implementation just to test the default methods
+    private final CosProcessedContextSupport support = new CosProcessedContextSupport() {};
+
+    @Test
+    void addProcessedKey_shouldStoreFileNamesInJobExecutionContext() {
+        // given
+        JobExecution jobExecution = MetaDataInstanceFactory.createJobExecution();
+        StepExecution stepExecution = MetaDataInstanceFactory
+                .createStepExecution(jobExecution, "testStep");
+
+        // when: we store just file names (no /processed prefix here)
+        support.addProcessedKey(stepExecution, "in1.csv.zip.pgp");
+        support.addProcessedKey(stepExecution, "in2.csv.zip.pgp");
+
+        // then
+        List<String> keys = support.getProcessedKeys(jobExecution);
+        assertThat(keys)
+                .hasSize(2)
+                .containsExactly(
+                        "in1.csv.zip.pgp",
+                        "in2.csv.zip.pgp"
+                );
+    }
+
+    @Test
+    void addProcessedKey_shouldAccumulateValuesAcrossMultipleCalls() {
+        // given
+        JobExecution jobExecution = MetaDataInstanceFactory.createJobExecution();
+        StepExecution stepExecution1 = MetaDataInstanceFactory
+                .createStepExecution(jobExecution, "step1");
+        StepExecution stepExecution2 = MetaDataInstanceFactory
+                .createStepExecution(jobExecution, "step2");
+
+        // when: first step adds one, second step adds another
+        support.addProcessedKey(stepExecution1, "out1.xml.zip.pgp");
+        support.addProcessedKey(stepExecution2, "out2.xml.zip.pgp");
+
+        // then
+        List<String> keys = support.getProcessedKeys(jobExecution);
+        assertThat(keys)
+                .hasSize(2)
+                .containsExactly(
+                        "out1.xml.zip.pgp",
+                        "out2.xml.zip.pgp"
+                );
+    }
+
+    @Test
+    void getProcessedKeys_shouldReturnEmptyListWhenNoneStored() {
+        // given
+        JobExecution jobExecution = MetaDataInstanceFactory.createJobExecution();
+
+        // when
+        List<String> keys = support.getProcessedKeys(jobExecution);
+
+        // then
+        assertThat(keys).isEmpty();
+    }
+}
+
+
+
+package com.yourcompany.batch.cos;
+
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
