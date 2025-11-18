@@ -1,51 +1,237 @@
-private static Duration pick(long bytes) {
-    return WaitPolicy.pickWaitByTier(bytes);
-  }
+Yes 💯 — that’s exactly what you want:
+✅ record only the keys you touched (fetched/uploaded),
+✅ then in `CosProcessedCleanupListener` delete *only* those keys.
 
-  @Test
-  void tinyFile_under1MB_returns3s() {
-    assertEquals(Duration.ofSeconds(3), pick(700 * 1024L)); // ~0.68 MB
-    assertEquals(Duration.ofSeconds(3), pick(0));           // 0 bytes
-  }
+Here’s a **step-by-step implementation** using a small **helper interface** that both tasklets + listener can reuse.
 
-  @Test
-  void smallFile_between1AndUnder5MB_returns6s() {
-    assertEquals(Duration.ofSeconds(6), pick(1 * WaitPolicy.MB));            // exactly 1 MB
-    assertEquals(Duration.ofSeconds(6), pick(2 * WaitPolicy.MB));            // 2 MB
-    assertEquals(Duration.ofSeconds(6), pick(5 * WaitPolicy.MB - 1));        // just under 5 MB
-  }
+---
 
-  @Test
-  void boundary_exactly5MB_entersLinearRule_base6PlusMB() {
-    // 5 MB -> ceil(5) = 5 => 6 + 5 = 11s
-    assertEquals(Duration.ofSeconds(11), pick(5 * WaitPolicy.MB));
-  }
+## Step 1 – Create a shared helper interface for the ExecutionContext
 
-  @Test
-  void justOver5MB_ceilsToNextMB_thenLinear() {
-    long bytes = 5 * WaitPolicy.MB + 1; // ~5.000001 MB -> ceil -> 6 MB
-    // 6 + 6 = 12s
-    assertEquals(Duration.ofSeconds(12), pick(bytes));
-  }
+This gives you reusable default methods to add/get keys from the **job** `ExecutionContext`.
 
-  @Test
-  void typical_midSize_120MB_waits6Plus120s() {
-    assertEquals(Duration.ofSeconds(126), pick(120 * WaitPolicy.MB)); // 6 + 120
-  }
+```java
+package com.yourcompany.batch.cos;
 
-  @Test
-  void linearRule_isCappedAtMaxWait() {
-    // 700 MB -> 6 + 700 = 706 seconds, but cap is 600s (10 minutes)
-    assertEquals(Duration.ofSeconds(WaitPolicy.MAX_WAIT_SEC), pick(700 * WaitPolicy.MB));
-  }
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.StepExecution;
+import org.springframework.batch.item.ExecutionContext;
 
-  @Test
-  void rounding_behavior_for_fractionalMB_in_linear_path() {
-    // 5.01 MB -> ceil to 6 MB => 6 + 6 = 12s
-    long fivePointOhOneMB = (long) Math.ceil(5.01 * WaitPolicy.MB);
-    assertEquals(Duration.ofSeconds(12), pick(fivePointOhOneMB));
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
-    // 9.9 MB -> ceil to 10 MB => 6 + 10 = 16s
-    long ninePointNineMB = (long) Math.ceil(9.9 * WaitPolicy.MB);
-    assertEquals(Duration.ofSeconds(16), pick(ninePointNineMB));
-  }
+public interface CosProcessedContextSupport {
+
+    String PROCESSED_COS_KEYS = "processedCosKeys";
+
+    @SuppressWarnings("unchecked")
+    default void addProcessedKey(StepExecution stepExecution, String key) {
+        JobExecution jobExecution = stepExecution.getJobExecution();
+        ExecutionContext jobContext = jobExecution.getExecutionContext();
+
+        List<String> keys = (List<String>) jobContext.get(PROCESSED_COS_KEYS);
+        if (keys == null) {
+            keys = new ArrayList<>();
+        }
+
+        keys.add(key);
+
+        // ⭐ IMPORTANT: re-put so Spring Batch marks context as dirty
+        jobContext.put(PROCESSED_COS_KEYS, keys);
+    }
+
+    @SuppressWarnings("unchecked")
+    default List<String> getProcessedKeys(JobExecution jobExecution) {
+        ExecutionContext jobContext = jobExecution.getExecutionContext();
+        List<String> keys = (List<String>) jobContext.get(PROCESSED_COS_KEYS);
+        if (keys == null) {
+            return Collections.emptyList();
+        }
+        return keys;
+    }
+}
+```
+
+You’ll use `addProcessedKey(...)` in **fetch** + **upload** tasklets, and `getProcessedKeys(...)` in the cleanup listener.
+
+---
+
+## Step 2 – Fetch tasklet: record fetched/moved encrypted files
+
+Assume you have something like:
+
+```java
+@Component
+public class FetchEncryptedFilesTasklet implements Tasklet, CosProcessedContextSupport {
+
+    private final CosService cosService;
+
+    public FetchEncryptedFilesTasklet(CosService cosService) {
+        this.cosService = cosService;
+    }
+
+    @Override
+    public RepeatStatus execute(StepContribution contribution,
+                                ChunkContext chunkContext) throws Exception {
+
+        StepExecution stepExecution = chunkContext.getStepContext().getStepExecution();
+
+        // Example: fetch and move to /processed
+        List<String> incomingKeys = cosService.listIncomingEncryptedFiles(); 
+        for (String key : incomingKeys) {
+            // e.g. key = "incoming/myfile1.csv.zip.pgp"
+            String processedKey = cosService.moveToProcessed(key); 
+            // e.g. processedKey = "processed/incoming/myfile1.csv.zip.pgp"
+
+            // 🔹 Record this processed COS key in the job context
+            addProcessedKey(stepExecution, processedKey);
+        }
+
+        return RepeatStatus.FINISHED;
+    }
+}
+```
+
+So now every encrypted file moved into `/processed/...` from this tasklet will be remembered.
+
+---
+
+## Step 3 – Upload tasklet: also register outgoing files
+
+Same pattern for outgoing/upload step.
+
+```java
+@Component
+public class UploadFilesToCosTasklet implements Tasklet, CosProcessedContextSupport {
+
+    private final CosService cosService;
+
+    public UploadFilesToCosTasklet(CosService cosService) {
+        this.cosService = cosService;
+    }
+
+    @Override
+    public RepeatStatus execute(StepContribution contribution,
+                                ChunkContext chunkContext) throws Exception {
+
+        StepExecution stepExecution = chunkContext.getStepContext().getStepExecution();
+
+        // Example: upload generated XML/zip/pgp to outgoing/processed
+        List<File> filesToUpload = getFilesFromLocalDir(); // your logic
+
+        for (File file : filesToUpload) {
+            String processedKey = cosService.uploadToProcessed(file);
+            // e.g. "processed/outgoing/invoice_123.xml.zip.pgp"
+
+            // 🔹 Record processed key
+            addProcessedKey(stepExecution, processedKey);
+        }
+
+        return RepeatStatus.FINISHED;
+    }
+}
+```
+
+Now both **incoming** and **outgoing** processed objects are tracked in the **same** list in the job `ExecutionContext`.
+
+---
+
+## Step 4 – Implement `CosProcessedCleanupListener` that deletes only recorded keys
+
+This listener runs *after the job* and deletes only the objects that were registered.
+
+```java
+package com.yourcompany.batch.cos;
+
+import org.springframework.batch.core.BatchStatus;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.JobExecutionListener;
+import org.springframework.stereotype.Component;
+
+import java.util.List;
+
+@Component
+public class CosProcessedCleanupListener implements JobExecutionListener, CosProcessedContextSupport {
+
+    private final CosService cosService;
+
+    public CosProcessedCleanupListener(CosService cosService) {
+        this.cosService = cosService;
+    }
+
+    @Override
+    public void beforeJob(JobExecution jobExecution) {
+        // nothing
+    }
+
+    @Override
+    public void afterJob(JobExecution jobExecution) {
+        BatchStatus status = jobExecution.getStatus();
+
+        // ❌ If job failed, do NOT clean processed
+        if (status != BatchStatus.COMPLETED) {
+            // keep all processed files for investigation
+            return;
+        }
+
+        // ✅ Only on COMPLETED, get recorded keys from job context
+        List<String> processedKeys = getProcessedKeys(jobExecution);
+
+        if (processedKeys.isEmpty()) {
+            // This is the “no file in COS” case --> nothing to delete, directory stays
+            return;
+        }
+
+        for (String key : processedKeys) {
+            try {
+                cosService.deleteObject(key);  // only delete these keys
+            } catch (Exception e) {
+                // You can ignore "not found" errors if desired
+                // or just log and continue
+            }
+        }
+    }
+}
+```
+
+**Behavior now:**
+
+* **Job COMPLETED + some files processed**
+  → only those recorded keys under `/processed/...` are deleted.
+
+* **Job FAILED / STOPPED**
+  → cleanup is skipped; `/processed` and all keys stay.
+
+* **Job COMPLETED + no files in bucket** (your edge case)
+  → `processedKeys` is empty → `afterJob` deletes nothing; `/processed` directory is preserved.
+
+So you no longer rely on deleting “the entire `/processed` directory”, only the *objects* you recorded.
+
+---
+
+## Step 5 – Wire the listener into the job
+
+In your `Job` config:
+
+```java
+@Bean
+public Job myCosJob(JobRepository jobRepository,
+                    Step fetchStep,
+                    Step uploadStep,
+                    CosProcessedCleanupListener cosProcessedCleanupListener) {
+
+    return new JobBuilder("myCosJob", jobRepository)
+            .listener(cosProcessedCleanupListener)
+            .start(fetchStep)
+            .next(uploadStep)
+            // ... other steps ...
+            .build();
+}
+```
+
+And make sure the steps use your tasklets that implement `CosProcessedContextSupport`.
+
+---
+
+If you want, you can paste your actual `CosService` and step definitions, and I can plug these pieces directly into your existing code with the exact method names you’re using.
