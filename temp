@@ -1,3 +1,80 @@
+package com.yourcompany.batch.cos;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+import org.springframework.batch.core.BatchStatus;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.StepExecution;
+import org.springframework.batch.test.MetaDataInstanceFactory;
+
+import static org.mockito.Mockito.*;
+
+class CosProcessedCleanupListenerTest {
+
+    private CosService cosService;
+    private CosProcessedCleanupListener listener;
+    private CosProcessedContextSupport contextSupport;
+
+    @BeforeEach
+    void setUp() {
+        cosService = Mockito.mock(CosService.class);
+        listener = new CosProcessedCleanupListener(cosService);
+        contextSupport = listener; // listener implements CosProcessedContextSupport
+    }
+
+    @Test
+    void afterJob_whenCompleted_shouldDeleteOnlyRecordedKeysWithProcessedPrefix() {
+        // given
+        JobExecution jobExecution = MetaDataInstanceFactory.createJobExecution();
+        StepExecution stepExecution = MetaDataInstanceFactory.createStepExecution(jobExecution, "step1");
+
+        // store just file names in context
+        contextSupport.addProcessedKey(stepExecution, "in1.csv.zip.pgp");
+        contextSupport.addProcessedKey(stepExecution, "in2.csv.zip.pgp");
+
+        jobExecution.setStatus(BatchStatus.COMPLETED);
+
+        // when
+        listener.afterJob(jobExecution);
+
+        // then – verify the exact keys passed to deleteObject
+        verify(cosService).deleteObject("/processed/in1.csv.zip.pgp");
+        verify(cosService).deleteObject("/processed/in2.csv.zip.pgp");
+        verifyNoMoreInteractions(cosService);
+    }
+
+    @Test
+    void afterJob_whenCompletedAndNoKeys_shouldNotCallCos() {
+        // given
+        JobExecution jobExecution = MetaDataInstanceFactory.createJobExecution();
+        jobExecution.setStatus(BatchStatus.COMPLETED);
+
+        // when
+        listener.afterJob(jobExecution);
+
+        // then
+        verifyNoInteractions(cosService);
+    }
+
+    @Test
+    void afterJob_whenNotCompleted_shouldNotDeleteAnythingEvenIfKeysExist() {
+        // given
+        JobExecution jobExecution = MetaDataInstanceFactory.createJobExecution();
+        StepExecution stepExecution = MetaDataInstanceFactory.createStepExecution(jobExecution, "step1");
+
+        contextSupport.addProcessedKey(stepExecution, "in1.csv.zip.pgp");
+        jobExecution.setStatus(BatchStatus.FAILED);
+
+        // when
+        listener.afterJob(jobExecution);
+
+        // then
+        verifyNoInteractions(cosService);
+    }
+}
+
+
 Nice, we’re at the testing phase 😄
 I’ll give you **two JUnit 5 test classes**:
 
