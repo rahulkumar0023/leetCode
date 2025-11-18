@@ -1,3 +1,229 @@
+Nice, we’re at the testing phase 😄
+I’ll give you **two JUnit 5 test classes**:
+
+1. `CosProcessedContextSupportTest` – tests the default methods `addProcessedKey` and `getProcessedKeys`.
+2. `CosProcessedCleanupListenerTest` – tests that the listener deletes only the recorded keys and respects the job status.
+
+I’ll assume:
+
+* You use **Spring Batch** with `spring-batch-test` (for `MetaDataInstanceFactory`).
+* You use **Mockito**.
+* Your listener looks roughly like the one we discussed:
+
+```java
+@Component
+public class CosProcessedCleanupListener implements JobExecutionListener, CosProcessedContextSupport {
+
+    private final CosService cosService;
+
+    public CosProcessedCleanupListener(CosService cosService) {
+        this.cosService = cosService;
+    }
+
+    @Override
+    public void beforeJob(JobExecution jobExecution) { }
+
+    @Override
+    public void afterJob(JobExecution jobExecution) {
+        if (jobExecution.getStatus() != BatchStatus.COMPLETED) {
+            return;
+        }
+
+        List<String> processedKeys = getProcessedKeys(jobExecution);
+        if (processedKeys.isEmpty()) {
+            return;
+        }
+
+        processedKeys.forEach(cosService::deleteObject);
+    }
+}
+```
+
+If your method name is `deleteFile` instead of `deleteObject`, just adjust in the tests.
+
+---
+
+## 1️⃣ JUnit for `CosProcessedContextSupport`
+
+```java
+package com.yourcompany.batch.cos;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.StepExecution;
+import org.springframework.batch.test.MetaDataInstanceFactory;
+
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class CosProcessedContextSupportTest {
+
+    // Anonymous implementation just to test the default methods
+    private final CosProcessedContextSupport support = new CosProcessedContextSupport() {};
+
+    @Test
+    void addProcessedKey_shouldStoreKeysInJobExecutionContext() {
+        // given
+        JobExecution jobExecution = MetaDataInstanceFactory.createJobExecution();
+        StepExecution stepExecution = MetaDataInstanceFactory.createStepExecution(jobExecution, "testStep");
+
+        // when
+        support.addProcessedKey(stepExecution, "processed/file1.csv.zip.pgp");
+        support.addProcessedKey(stepExecution, "processed/file2.csv.zip.pgp");
+
+        // then
+        List<String> keys = support.getProcessedKeys(jobExecution);
+        assertThat(keys)
+                .hasSize(2)
+                .containsExactly(
+                        "processed/file1.csv.zip.pgp",
+                        "processed/file2.csv.zip.pgp"
+                );
+    }
+
+    @Test
+    void getProcessedKeys_shouldReturnEmptyListWhenNoneStored() {
+        // given
+        JobExecution jobExecution = MetaDataInstanceFactory.createJobExecution();
+
+        // when
+        List<String> keys = support.getProcessedKeys(jobExecution);
+
+        // then
+        assertThat(keys).isEmpty();
+    }
+}
+```
+
+**What this verifies:**
+
+* `addProcessedKey`:
+
+  * Uses the **job** `ExecutionContext`.
+  * Appends keys and re-stores the list.
+* `getProcessedKeys`:
+
+  * Returns an empty list if nothing is stored (no NPE, no cast issues).
+
+---
+
+## 2️⃣ JUnit for `CosProcessedCleanupListener`
+
+Here we test three scenarios:
+
+1. `COMPLETED` + keys recorded → deletes them all.
+2. `COMPLETED` + no keys recorded → does nothing.
+3. `FAILED` (or anything non-COMPLETED) + keys recorded → does nothing.
+
+```java
+package com.yourcompany.batch.cos;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+import org.springframework.batch.core.BatchStatus;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.StepExecution;
+import org.springframework.batch.test.MetaDataInstanceFactory;
+
+import static org.mockito.Mockito.*;
+
+class CosProcessedCleanupListenerTest {
+
+    private CosService cosService;
+    private CosProcessedCleanupListener listener;
+
+    // We want to reuse the default methods from the listener itself
+    private CosProcessedContextSupport contextSupport;
+
+    @BeforeEach
+    void setUp() {
+        this.cosService = Mockito.mock(CosService.class);
+        this.listener = new CosProcessedCleanupListener(cosService);
+        this.contextSupport = listener; // it implements CosProcessedContextSupport
+    }
+
+    @Test
+    void afterJob_whenCompleted_shouldDeleteOnlyRecordedKeys() {
+        // given
+        JobExecution jobExecution = MetaDataInstanceFactory.createJobExecution();
+        StepExecution stepExecution = MetaDataInstanceFactory.createStepExecution(jobExecution, "step1");
+
+        // record keys via default method
+        contextSupport.addProcessedKey(stepExecution, "processed/incoming/file1.csv.zip.pgp");
+        contextSupport.addProcessedKey(stepExecution, "processed/outgoing/file2.xml.zip.pgp");
+
+        jobExecution.setStatus(BatchStatus.COMPLETED);
+
+        // when
+        listener.afterJob(jobExecution);
+
+        // then
+        verify(cosService).deleteObject("processed/incoming/file1.csv.zip.pgp");
+        verify(cosService).deleteObject("processed/outgoing/file2.xml.zip.pgp");
+        verifyNoMoreInteractions(cosService);
+    }
+
+    @Test
+    void afterJob_whenCompletedAndNoKeys_shouldNotCallCos() {
+        // given
+        JobExecution jobExecution = MetaDataInstanceFactory.createJobExecution();
+        jobExecution.setStatus(BatchStatus.COMPLETED);
+
+        // when
+        listener.afterJob(jobExecution);
+
+        // then
+        verifyNoInteractions(cosService);
+    }
+
+    @Test
+    void afterJob_whenNotCompleted_shouldNotDeleteAnythingEvenIfKeysExist() {
+        // given
+        JobExecution jobExecution = MetaDataInstanceFactory.createJobExecution();
+        StepExecution stepExecution = MetaDataInstanceFactory.createStepExecution(jobExecution, "step1");
+
+        // record one key
+        contextSupport.addProcessedKey(stepExecution, "processed/incoming/file1.csv.zip.pgp");
+
+        jobExecution.setStatus(BatchStatus.FAILED); // or STOPPED, etc.
+
+        // when
+        listener.afterJob(jobExecution);
+
+        // then
+        verifyNoInteractions(cosService);
+    }
+}
+```
+
+If your service uses a different method name:
+
+* `cosService.deleteFile(key)` instead of `deleteObject(key)` → just change in the tests.
+
+---
+
+## Small recap of how this all ties together
+
+* Tasklets (fetch/upload) call `addProcessedKey(stepExecution, key)` when they move/upload files into `/processed/...`.
+* These keys are stored in the **job** `ExecutionContext` under `processedCosKeys`.
+* `CosProcessedCleanupListener.afterJob(jobExecution)`:
+
+  * If status != `COMPLETED` → skip.
+  * Otherwise, call `getProcessedKeys(jobExecution)` → list of keys for this run.
+  * If list is non-empty → delete **only** those keys.
+
+So now you can:
+
+* Keep `/processed` when there were **no files** or the job **failed**.
+* Clean up only what you actually touched in a **successful** run.
+
+If you paste your current `CosService` interface (method names), I can tweak the tests to fit it exactly.
+
+
+
+
 Yes 💯 — that’s exactly what you want:
 ✅ record only the keys you touched (fetched/uploaded),
 ✅ then in `CosProcessedCleanupListener` delete *only* those keys.
