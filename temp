@@ -1,3 +1,247 @@
+Gotcha – that actually makes things easier 👍
+You already compute a **size-based wait** in `PackageAndUploadFilesTasklet`, so we can:
+
+* keep that logic (your “6 seconds + per-MB wait”), **but**
+* instead of doing `Thread.sleep()` blindly in the tasklet, pass that **max wait duration** into the CFT client and use it as a **timeout for polling `/transfers/{idtu}`**.
+
+So the flow becomes:
+
+1. Tasklet zips, encrypts, uploads to COS.
+2. Tasklet calls `cftApiClient.notifyAndWait(outPath, encryptedFileName, maxWait)`.
+3. `notifyAndWait`:
+
+   * POSTs (exactly like your current `notifyUpload`),
+   * reads `idtu` from the POST response,
+   * polls `GET /transfers/{idtu}` until:
+
+     * `sentinel = COMPLETED && diagi == 0` → ✅ return;
+     * `sentinel = SENDING` and still within `maxWait` → ⏳ sleep a bit and retry;
+     * `sentinel = CANCELLED` or `diagi != 0` or timeout → ❌ log `diagi` + `diagnostic` and throw → step fails → job will be retried by scheduler.
+
+Below is how you can wire this in **step-by-step**.
+
+---
+
+## 1️⃣ Change in `PackageAndUploadFilesTasklet`
+
+At the bottom of your method (roughly this area from the screenshot):
+
+```java
+// Step 5: Call CFT API
+log.info("CFT notify enabled : {}", cftEnabled);
+if (cftEnabled) {
+    cftApiClient.notifyUpload(key, encryptedFileName);
+
+    // SIZE-BASED GRACE before moving to processed ---
+    long bytes = encryptedFile.length();
+    Duration grace = pickWaitByTier(bytes, waittime);
+    log.info("Payload size = {} bytes ({}). Grace wait before move = {}",
+             bytes, human(bytes), grace);
+    if (!grace.isZero()) {
+        try {
+            Thread.sleep(grace.toMillis());
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        }
+    }
+}
+
+addProcessedKey(stepExecution, encryptedFileName);
+if (moveEnabled) {
+    moveToProcessed(encryptedFileName, key);
+}
+```
+
+Replace the **notify+sleep block** with a single call that passes your computed wait to the client:
+
+```java
+// Step 5: Call CFT API + wait for transfer completion
+log.info("CFT notify enabled : {}", cftEnabled);
+if (cftEnabled) {
+    long bytes = encryptedFile.length();
+    Duration maxWait = pickWaitByTier(bytes, waittime);
+    log.info("Payload size = {} bytes ({}). Max wait window for CFT = {}",
+             bytes, human(bytes), maxWait);
+
+    cftApiClient.notifyAndWaitForCompletion(key, encryptedFileName, maxWait);
+}
+
+addProcessedKey(stepExecution, encryptedFileName);
+if (moveEnabled) {
+    moveToProcessed(encryptedFileName, key);
+}
+```
+
+So the tasklet no longer sleeps itself; it delegates that to the CFT client, which will actively **check sentinel + diagi** instead of guessing.
+
+---
+
+## 2️⃣ Update `CftApiClient` – POST + GET with polling
+
+You already have `notifyUpload(String outPath, String fileName)`. We’ll refactor that into a new method:
+
+```java
+public void notifyAndWaitForCompletion(String outPath, String fileName, Duration maxWait) {
+    try {
+        log.info("CFT notify started");
+
+        String apiUrl = baseURL + "?part={part}&idtf={idtf}"; // your existing URL
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+
+        Map<String, String> requestBody = new HashMap<>();
+        requestBody.put("fname", outPath);
+        requestBody.put("pname", fileName);
+        requestBody.put("sync", "YES");
+
+        String jsonPayload = objectMapper.writeValueAsString(requestBody);
+        HttpEntity<String> requestEntity = new HttpEntity<>(jsonPayload, headers);
+
+        Map<String, String> uriVariables = new HashMap<>();
+        uriVariables.put("part", destPART);
+        uriVariables.put("idtf", destIDF);
+
+        log.info("Sending POST request to: {}", apiUrl);
+        log.info("Headers: {}", headers);
+        log.info("Body: {}", requestBody);
+
+        ResponseEntity<String> response =
+                restTemplate.exchange(apiUrl, HttpMethod.POST, requestEntity,
+                                      String.class, uriVariables);
+
+        log.info("CFT POST Response status: {}", response.getStatusCode());
+        log.info("CFT POST Response body: {}", response.getBody());
+
+        // --- extract idtu from POST response ---
+        String body = response.getBody();
+        JsonNode root = objectMapper.readTree(body);
+        String idtu = root.path("idtu").asText(null);   // adjust field name if needed
+
+        if (idtu == null || idtu.isEmpty()) {
+            throw new IllegalStateException("CFT POST response did not contain idtu");
+        }
+
+        // --- poll GET /transfers/{idtu} until done or timeout ---
+        waitUntilTransferFinished(idtu, maxWait);
+
+        log.info("CFT notify + transfer status checks completed successfully for idtu={}", idtu);
+
+    } catch (Exception e) {
+        log.error("Error during CFT notifyAndWaitForCompletion", e);
+        throw new IllegalStateException("CFT notify failed", e);
+    }
+}
+```
+
+### Status DTO (for GET)
+
+```java
+public class TransferStatusResponse {
+    private String idtu;
+    private String sentinel;   // "COMPLETED", "SENDING", "CANCELLED"
+    private int diagi;
+    private String diagnostic;
+
+    // getters and setters
+}
+```
+
+### GET `/transfers/{idtu}` + polling using `maxWait`
+
+```java
+private TransferStatusResponse getTransferStatus(String idtu) {
+    String url = baseURL + "/transfers/{idtu}";   // adjust if needed
+
+    Map<String, String> uriVariables = new HashMap<>();
+    uriVariables.put("idtu", idtu);
+
+    ResponseEntity<String> response =
+            restTemplate.exchange(url, HttpMethod.GET, null, String.class, uriVariables);
+
+    log.info("CFT GET status for idtu={} -> {}", idtu, response.getStatusCode());
+    log.debug("CFT GET body: {}", response.getBody());
+
+    try {
+        return objectMapper.readValue(response.getBody(), TransferStatusResponse.class);
+    } catch (Exception e) {
+        throw new IllegalStateException("Failed to parse CFT status for idtu=" + idtu, e);
+    }
+}
+
+private void waitUntilTransferFinished(String idtu, Duration maxWait) {
+    // you can tweak these
+    Duration pollInterval = Duration.ofSeconds(5);
+    Instant deadline = Instant.now().plus(maxWait);
+
+    while (true) {
+        TransferStatusResponse status = getTransferStatus(idtu);
+
+        String sentinel = status.getSentinel();
+        int diagi = status.getDiagi();
+        String diagText = status.getDiagnostic();
+
+        log.info("CFT status idtu={} sentinel={} diagi={} diagnostic={}",
+                 idtu, sentinel, diagi, diagText);
+
+        if ("COMPLETED".equalsIgnoreCase(sentinel) && diagi == 0) {
+            // ✅ good
+            return;
+        }
+
+        if ("CANCELLED".equalsIgnoreCase(sentinel) || diagi != 0) {
+            // ❌ cancelled or error – fail the batch
+            throw new IllegalStateException(
+                    String.format("CFT transfer FAILED for idtu=%s, sentinel=%s, diagi=%d, diagnostic=%s",
+                                  idtu, sentinel, diagi, diagText));
+        }
+
+        if ("SENDING".equalsIgnoreCase(sentinel)) {
+            if (Instant.now().isAfter(deadline)) {
+                // ❌ still SENDING after our size-based wait window
+                throw new IllegalStateException(
+                        String.format("CFT transfer still SENDING after %s for idtu=%s; diagi=%d diagnostic=%s",
+                                      maxWait, idtu, diagi, diagText));
+            }
+
+            try {
+                Thread.sleep(pollInterval.toMillis());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted while waiting for CFT status", e);
+            }
+        } else {
+            // any unexpected sentinel
+            throw new IllegalStateException(
+                    String.format("Unexpected CFT sentinel='%s' for idtu=%s, diagi=%d, diagnostic=%s",
+                                  sentinel, idtu, diagi, diagText));
+        }
+    }
+}
+```
+
+---
+
+### What this gives you, with your existing wait logic
+
+* You **still use your size-based wait** (`pickWaitByTier`) — but now as a **maximum time window** for CFT to finish.
+* Instead of “blind sleep for X seconds”, you now **actively ask CFT**:
+
+  * `sentinel = COMPLETED && diagi = 0` → OK → batch continues exactly like before.
+  * `sentinel = SENDING`:
+
+    * keep polling while total time ≤ your size-based wait;
+    * if still `SENDING` after that → throw → job fails → scheduler can retry.
+  * `sentinel = CANCELLED` or `diagi != 0`:
+
+    * log `diagi` and `diagnostic`,
+    * throw → job fails (and files are kept / moved to `/failed` according to your listener).
+
+You don’t need to change the rest of your pipeline (cleanup listener, COS tracking, etc.); just replace the old `Thread.sleep` with this smarter `notifyAndWaitForCompletion`.
+
+If you want, you can paste a sample JSON of the `/transfers/{idtu}` response and I’ll adjust the `TransferStatusResponse` fields exactly to match it.
+
+
+
 Perfect, then let’s wire it exactly like this:
 
 * You **keep the files in `incoming/` & `outgoing/` during the job** (other API can read them).
