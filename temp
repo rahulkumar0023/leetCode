@@ -1,3 +1,328 @@
+Nice, good to hear it’s working 🎉
+Let’s add JUnit tests around the new behaviour.
+
+I’ll assume:
+
+* Class name: `CFTApiClient`
+* New public method:
+  `notifyAndWaitForCompletion(String outPath, String fileName, Duration waitTime)`
+* Internally it does:
+
+  * POST → get `idtu`
+  * wait
+  * GET (maybe second GET if first was `SENDING`)
+  * retry the whole POST+wait+GET sequence **once** if final status is error
+    (`CANCELLED`, `diagi != 0`, or still `SENDING`)
+
+You already have:
+
+* `RestTemplateBuilder restTemplateBuilder` mock
+* `RestTemplate restTemplate` mock
+* `ObjectMapper objectMapper` mock
+* `CFTApiClient restApiClient` initialised via reflection (as in your screenshot)
+
+We’ll just **add new tests** to your existing `CFTApiClientTest`.
+To avoid real `Thread.sleep`, we’ll pass `Duration.ZERO` in tests.
+
+---
+
+## 1. Helpers for the tests
+
+Add these helpers inside `CFTApiClientTest` (under your fields):
+
+```java
+private static final Duration NO_WAIT = Duration.ZERO;
+
+private static TransferStatusResponse status(String idtu, String sentinel, int diagi, String diagnostic) {
+    TransferStatusResponse s = new TransferStatusResponse();
+    s.setIdtu(idtu);
+    s.setSentinel(sentinel);
+    s.setDiagi(diagi);
+    s.setDiagnostic(diagnostic);
+    return s;
+}
+```
+
+---
+
+## 2. Success – first attempt, COMPLETED immediately
+
+```java
+@Test
+void notifyAndWaitForCompletion_successOnFirstAttempt_completed() throws Exception {
+    // given
+    String outPath = "out/path/file.pgp";
+    String fileName = "file.pgp";
+
+    // POST response body containing idtu
+    String postBody = "{\"idtu\":\"idtu1\"}";
+    ResponseEntity<String> postResponse =
+            new ResponseEntity<>(postBody, HttpStatus.OK);
+
+    // GET response body (we’ll let ObjectMapper turn it into TransferStatusResponse)
+    String getBody = "{\"idtu\":\"idtu1\",\"sentinel\":\"COMPLETED\",\"diagi\":0,\"diagnostic\":\"ok\"}";
+    ResponseEntity<String> getResponse =
+            new ResponseEntity<>(getBody, HttpStatus.OK);
+
+    // ObjectMapper: write request JSON
+    when(objectMapper.writeValueAsString(any()))
+            .thenReturn("{\"fname\":\"" + outPath + "\",\"pname\":\"" + fileName + "\",\"sync\":\"YES\"}");
+
+    // ObjectMapper: parse POST response (idtu)
+    when(objectMapper.readTree(postBody))
+            .thenReturn(new ObjectMapper().readTree(postBody));
+
+    // ObjectMapper: parse GET response into TransferStatusResponse
+    when(objectMapper.readValue(eq(getBody), eq(TransferStatusResponse.class)))
+            .thenReturn(status("idtu1", "COMPLETED", 0, "ok"));
+
+    // RestTemplate: first call is POST, second is GET
+    when(restTemplate.exchange(
+            startsWith("baseUrl?"),  // your baseURL + query
+            eq(HttpMethod.POST),
+            any(HttpEntity.class),
+            eq(String.class),
+            any(Map.class))
+    ).thenReturn(postResponse);
+
+    when(restTemplate.exchange(
+            startsWith("baseUrl/transfers"),
+            eq(HttpMethod.GET),
+            isNull(),
+            eq(String.class),
+            any(Map.class))
+    ).thenReturn(getResponse);
+
+    // when / then – should NOT throw
+    assertThatCode(() ->
+            restApiClient.notifyAndWaitForCompletion(outPath, fileName, NO_WAIT)
+    ).doesNotThrowAnyException();
+
+    // verify 1 POST + 1 GET
+    verify(restTemplate, times(1)).exchange(
+            startsWith("baseUrl?"), eq(HttpMethod.POST), any(HttpEntity.class), eq(String.class), any(Map.class));
+    verify(restTemplate, times(1)).exchange(
+            startsWith("baseUrl/transfers"), eq(HttpMethod.GET), isNull(), eq(String.class), any(Map.class));
+}
+```
+
+---
+
+## 3. Success – first attempt: SENDING then COMPLETED
+
+Here we simulate **two GET calls** in the same attempt: first `SENDING`, second `COMPLETED`.
+
+```java
+@Test
+void notifyAndWaitForCompletion_successOnFirstAttempt_sendingThenCompleted() throws Exception {
+    String outPath = "out/path/file.pgp";
+    String fileName = "file.pgp";
+
+    String postBody = "{\"idtu\":\"idtu1\"}";
+    ResponseEntity<String> postResponse =
+            new ResponseEntity<>(postBody, HttpStatus.OK);
+
+    String getBody1 = "{\"idtu\":\"idtu1\",\"sentinel\":\"SENDING\",\"diagi\":0,\"diagnostic\":\"in progress\"}";
+    String getBody2 = "{\"idtu\":\"idtu1\",\"sentinel\":\"COMPLETED\",\"diagi\":0,\"diagnostic\":\"done\"}";
+
+    ResponseEntity<String> getResponse1 =
+            new ResponseEntity<>(getBody1, HttpStatus.OK);
+    ResponseEntity<String> getResponse2 =
+            new ResponseEntity<>(getBody2, HttpStatus.OK);
+
+    when(objectMapper.writeValueAsString(any()))
+            .thenReturn("{\"fname\":\"" + outPath + "\",\"pname\":\"" + fileName + "\",\"sync\":\"YES\"}");
+
+    when(objectMapper.readTree(postBody))
+            .thenReturn(new ObjectMapper().readTree(postBody));
+
+    when(objectMapper.readValue(eq(getBody1), eq(TransferStatusResponse.class)))
+            .thenReturn(status("idtu1", "SENDING", 0, "in progress"));
+
+    when(objectMapper.readValue(eq(getBody2), eq(TransferStatusResponse.class)))
+            .thenReturn(status("idtu1", "COMPLETED", 0, "done"));
+
+    // POST once, GET twice in order
+    when(restTemplate.exchange(
+            startsWith("baseUrl?"), eq(HttpMethod.POST),
+            any(HttpEntity.class), eq(String.class), any(Map.class))
+    ).thenReturn(postResponse);
+
+    when(restTemplate.exchange(
+            startsWith("baseUrl/transfers"), eq(HttpMethod.GET),
+            isNull(), eq(String.class), any(Map.class))
+    ).thenReturn(getResponse1, getResponse2);
+
+    assertThatCode(() ->
+            restApiClient.notifyAndWaitForCompletion(outPath, fileName, NO_WAIT)
+    ).doesNotThrowAnyException();
+
+    verify(restTemplate, times(1)).exchange(
+            startsWith("baseUrl?"), eq(HttpMethod.POST), any(HttpEntity.class), eq(String.class), any(Map.class));
+    verify(restTemplate, times(2)).exchange(
+            startsWith("baseUrl/transfers"), eq(HttpMethod.GET), isNull(), eq(String.class), any(Map.class));
+}
+```
+
+---
+
+## 4. Retry – first attempt CANCELLED, second attempt COMPLETED
+
+This checks that:
+
+* we do **two POSTs** and **two GETs**,
+* final result is success (no exception).
+
+```java
+@Test
+void notifyAndWaitForCompletion_retryAfterCancelled_thenSuccess() throws Exception {
+    String outPath = "out/path/file.pgp";
+    String fileName = "file.pgp";
+
+    // First attempt
+    String postBody1 = "{\"idtu\":\"idtu1\"}";
+    String getBody1 = "{\"idtu\":\"idtu1\",\"sentinel\":\"CANCELLED\",\"diagi\":5,\"diagnostic\":\"cancelled\"}";
+
+    ResponseEntity<String> postResponse1 =
+            new ResponseEntity<>(postBody1, HttpStatus.OK);
+    ResponseEntity<String> getResponse1 =
+            new ResponseEntity<>(getBody1, HttpStatus.OK);
+
+    // Second attempt
+    String postBody2 = "{\"idtu\":\"idtu2\"}";
+    String getBody2 = "{\"idtu\":\"idtu2\",\"sentinel\":\"COMPLETED\",\"diagi\":0,\"diagnostic\":\"ok on retry\"}";
+
+    ResponseEntity<String> postResponse2 =
+            new ResponseEntity<>(postBody2, HttpStatus.OK);
+    ResponseEntity<String> getResponse2 =
+            new ResponseEntity<>(getBody2, HttpStatus.OK);
+
+    when(objectMapper.writeValueAsString(any()))
+            .thenReturn("{\"fname\":\"" + outPath + "\",\"pname\":\"" + fileName + "\",\"sync\":\"YES\"}");
+
+    // POST parse
+    when(objectMapper.readTree(postBody1))
+            .thenReturn(new ObjectMapper().readTree(postBody1));
+    when(objectMapper.readTree(postBody2))
+            .thenReturn(new ObjectMapper().readTree(postBody2));
+
+    // GET parse
+    when(objectMapper.readValue(eq(getBody1), eq(TransferStatusResponse.class)))
+            .thenReturn(status("idtu1", "CANCELLED", 5, "cancelled"));
+    when(objectMapper.readValue(eq(getBody2), eq(TransferStatusResponse.class)))
+            .thenReturn(status("idtu2", "COMPLETED", 0, "ok on retry"));
+
+    // POST calls in order (attempt 1, then 2)
+    when(restTemplate.exchange(
+            startsWith("baseUrl?"), eq(HttpMethod.POST),
+            any(HttpEntity.class), eq(String.class), any(Map.class))
+    ).thenReturn(postResponse1, postResponse2);
+
+    // GET calls in order (one per attempt)
+    when(restTemplate.exchange(
+            startsWith("baseUrl/transfers"), eq(HttpMethod.GET),
+            isNull(), eq(String.class), any(Map.class))
+    ).thenReturn(getResponse1, getResponse2);
+
+    assertThatCode(() ->
+            restApiClient.notifyAndWaitForCompletion(outPath, fileName, NO_WAIT)
+    ).doesNotThrowAnyException();
+
+    verify(restTemplate, times(2)).exchange(
+            startsWith("baseUrl?"), eq(HttpMethod.POST), any(HttpEntity.class), eq(String.class), any(Map.class));
+    verify(restTemplate, times(2)).exchange(
+            startsWith("baseUrl/transfers"), eq(HttpMethod.GET), isNull(), eq(String.class), any(Map.class));
+}
+```
+
+---
+
+## 5. Final failure – both attempts error ⇒ exception (batch will fail)
+
+This ensures `notifyAndWaitForCompletion` throws, which, if you don’t catch it in the tasklet, will make your Spring Batch job fail.
+
+```java
+@Test
+void notifyAndWaitForCompletion_throwsWhenBothAttemptsFail() throws Exception {
+    String outPath = "out/path/file.pgp";
+    String fileName = "file.pgp";
+
+    String postBody1 = "{\"idtu\":\"idtu1\"}";
+    String getBody1  = "{\"idtu\":\"idtu1\",\"sentinel\":\"CANCELLED\",\"diagi\":5,\"diagnostic\":\"first fail\"}";
+
+    String postBody2 = "{\"idtu\":\"idtu2\"}";
+    String getBody2  = "{\"idtu\":\"idtu2\",\"sentinel\":\"CANCELLED\",\"diagi\":7,\"diagnostic\":\"second fail\"}";
+
+    ResponseEntity<String> postResponse1 =
+            new ResponseEntity<>(postBody1, HttpStatus.OK);
+    ResponseEntity<String> postResponse2 =
+            new ResponseEntity<>(postBody2, HttpStatus.OK);
+
+    ResponseEntity<String> getResponse1 =
+            new ResponseEntity<>(getBody1, HttpStatus.OK);
+    ResponseEntity<String> getResponse2 =
+            new ResponseEntity<>(getBody2, HttpStatus.OK);
+
+    when(objectMapper.writeValueAsString(any()))
+            .thenReturn("{\"fname\":\"" + outPath + "\",\"pname\":\"" + fileName + "\",\"sync\":\"YES\"}");
+
+    when(objectMapper.readTree(postBody1))
+            .thenReturn(new ObjectMapper().readTree(postBody1));
+    when(objectMapper.readTree(postBody2))
+            .thenReturn(new ObjectMapper().readTree(postBody2));
+
+    when(objectMapper.readValue(eq(getBody1), eq(TransferStatusResponse.class)))
+            .thenReturn(status("idtu1", "CANCELLED", 5, "first fail"));
+    when(objectMapper.readValue(eq(getBody2), eq(TransferStatusResponse.class)))
+            .thenReturn(status("idtu2", "CANCELLED", 7, "second fail"));
+
+    when(restTemplate.exchange(
+            startsWith("baseUrl?"), eq(HttpMethod.POST),
+            any(HttpEntity.class), eq(String.class), any(Map.class))
+    ).thenReturn(postResponse1, postResponse2);
+
+    when(restTemplate.exchange(
+            startsWith("baseUrl/transfers"), eq(HttpMethod.GET),
+            isNull(), eq(String.class), any(Map.class))
+    ).thenReturn(getResponse1, getResponse2);
+
+    assertThatThrownBy(() ->
+            restApiClient.notifyAndWaitForCompletion(outPath, fileName, NO_WAIT)
+    )
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("FAILED after retry");
+
+    verify(restTemplate, times(2)).exchange(
+            startsWith("baseUrl?"), eq(HttpMethod.POST), any(HttpEntity.class), eq(String.class), any(Map.class));
+    verify(restTemplate, times(2)).exchange(
+            startsWith("baseUrl/transfers"), eq(HttpMethod.GET), isNull(), eq(String.class), any(Map.class));
+}
+```
+
+---
+
+### How this ties to batch failure
+
+You don’t need a special Spring Batch test for failure: as long as your tasklet just calls:
+
+```java
+cftApiClient.notifyAndWaitForCompletion(...);
+```
+
+and doesn’t catch the `IllegalStateException`, the **step will fail**, and Spring Batch will mark the **job FAILED**.
+
+So these unit tests:
+
+* Prove the new logic (SENDING + double GET, retry once on CANCELLED/diagi≠0).
+* Confirm that in the “both attempts fail” case, an exception is thrown → which is exactly what you want to cause the batch to fail.
+---------------=-=-=-=-=--------=-=-=-=-----------------
+
+
+
+
+
+
+
 Right, that clarifies it:
 
 * First GET after the wait returned `SENDING`,
