@@ -1,4 +1,252 @@
+You **can** absolutely stay with Mockito-based tests 👍
+The two problems you hit:
 
+1. `this.restTemplate` or `this.objectMapper` is `null`
+2. Mockito “argument mismatch / PotentialStubbingProblem”
+
+…are both symptoms that the *real* HTTP code is still being called in your tests.
+
+The easiest way to fix this and still use Mockito is:
+
+> Use a **spy** on `CFTApiClient` and mock just the two internal methods
+> `triggerTransferOnce(...)` and `getTransferStatus(...)`.
+
+Then:
+
+* No real `RestTemplate` calls.
+* No strict stubbing errors.
+* You only test the **control flow** of `notifyAndWaitForCompletion`.
+
+---
+
+## 1️⃣ Small change in production code
+
+In `CFTApiClient`, make these **non-private** so Mockito can override them:
+
+```java
+// was: private String triggerTransferOnce(...)
+protected String triggerTransferOnce(String outPath, String fileName, int attempt) throws Exception {
+    // existing POST logic
+}
+
+// was: private TransferStatusResponse getTransferStatus(String idtu)
+protected TransferStatusResponse getTransferStatus(String idtu) {
+    // existing GET logic
+}
+```
+
+Do **not** change their bodies, just visibility.
+
+---
+
+## 2️⃣ Your test setup with Mockito spy
+
+In your existing `CFTApiClientTest` (the one you already have with `restTemplateBuilder`, `restTemplate`, `objectMapper` mocks), update `setUp()` like this:
+
+```java
+private CFTApiClient restApiClient;
+
+@Mock
+private RestTemplateBuilder restTemplateBuilder;
+
+@Mock
+private RestTemplate restTemplate;
+
+@Mock
+private ObjectMapper objectMapper;
+
+@BeforeEach
+void setUp() {
+    // RestTemplateBuilder wiring – same as you already had
+    when(restTemplateBuilder.basicAuthentication(nullable(String.class), nullable(String.class)))
+            .thenReturn(restTemplateBuilder);
+    when(restTemplateBuilder.requestFactory(any()))
+            .thenReturn(restTemplateBuilder);
+    when(restTemplateBuilder.build())
+            .thenReturn(restTemplate);
+
+    // Create real client
+    CFTApiClient realClient = new CFTApiClient(restTemplateBuilder, objectMapper);
+    ReflectionTestUtils.setField(realClient, "baseUrl", "baseUrl");
+    ReflectionTestUtils.setField(realClient, "username", "username");
+    ReflectionTestUtils.setField(realClient, "password", "cftCred");
+    ReflectionTestUtils.setField(realClient, "destPART", "destPART");
+    ReflectionTestUtils.setField(realClient, "destIDF", "destIDF");
+    ReflectionTestUtils.invokeMethod(realClient, "init");
+
+    // Spy it, so we can override internal methods but keep everything else
+    restApiClient = Mockito.spy(realClient);
+}
+```
+
+Now `restApiClient`:
+
+* has a non-null `restTemplate`, `objectMapper`, etc.,
+* but in tests we’ll **override** `triggerTransferOnce` and `getTransferStatus`, so HTTP is never used.
+
+---
+
+## 3️⃣ Helper to build statuses
+
+Inside the test class:
+
+```java
+private static TransferStatusResponse status(String idtu, String sentinel, int diagi, String diagnostic) {
+    TransferStatusResponse s = new TransferStatusResponse();
+    s.setIdtu(idtu);
+    s.setSentinel(sentinel);
+    s.setDiagi(diagi);
+    s.setDiagnostic(diagnostic);
+    return s;
+}
+```
+
+And we’ll use `Duration.ZERO` to avoid any real `sleep`:
+
+```java
+private static final Duration NO_WAIT = Duration.ZERO;
+```
+
+---
+
+## 4️⃣ Tests using Mockito spy (no RestTemplate stubbing needed)
+
+### 4.1 Success – first attempt, COMPLETED immediately
+
+```java
+@Test
+void notifyAndWaitForCompletion_successOnFirstAttempt_completed() throws Exception {
+    TransferStatusResponse completed = status("idtu1", "COMPLETED", 0, "ok");
+
+    // Any call to triggerTransferOnce returns idtu1
+    doReturn("idtu1").when(restApiClient)
+            .triggerTransferOnce(anyString(), anyString(), anyInt());
+
+    // GET for idtu1 returns COMPLETED,0
+    doReturn(completed).when(restApiClient)
+            .getTransferStatus("idtu1");
+
+    assertDoesNotThrow(() ->
+            restApiClient.notifyAndWaitForCompletion("out/path/file.pgp", "file.pgp", NO_WAIT)
+    );
+}
+```
+
+---
+
+### 4.2 Success – first attempt: SENDING then COMPLETED
+
+We want: first GET → SENDING, second GET → COMPLETED.
+
+```java
+@Test
+void notifyAndWaitForCompletion_successOnFirstAttempt_sendingThenCompleted() throws Exception {
+    TransferStatusResponse sending   = status("idtu1", "SENDING",   0, "in progress");
+    TransferStatusResponse completed = status("idtu1", "COMPLETED", 0, "done");
+
+    doReturn("idtu1").when(restApiClient)
+            .triggerTransferOnce(anyString(), anyString(), anyInt());
+
+    AtomicInteger counter = new AtomicInteger();
+    doAnswer(invocation -> {
+        // first call -> SENDING, second call -> COMPLETED
+        return counter.getAndIncrement() == 0 ? sending : completed;
+    }).when(restApiClient).getTransferStatus("idtu1");
+
+    assertDoesNotThrow(() ->
+            restApiClient.notifyAndWaitForCompletion("out/path/file.pgp", "file.pgp", NO_WAIT)
+    );
+}
+```
+
+---
+
+### 4.3 Retry once – first attempt CANCELLED, second attempt COMPLETED
+
+Here we want:
+
+* Attempt 1: `triggerTransferOnce` → idtu1, `getTransferStatus(idtu1)` → CANCELLED
+* Attempt 2: `triggerTransferOnce` → idtu2, `getTransferStatus(idtu2)` → COMPLETED
+
+```java
+@Test
+void notifyAndWaitForCompletion_retryOnceAfterCancelled_thenSuccess() throws Exception {
+    TransferStatusResponse cancelled = status("idtu1", "CANCELLED", 5, "cancelled");
+    TransferStatusResponse completed = status("idtu2", "COMPLETED", 0, "ok on retry");
+
+    // First trigger -> idtu1, second trigger -> idtu2
+    doReturn("idtu1", "idtu2").when(restApiClient)
+            .triggerTransferOnce(anyString(), anyString(), anyInt());
+
+    // Return status depending on idtu
+    doAnswer(invocation -> {
+        String idtu = invocation.getArgument(0, String.class);
+        if ("idtu1".equals(idtu)) {
+            return cancelled;
+        } else {
+            return completed;
+        }
+    }).when(restApiClient).getTransferStatus(anyString());
+
+    assertDoesNotThrow(() ->
+            restApiClient.notifyAndWaitForCompletion("out/path/file.pgp", "file.pgp", NO_WAIT)
+    );
+}
+```
+
+---
+
+### 4.4 Failure – both attempts error → batch will fail
+
+Now both attempts end in error (`CANCELLED`, or `diagi != 0`, or still SENDING).
+We just check that an exception is thrown; **you don’t need to assert the exact message**.
+
+```java
+@Test
+void notifyAndWaitForCompletion_bothAttemptsFail_throwsException() throws Exception {
+    TransferStatusResponse cancelled1 = status("idtu1", "CANCELLED", 5, "first fail");
+    TransferStatusResponse cancelled2 = status("idtu2", "CANCELLED", 7, "second fail");
+
+    doReturn("idtu1", "idtu2").when(restApiClient)
+            .triggerTransferOnce(anyString(), anyString(), anyInt());
+
+    doAnswer(invocation -> {
+        String idtu = invocation.getArgument(0, String.class);
+        if ("idtu1".equals(idtu)) {
+            return cancelled1;
+        } else {
+            return cancelled2;
+        }
+    }).when(restApiClient).getTransferStatus(anyString());
+
+    assertThrows(IllegalStateException.class, () ->
+            restApiClient.notifyAndWaitForCompletion("out/path/file.pgp", "file.pgp", NO_WAIT)
+    );
+}
+```
+
+Because your tasklet **doesn’t catch** this `IllegalStateException`, Spring Batch will mark:
+
+* the **step FAILED**, and
+* the **job FAILED**
+  → exactly what you want when the transfer ultimately fails.
+
+---
+
+## Why this fixes your issues
+
+* `restTemplate` and `objectMapper` can no longer be `null` in tests, because:
+
+  * we build the real client with mocks in `setUp()` (just like before),
+  * then we spy it – all fields are preserved.
+* We do **not** stub `RestTemplate.exchange(...)` at all in these 4 tests, so:
+
+  * no `PotentialStubbingProblem`,
+  * no URL/argument mismatch.
+* All transfer outcomes (`COMPLETED`, `SENDING→COMPLETED`, `CANCELLED + retry`, `CANCELLED + CANCELLED`) are simulated purely via Mockito on `triggerTransferOnce` / `getTransferStatus`.
+
+If you paste your `notifyAndWaitForCompletion(...)` method, I can quickly double-check that this stubbing still matches its internal flow, but this pattern is exactly designed for the way we structured it earlier.
+==========================
 
 
 package com.bnpp.pf.einvoice.connect.notifycft;
