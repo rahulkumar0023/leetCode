@@ -1,3 +1,220 @@
+Right, that clarifies it:
+
+* First GET after the wait returned `SENDING`,
+* but the *real* outcome of the transfer later was **FAILED**,
+* so you **must not** treat `SENDING` as success.
+* You want: **POST → wait → GET → if SENDING, wait again → GET again**.
+  Then decide success/failure from that final GET.
+
+We can do this with **very small changes** to what we already designed:
+👉 at most **2 GETs per POST**, and still **one POST retry max**.
+
+---
+
+## 1. Updated logic per attempt (conceptually)
+
+For *each* attempt (initial and retry):
+
+1. `POST /transfers` → get `idtu`
+2. `sleep(waitTime)` (your size-based wait)
+3. `GET /transfers/{idtu}` → `status1`
+4. If `status1.sentinel == SENDING` (and `diagi == 0`):
+
+   * `sleep(waitTime)` **again**
+   * `GET /transfers/{idtu}` → `status2`
+   * use `status2` as the **final status for this attempt**
+5. Now look at final status:
+
+   * If `sentinel = CANCELLED` **or** `diagi != 0` → this attempt = **error**
+   * If `sentinel = SENDING` again → treat as **error** (it never finished in our window)
+   * Otherwise (`COMPLETED`, `PRE_PROC`, etc. with `diagi == 0`) → **success**
+
+If the first attempt is an error → **one more attempt** (POST+wait+GET(+optional second GET)).
+
+---
+
+## 2. Minimal code changes
+
+I’ll show only the **two places** to change compared to the previous version:
+
+### 2.1. `doSingleAttempt`: add a *second* GET if first returns SENDING
+
+```java
+private TransferStatusResponse doSingleAttempt(String outPath,
+                                               String fileName,
+                                               Duration waitTime,
+                                               int attempt) {
+    try {
+        // 1) POST
+        String idtu = triggerTransferOnce(outPath, fileName, attempt);
+
+        // 2) first WAIT
+        if (!waitTime.isZero() && !waitTime.isNegative()) {
+            log.info("Waiting {} ms before first status GET for idtu={}", waitTime.toMillis(), idtu);
+            try {
+                Thread.sleep(waitTime.toMillis());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted while waiting before first CFT GET", e);
+            }
+        }
+
+        // 3) first GET
+        TransferStatusResponse status = getTransferStatus(idtu);
+        log.info("First CFT status for idtu={} sentinel={} diagi={} diagnostic={}",
+                 idtu, status.getSentinel(), status.getDiagi(), status.getDiagnostic());
+
+        // 4) If still SENDING, wait once more and GET again
+        if ("SENDING".equalsIgnoreCase(status.getSentinel())
+                && status.getDiagi() == 0) {
+
+            log.info("CFT status is SENDING after first wait. Waiting {} ms again and re-checking...",
+                     waitTime.toMillis());
+
+            try {
+                Thread.sleep(waitTime.toMillis());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted while waiting before second CFT GET", e);
+            }
+
+            status = getTransferStatus(idtu);
+            log.info("Second CFT status for idtu={} sentinel={} diagi={} diagnostic={}",
+                     idtu, status.getSentinel(), status.getDiagi(), status.getDiagnostic());
+        }
+
+        // final status for this attempt
+        return status;
+
+    } catch (Exception ex) {
+        throw new IllegalStateException("CFT POST/GET attempt " + attempt + " failed for file " + fileName, ex);
+    }
+}
+```
+
+So now:
+
+* Each attempt does **one or two GETs**:
+
+  * 1st GET after the wait
+  * A **second** GET only if the first said `SENDING`
+
+---
+
+### 2.2. `isErrorStatus`: treat final `SENDING` as error
+
+Previously we only treated `CANCELLED` and `diagi != 0` as error.
+Now we also say: “if it’s still SENDING after the second check → treat as error”.
+
+```java
+private boolean isErrorStatus(TransferStatusResponse status) {
+    String sentinel = status.getSentinel();
+    int diagi = status.getDiagi();
+
+    log.info("Final CFT status for decision: idtu={} sentinel={} diagi={} diagnostic={}",
+             status.getIdtu(), sentinel, diagi, status.getDiagnostic());
+
+    // business error conditions:
+    // - CANCELLED
+    // - any diagi != 0
+    // - still SENDING after two waits (never reached a final state)
+    if ("CANCELLED".equalsIgnoreCase(sentinel)
+            || diagi != 0
+            || "SENDING".equalsIgnoreCase(sentinel)) {
+        return true;
+    }
+
+    // PRE_PROC, COMPLETED, etc. with diagi == 0 => OK
+    return false;
+}
+```
+
+**Why treat SENDING as error here?**
+
+* At this point we’ve already:
+
+  * waited `waitTime`, did GET1 (SENDING),
+  * waited another `waitTime`, did GET2, still SENDING.
+* If it’s *still* SENDING, we don’t want to declare success.
+  It’s safer to treat this as “did not finish → error” so we either:
+
+  * retry the POST once, or
+  * fail the job, rather than silently saying “OK” while the transfer actually fails.
+
+---
+
+## 3. The retry logic itself stays the same
+
+We keep the same `notifyAndWaitForCompletion` from before:
+
+```java
+public void notifyAndWaitForCompletion(String outPath,
+                                       String fileName,
+                                       Duration waitTime) {
+
+    // FIRST attempt
+    TransferStatusResponse status = doSingleAttempt(outPath, fileName, waitTime, 1);
+
+    if (!isErrorStatus(status)) {
+        log.info("CFT transfer SUCCESS on first attempt for file {} (sentinel={}, diagi={})",
+                 fileName, status.getSentinel(), status.getDiagi());
+        return;
+    }
+
+    log.warn("CFT transfer ERROR on first attempt for file {} – sentinel={} diagi={} diagnostic={}. Retrying once...",
+             fileName, status.getSentinel(), status.getDiagi(), status.getDiagnostic());
+
+    // SECOND (and last) attempt
+    TransferStatusResponse status2 = doSingleAttempt(outPath, fileName, waitTime, 2);
+
+    if (isErrorStatus(status2)) {
+        throw new IllegalStateException(
+                String.format("CFT transfer FAILED after retry for file %s. Last status: sentinel=%s diagi=%d diagnostic=%s",
+                              fileName,
+                              status2.getSentinel(),
+                              status2.getDiagi(),
+                              status2.getDiagnostic()));
+    }
+
+    log.info("CFT transfer SUCCESS on second attempt for file {} (sentinel={}, diagi={})",
+             fileName, status2.getSentinel(), status2.getDiagi());
+}
+```
+
+And your tasklet still just does:
+
+```java
+if (cftEnabled) {
+    long bytes = encryptedFile.length();
+    Duration waitTime = pickWaitByTier(bytes, waittime); // your “6s + per MB” logic
+    log.info("Payload size={} bytes. Using waitTime={} before CFT status checks.", bytes, waitTime);
+    cftApiClient.notifyAndWaitForCompletion(key, encryptedFileName, waitTime);
+}
+```
+
+---
+
+## 4. What this fixes for your “SENDING but actually failed” case
+
+With these tweaks:
+
+* First `POST→wait→GET` returns `SENDING` → **not accepted** as final.
+* We:
+
+  * wait **again** for the same `waitTime`,
+  * do a **second GET**,
+  * now we see the true final state (e.g. `CANCELLED`, or `diagi != 0`).
+* That final `CANCELLED` / error now:
+
+  * marks the attempt as error,
+  * triggers the **second POST attempt**, or
+  * fails the job after the second attempt.
+
+So you don’t falsely treat that initial `SENDING` as success anymore.
+
+If you want, you can tell me roughly what your typical waitTime is (e.g. “6s + 1s per MB”) and we could decide if the second wait should be the same, or a fixed small extra (say 5s). But the structure above already matches exactly what you described.
+===================-=-=-==-=---------
+
 Gotcha, that makes sense now 👍
 
 You want a *much simpler* flow:
