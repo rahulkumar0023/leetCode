@@ -1,156 +1,63 @@
-Gotcha – that actually makes things easier 👍
-You already compute a **size-based wait** in `PackageAndUploadFilesTasklet`, so we can:
+Great, let’s line this up cleanly and step-by-step so it’s easy to drop into your code.
 
-* keep that logic (your “6 seconds + per-MB wait”), **but**
-* instead of doing `Thread.sleep()` blindly in the tasklet, pass that **max wait duration** into the CFT client and use it as a **timeout for polling `/transfers/{idtu}`**.
+**Goal**
 
-So the flow becomes:
+After your POST to CFT:
 
-1. Tasklet zips, encrypts, uploads to COS.
-2. Tasklet calls `cftApiClient.notifyAndWait(outPath, encryptedFileName, maxWait)`.
-3. `notifyAndWait`:
+1. Extract `idtu`.
+2. Poll `GET /transfers/{idtu}`.
+3. If `sentinel = "SENDING"` → keep waiting (within your existing size-based max wait).
+4. If `sentinel = "CANCELLED"` **or** `diagi != 0` →
 
-   * POSTs (exactly like your current `notifyUpload`),
-   * reads `idtu` from the POST response,
-   * polls `GET /transfers/{idtu}` until:
+   * print `diagi` + `diagnostic`,
+   * retry the **POST** once (full POST+GET again).
+5. If it still fails → let the exception bubble so the batch fails like today.
 
-     * `sentinel = COMPLETED && diagi == 0` → ✅ return;
-     * `sentinel = SENDING` and still within `maxWait` → ⏳ sleep a bit and retry;
-     * `sentinel = CANCELLED` or `diagi != 0` or timeout → ❌ log `diagi` + `diagnostic` and throw → step fails → job will be retried by scheduler.
-
-Below is how you can wire this in **step-by-step**.
+We’ll reuse your **size-based wait Duration** (from the tasklet) as `maxWait`.
 
 ---
 
-## 1️⃣ Change in `PackageAndUploadFilesTasklet`
+## Step 1 – Define a DTO for the status GET response
 
-At the bottom of your method (roughly this area from the screenshot):
-
-```java
-// Step 5: Call CFT API
-log.info("CFT notify enabled : {}", cftEnabled);
-if (cftEnabled) {
-    cftApiClient.notifyUpload(key, encryptedFileName);
-
-    // SIZE-BASED GRACE before moving to processed ---
-    long bytes = encryptedFile.length();
-    Duration grace = pickWaitByTier(bytes, waittime);
-    log.info("Payload size = {} bytes ({}). Grace wait before move = {}",
-             bytes, human(bytes), grace);
-    if (!grace.isZero()) {
-        try {
-            Thread.sleep(grace.toMillis());
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-        }
-    }
-}
-
-addProcessedKey(stepExecution, encryptedFileName);
-if (moveEnabled) {
-    moveToProcessed(encryptedFileName, key);
-}
-```
-
-Replace the **notify+sleep block** with a single call that passes your computed wait to the client:
-
-```java
-// Step 5: Call CFT API + wait for transfer completion
-log.info("CFT notify enabled : {}", cftEnabled);
-if (cftEnabled) {
-    long bytes = encryptedFile.length();
-    Duration maxWait = pickWaitByTier(bytes, waittime);
-    log.info("Payload size = {} bytes ({}). Max wait window for CFT = {}",
-             bytes, human(bytes), maxWait);
-
-    cftApiClient.notifyAndWaitForCompletion(key, encryptedFileName, maxWait);
-}
-
-addProcessedKey(stepExecution, encryptedFileName);
-if (moveEnabled) {
-    moveToProcessed(encryptedFileName, key);
-}
-```
-
-So the tasklet no longer sleeps itself; it delegates that to the CFT client, which will actively **check sentinel + diagi** instead of guessing.
-
----
-
-## 2️⃣ Update `CftApiClient` – POST + GET with polling
-
-You already have `notifyUpload(String outPath, String fileName)`. We’ll refactor that into a new method:
-
-```java
-public void notifyAndWaitForCompletion(String outPath, String fileName, Duration maxWait) {
-    try {
-        log.info("CFT notify started");
-
-        String apiUrl = baseURL + "?part={part}&idtf={idtf}"; // your existing URL
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-
-        Map<String, String> requestBody = new HashMap<>();
-        requestBody.put("fname", outPath);
-        requestBody.put("pname", fileName);
-        requestBody.put("sync", "YES");
-
-        String jsonPayload = objectMapper.writeValueAsString(requestBody);
-        HttpEntity<String> requestEntity = new HttpEntity<>(jsonPayload, headers);
-
-        Map<String, String> uriVariables = new HashMap<>();
-        uriVariables.put("part", destPART);
-        uriVariables.put("idtf", destIDF);
-
-        log.info("Sending POST request to: {}", apiUrl);
-        log.info("Headers: {}", headers);
-        log.info("Body: {}", requestBody);
-
-        ResponseEntity<String> response =
-                restTemplate.exchange(apiUrl, HttpMethod.POST, requestEntity,
-                                      String.class, uriVariables);
-
-        log.info("CFT POST Response status: {}", response.getStatusCode());
-        log.info("CFT POST Response body: {}", response.getBody());
-
-        // --- extract idtu from POST response ---
-        String body = response.getBody();
-        JsonNode root = objectMapper.readTree(body);
-        String idtu = root.path("idtu").asText(null);   // adjust field name if needed
-
-        if (idtu == null || idtu.isEmpty()) {
-            throw new IllegalStateException("CFT POST response did not contain idtu");
-        }
-
-        // --- poll GET /transfers/{idtu} until done or timeout ---
-        waitUntilTransferFinished(idtu, maxWait);
-
-        log.info("CFT notify + transfer status checks completed successfully for idtu={}", idtu);
-
-    } catch (Exception e) {
-        log.error("Error during CFT notifyAndWaitForCompletion", e);
-        throw new IllegalStateException("CFT notify failed", e);
-    }
-}
-```
-
-### Status DTO (for GET)
+This matches what `/transfers/{idtu}` returns.
 
 ```java
 public class TransferStatusResponse {
+
     private String idtu;
-    private String sentinel;   // "COMPLETED", "SENDING", "CANCELLED"
-    private int diagi;
-    private String diagnostic;
+    private String sentinel;   // "COMPLETED", "SENDING", "CANCELLED", ...
+    private int diagi;         // 0 = OK
+    private String diagnostic; // text
 
     // getters and setters
 }
 ```
 
-### GET `/transfers/{idtu}` + polling using `maxWait`
+Adjust field names if JSON is slightly different (with `@JsonProperty` if needed).
+
+---
+
+## Step 2 – Define a specific exception for “CANCELLED / diagi != 0”
+
+We want to retry **only** in that case, not on every kind of error.
+
+```java
+public class TransferFailedException extends RuntimeException {
+    public TransferFailedException(String message) {
+        super(message);
+    }
+}
+```
+
+---
+
+## Step 3 – Implement GET `/transfers/{idtu}` in your `CftApiClient`
+
+Use your existing `RestTemplate` + `ObjectMapper`.
 
 ```java
 private TransferStatusResponse getTransferStatus(String idtu) {
-    String url = baseURL + "/transfers/{idtu}";   // adjust if needed
+    String url = baseURL + "/transfers/{idtu}";   // adjust if your path differs
 
     Map<String, String> uriVariables = new HashMap<>();
     uriVariables.put("idtu", idtu);
@@ -167,10 +74,17 @@ private TransferStatusResponse getTransferStatus(String idtu) {
         throw new IllegalStateException("Failed to parse CFT status for idtu=" + idtu, e);
     }
 }
+```
 
+---
+
+## Step 4 – Poll `GET` until done or failed, using your max wait
+
+This is where we look at `sentinel` and `diagi`.
+
+```java
 private void waitUntilTransferFinished(String idtu, Duration maxWait) {
-    // you can tweak these
-    Duration pollInterval = Duration.ofSeconds(5);
+    Duration pollInterval = Duration.ofSeconds(5);    // or whatever you like
     Instant deadline = Instant.now().plus(maxWait);
 
     while (true) {
@@ -183,24 +97,25 @@ private void waitUntilTransferFinished(String idtu, Duration maxWait) {
         log.info("CFT status idtu={} sentinel={} diagi={} diagnostic={}",
                  idtu, sentinel, diagi, diagText);
 
+        // ✅ success
         if ("COMPLETED".equalsIgnoreCase(sentinel) && diagi == 0) {
-            // ✅ good
             return;
         }
 
+        // ❌ business failure: this is the one case we want to retry POST once
         if ("CANCELLED".equalsIgnoreCase(sentinel) || diagi != 0) {
-            // ❌ cancelled or error – fail the batch
-            throw new IllegalStateException(
-                    String.format("CFT transfer FAILED for idtu=%s, sentinel=%s, diagi=%d, diagnostic=%s",
+            // print diagi and diagnostic in log message
+            throw new TransferFailedException(
+                    String.format("CFT transfer FAILED idtu=%s sentinel=%s diagi=%d diagnostic=%s",
                                   idtu, sentinel, diagi, diagText));
         }
 
+        // ⏳ still running
         if ("SENDING".equalsIgnoreCase(sentinel)) {
             if (Instant.now().isAfter(deadline)) {
-                // ❌ still SENDING after our size-based wait window
                 throw new IllegalStateException(
-                        String.format("CFT transfer still SENDING after %s for idtu=%s; diagi=%d diagnostic=%s",
-                                      maxWait, idtu, diagi, diagText));
+                        String.format("CFT transfer still SENDING after %s for idtu=%s",
+                                      maxWait, idtu));
             }
 
             try {
@@ -209,308 +124,143 @@ private void waitUntilTransferFinished(String idtu, Duration maxWait) {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException("Interrupted while waiting for CFT status", e);
             }
-        } else {
-            // any unexpected sentinel
-            throw new IllegalStateException(
-                    String.format("Unexpected CFT sentinel='%s' for idtu=%s, diagi=%d, diagnostic=%s",
-                                  sentinel, idtu, diagi, diagText));
+            continue;
         }
+
+        // any unexpected sentinel
+        throw new IllegalStateException(
+                String.format("Unexpected CFT sentinel='%s' for idtu=%s diagi=%d diagnostic=%s",
+                              sentinel, idtu, diagi, diagText));
     }
 }
 ```
 
----
-
-### What this gives you, with your existing wait logic
-
-* You **still use your size-based wait** (`pickWaitByTier`) — but now as a **maximum time window** for CFT to finish.
-* Instead of “blind sleep for X seconds”, you now **actively ask CFT**:
-
-  * `sentinel = COMPLETED && diagi = 0` → OK → batch continues exactly like before.
-  * `sentinel = SENDING`:
-
-    * keep polling while total time ≤ your size-based wait;
-    * if still `SENDING` after that → throw → job fails → scheduler can retry.
-  * `sentinel = CANCELLED` or `diagi != 0`:
-
-    * log `diagi` and `diagnostic`,
-    * throw → job fails (and files are kept / moved to `/failed` according to your listener).
-
-You don’t need to change the rest of your pipeline (cleanup listener, COS tracking, etc.); just replace the old `Thread.sleep` with this smarter `notifyAndWaitForCompletion`.
-
-If you want, you can paste a sample JSON of the `/transfers/{idtu}` response and I’ll adjust the `TransferStatusResponse` fields exactly to match it.
-
-
-
-Perfect, then let’s wire it exactly like this:
-
-* You **keep the files in `incoming/` & `outgoing/` during the job** (other API can read them).
-* You already have a **wait time based on file size**, so by the time the job ends, the API *should* have had time to transfer.
-* In the **cleanup listener**:
-
-  * On **SUCCESS** → delete tracked input/output files.
-  * On **FAILURE** → move them to `/failed/...` and never delete.
-
-Here’s a clean implementation + JUnit for **both success and fail scenarios**.
+**Important:** Only `CANCELLED` or `diagi != 0` throws `TransferFailedException`.
+Everything else throws other exceptions → will **not** be retried.
 
 ---
 
-## 1️⃣ Context helper – track files to clean up
+## Step 5 – Extract your POST logic into a helper that returns `idtu`
+
+This is your current POST code, wrapped and returning `idtu`.
 
 ```java
-package com.yourcompany.batch.cos;
+private String triggerTransferOnce(String outPath, String fileName, int attempt) throws Exception {
+    String apiUrl = baseURL + "?part={part}&idtf={idtf}";
 
-import org.springframework.batch.core.JobExecution;
-import org.springframework.batch.core.StepExecution;
-import org.springframework.batch.item.ExecutionContext;
+    HttpHeaders headers = new HttpHeaders();
+    headers.setContentType(MediaType.APPLICATION_JSON);
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
+    Map<String, String> requestBody = new HashMap<>();
+    requestBody.put("fname", outPath);
+    requestBody.put("pname", fileName);
+    requestBody.put("sync", "YES");
 
-public interface CosCleanupContextSupport {
+    String jsonPayload = objectMapper.writeValueAsString(requestBody);
+    HttpEntity<String> requestEntity = new HttpEntity<>(jsonPayload, headers);
 
-    String FILES_TO_DELETE_ON_SUCCESS = "filesToDeleteOnSuccess";
+    Map<String, String> uriVariables = new HashMap<>();
+    uriVariables.put("part", destPART);
+    uriVariables.put("idtf", destIDF);
 
-    @SuppressWarnings("unchecked")
-    default void addFileToDeleteOnSuccess(StepExecution stepExecution, String key) {
-        JobExecution jobExecution = stepExecution.getJobExecution();
-        ExecutionContext jobContext = jobExecution.getExecutionContext();
+    log.info("Sending CFT POST attempt {} to: {}", attempt, apiUrl);
+    log.info("Headers: {}", headers);
+    log.info("Body   : {}", requestBody);
 
-        List<String> keys = (List<String>) jobContext.get(FILES_TO_DELETE_ON_SUCCESS);
-        if (keys == null) {
-            keys = new ArrayList<>();
-        }
+    ResponseEntity<String> response =
+            restTemplate.exchange(apiUrl, HttpMethod.POST, requestEntity,
+                                  String.class, uriVariables);
 
-        keys.add(key);
-        // IMPORTANT: re-put list so Spring Batch marks EC as dirty
-        jobContext.put(FILES_TO_DELETE_ON_SUCCESS, keys);
+    log.info("CFT POST attempt {} status: {}", attempt, response.getStatusCode());
+    log.info("CFT POST attempt {} body  : {}", attempt, response.getBody());
+
+    // Extract idtu from POST response
+    JsonNode root = objectMapper.readTree(response.getBody());
+    String idtu = root.path("idtu").asText(null);    // adjust if field name is different
+
+    if (idtu == null || idtu.isEmpty()) {
+        throw new IllegalStateException("CFT POST response did not contain idtu (attempt " + attempt + ")");
     }
 
-    @SuppressWarnings("unchecked")
-    default List<String> getFilesToDeleteOnSuccess(JobExecution jobExecution) {
-        ExecutionContext jobContext = jobExecution.getExecutionContext();
-        List<String> keys = (List<String>) jobContext.get(FILES_TO_DELETE_ON_SUCCESS);
-        return keys == null ? Collections.emptyList() : keys;
-    }
-}
-```
-
-👉 **Contract:** you store the **real COS keys** you used, e.g.:
-
-* `incoming/file1.csv.zip.pgp`
-* `outgoing/invoices_001.xml.zip.pgp`
-
-No `/processed`, no leading `/`.
-
----
-
-## 2️⃣ Listener – delete on success, move to `/failed` on failure
-
-```java
-package com.yourcompany.batch.cos;
-
-import org.springframework.batch.core.BatchStatus;
-import org.springframework.batch.core.JobExecution;
-import org.springframework.batch.core.JobExecutionListener;
-import org.springframework.stereotype.Component;
-
-import java.util.List;
-
-@Component
-public class CosCleanupListener implements JobExecutionListener, CosCleanupContextSupport {
-
-    private final CosService cosService;
-
-    public CosCleanupListener(CosService cosService) {
-        this.cosService = cosService;
-    }
-
-    @Override
-    public void beforeJob(JobExecution jobExecution) {
-        // nothing
-    }
-
-    @Override
-    public void afterJob(JobExecution jobExecution) {
-        List<String> keys = getFilesToDeleteOnSuccess(jobExecution);
-        if (keys.isEmpty()) {
-            // No input/output files tracked (e.g. no-file day)
-            return;
-        }
-
-        BatchStatus status = jobExecution.getStatus();
-
-        if (status == BatchStatus.COMPLETED) {
-            // ✅ SUCCESS → delete from incoming/outgoing
-            keys.forEach(cosService::deleteFile);
-
-        } else if (status == BatchStatus.FAILED
-                || status == BatchStatus.STOPPED
-                || status == BatchStatus.ABANDONED) {
-            // ❌ FAIL/STOPPED → archive under /failed and keep
-            keys.forEach(cosService::moveToFailed);
-        }
-        // For STARTING/STARTED etc, do nothing.
-    }
-}
-```
-
-And your `CosService` roughly like:
-
-```java
-public class CosService {
-
-    private final AmazonS3 s3Client;
-    private final String bucketName;
-
-    public CosService(AmazonS3 s3Client, String bucketName) {
-        this.s3Client = s3Client;
-        this.bucketName = bucketName;
-    }
-
-    public void deleteFile(String key) {
-        if (!s3Client.doesObjectExist(bucketName, key)) {
-            return; // or log and return
-        }
-        s3Client.deleteObject(bucketName, key);
-    }
-
-    public String moveToFailed(String key) {
-        // incoming/file1.csv.zip.pgp → failed/incoming/file1.csv.zip.pgp
-        String failedKey = "failed/" + key;
-
-        CopyObjectRequest copyReq =
-                new CopyObjectRequest(bucketName, key, bucketName, failedKey);
-        s3Client.copyObject(copyReq);
-        s3Client.deleteObject(bucketName, key);
-
-        return failedKey;
-    }
+    return idtu;
 }
 ```
 
 ---
 
-## 3️⃣ JUnit – success & fail scenarios
+## Step 6 – Retry POST (once) when we get `CANCELLED` or `diagi != 0`
 
-### Test class for listener
+Now we glue it all together with a single retry.
 
 ```java
-package com.yourcompany.batch.cos;
-
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
-import org.springframework.batch.core.BatchStatus;
-import org.springframework.batch.core.JobExecution;
-import org.springframework.batch.core.StepExecution;
-
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.*;
-
-class CosCleanupListenerTest {
-
-    private CosService cosService;
-    private CosCleanupListener listener;
-    private CosCleanupContextSupport contextSupport;
-
-    @BeforeEach
-    void setUp() {
-        this.cosService = Mockito.mock(CosService.class);
-        this.listener = new CosCleanupListener(cosService);
-        this.contextSupport = listener; // listener implements the interface
+public void notifyAndWaitForCompletion(String outPath,
+                                       String fileName,
+                                       Duration maxWait) {
+    // FIRST attempt
+    try {
+        String idtu = triggerTransferOnce(outPath, fileName, 1);
+        waitUntilTransferFinished(idtu, maxWait);    // may throw TransferFailedException
+        return;                                      // ✅ success, done
+    } catch (TransferFailedException ex) {
+        // This is specifically sentinel=CANCELLED or diagi!=0
+        log.warn("CFT transfer failed on first attempt for file {}: {}. Retrying POST once...",
+                 fileName, ex.getMessage());
+    } catch (Exception ex) {
+        // other errors in POST or parsing: you can choose to retry or not
+        log.warn("CFT POST failed on first attempt for file {}: {}. Retrying POST once...",
+                 fileName, ex.getMessage());
     }
 
-    @Test
-    void afterJob_completed_shouldDeleteTrackedFiles() {
-        // given
-        JobExecution jobExecution = new JobExecution(1L);
-        StepExecution stepExecution = new StepExecution("step1", jobExecution);
-
-        // Track original keys (incoming + outgoing)
-        contextSupport.addFileToDeleteOnSuccess(stepExecution, "incoming/file1.csv.zip.pgp");
-        contextSupport.addFileToDeleteOnSuccess(stepExecution, "outgoing/invoices_001.xml.zip.pgp");
-
-        jobExecution.setStatus(BatchStatus.COMPLETED);
-
-        // when
-        listener.afterJob(jobExecution);
-
-        // then
-        verify(cosService).deleteFile("incoming/file1.csv.zip.pgp");
-        verify(cosService).deleteFile("outgoing/invoices_001.xml.zip.pgp");
-        verify(cosService, never()).moveToFailed(anyString());
-        verifyNoMoreInteractions(cosService);
-    }
-
-    @Test
-    void afterJob_failed_shouldMoveTrackedFilesToFailed() {
-        // given
-        JobExecution jobExecution = new JobExecution(2L);
-        StepExecution stepExecution = new StepExecution("step1", jobExecution);
-
-        contextSupport.addFileToDeleteOnSuccess(stepExecution, "incoming/file1.csv.zip.pgp");
-        contextSupport.addFileToDeleteOnSuccess(stepExecution, "outgoing/invoices_001.xml.zip.pgp");
-
-        jobExecution.setStatus(BatchStatus.FAILED);
-
-        // when
-        listener.afterJob(jobExecution);
-
-        // then
-        verify(cosService).moveToFailed("incoming/file1.csv.zip.pgp");
-        verify(cosService).moveToFailed("outgoing/invoices_001.xml.zip.pgp");
-        verify(cosService, never()).deleteFile(anyString());
-        verifyNoMoreInteractions(cosService);
-    }
-
-    @Test
-    void afterJob_completedAndNoTrackedFiles_shouldDoNothing() {
-        // given
-        JobExecution jobExecution = new JobExecution(3L);
-        jobExecution.setStatus(BatchStatus.COMPLETED);
-
-        // when
-        listener.afterJob(jobExecution);
-
-        // then
-        verifyNoInteractions(cosService);
-    }
-
-    @Test
-    void afterJob_startedStatus_shouldDoNothingEvenIfKeysExist() {
-        // given
-        JobExecution jobExecution = new JobExecution(4L);
-        StepExecution stepExecution = new StepExecution("step1", jobExecution);
-
-        contextSupport.addFileToDeleteOnSuccess(stepExecution, "incoming/file1.csv.zip.pgp");
-        jobExecution.setStatus(BatchStatus.STARTED);
-
-        // when
-        listener.afterJob(jobExecution);
-
-        // then
-        verifyNoInteractions(cosService);
+    // SECOND (and last) attempt – if this fails, we let it bubble up
+    try {
+        String retryIdtu = triggerTransferOnce(outPath, fileName, 2);
+        waitUntilTransferFinished(retryIdtu, maxWait);  // if this throws, job fails
+    } catch (Exception ex) {
+        throw new IllegalStateException("CFT notify failed after retry for file " + fileName, ex);
     }
 }
 ```
 
-This covers your **success** and **fail** scenarios exactly:
+So:
 
-* ✅ `COMPLETED` → `deleteFile(...)` called for each tracked key.
-* ✅ `FAILED` → `moveToFailed(...)` called for each tracked key.
-* 🔇 No keys → no COS calls.
-* 🔇 Non-final status (e.g. STARTED) → no cleanup.
+* Only **CANCELLED / diagi != 0** throw `TransferFailedException` → triggers the retry.
+* If the second attempt also returns `CANCELLED` / error or something else goes wrong, the exception is thrown and your **batch step fails** as it does today.
 
 ---
 
-Given you already have the **size-based wait time**, this approach is a good first attempt:
+## Step 7 – Use your existing size-based wait in the tasklet
 
-* Other API has time to read from `incoming/` / `outgoing/`.
-* Once your batch finishes:
+In your `PackageAndUploadFilesTasklet`, where you previously did:
 
-  * If all good → those files are cleaned.
-  * If something broke → they are preserved under `/failed/...` forever.
+```java
+if (cftEnabled) {
+    cftApiClient.notifyUpload(key, encryptedFileName);
 
-If you later notice even the wait isn’t always enough, you can still switch to a **delayed cleanup job** without changing how you track keys.
+    // old: sleep based on size here
+    // Thread.sleep(grace.toMillis());
+}
+```
+
+Change to:
+
+```java
+if (cftEnabled) {
+    long bytes = encryptedFile.length();
+    Duration maxWait = pickWaitByTier(bytes, waittime); // your existing logic
+
+    log.info("Payload size={} bytes. Using maxWait={} for CFT polling.", bytes, maxWait);
+    cftApiClient.notifyAndWaitForCompletion(key, encryptedFileName, maxWait);
+}
+```
+
+Now:
+
+* Your **size-based wait** becomes a graceful *deadline* for CFT to finish.
+* You **actively check** status (`sentinel`, `diagi`, `diagnostic`) instead of blind sleeping.
+* On `CANCELLED` / `diagi != 0`:
+
+  * You log everything,
+  * retry POST + GET once,
+  * then fail the job if it still doesn’t work.
+
+If you want, next step we can add a tiny unit test for `waitUntilTransferFinished` that simulates `SENDING → SENDING → COMPLETED` and `CANCELLED`, but the above is the full set of “clean steps” to implement the behavior you described.
