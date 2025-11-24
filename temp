@@ -1,63 +1,74 @@
-Great, let’s line this up cleanly and step-by-step so it’s easy to drop into your code.
+Gotcha, that makes sense now 👍
 
-**Goal**
+You want a *much simpler* flow:
 
-After your POST to CFT:
+> **POST → wait (size-based) → single GET**
+> If GET says `CANCELLED` (or error) → do **one more** `POST → wait → GET`.
+> No polling loop, no multiple GETs.
 
-1. Extract `idtu`.
-2. Poll `GET /transfers/{idtu}`.
-3. If `sentinel = "SENDING"` → keep waiting (within your existing size-based max wait).
-4. If `sentinel = "CANCELLED"` **or** `diagi != 0` →
+Also: `sentinel = PRE_PROC` should *not* be treated as a failure.
 
-   * print `diagi` + `diagnostic`,
-   * retry the **POST** once (full POST+GET again).
-5. If it still fails → let the exception bubble so the batch fails like today.
-
-We’ll reuse your **size-based wait Duration** (from the tasklet) as `maxWait`.
+Let’s do this step by step and keep the code small and readable.
 
 ---
 
-## Step 1 – Define a DTO for the status GET response
+## 1. Desired behavior (in words)
 
-This matches what `/transfers/{idtu}` returns.
+For each file:
+
+1. **First attempt**
+
+   1. Call `POST /transfers` (your existing notify)
+      ⮕ response contains `idtu`.
+   2. Wait for your **size-based duration** (e.g. `6s + X per MB`).
+   3. Call **one** `GET /transfers/{idtu}`.
+   4. Interpret result:
+
+      * If `sentinel == "CANCELLED"` **or** `diagi != 0` → treat as *error*.
+      * Any other `sentinel` (`COMPLETED`, `PRE_PROC`, `SENDING`, …) with `diagi == 0` → treat as **success**.
+
+2. **If first attempt is error** (`CANCELLED` or `diagi != 0`)
+   ➜ Do **one more full attempt**:
+
+   * `POST` again (new `idtu`)
+   * wait again
+   * `GET` once
+   * If still error → throw exception → batch step fails.
+
+So:
+
+* ✅ No multiple GETs per attempt (exactly one).
+* ✅ GET happens **only after** the wait.
+* ✅ `PRE_PROC` is considered OK as long as `diagi == 0`.
+* ✅ At most **2 POSTs** per file (initial + 1 retry).
+
+---
+
+## 2. DTO for GET `/transfers/{idtu}`
 
 ```java
 public class TransferStatusResponse {
 
     private String idtu;
-    private String sentinel;   // "COMPLETED", "SENDING", "CANCELLED", ...
+    private String sentinel;   // e.g. "COMPLETED", "PRE_PROC", "SENDING", "CANCELLED"
     private int diagi;         // 0 = OK
-    private String diagnostic; // text
+    private String diagnostic; // descriptive text
 
     // getters and setters
 }
 ```
 
-Adjust field names if JSON is slightly different (with `@JsonProperty` if needed).
+Adjust field names with `@JsonProperty` if needed.
 
 ---
 
-## Step 2 – Define a specific exception for “CANCELLED / diagi != 0”
+## 3. Helper: GET status once
 
-We want to retry **only** in that case, not on every kind of error.
-
-```java
-public class TransferFailedException extends RuntimeException {
-    public TransferFailedException(String message) {
-        super(message);
-    }
-}
-```
-
----
-
-## Step 3 – Implement GET `/transfers/{idtu}` in your `CftApiClient`
-
-Use your existing `RestTemplate` + `ObjectMapper`.
+In your `CftApiClient`:
 
 ```java
 private TransferStatusResponse getTransferStatus(String idtu) {
-    String url = baseURL + "/transfers/{idtu}";   // adjust if your path differs
+    String url = baseURL + "/transfers/{idtu}";   // adjust if needed
 
     Map<String, String> uriVariables = new HashMap<>();
     uriVariables.put("idtu", idtu);
@@ -78,71 +89,9 @@ private TransferStatusResponse getTransferStatus(String idtu) {
 
 ---
 
-## Step 4 – Poll `GET` until done or failed, using your max wait
+## 4. Helper: POST once and return `idtu`
 
-This is where we look at `sentinel` and `diagi`.
-
-```java
-private void waitUntilTransferFinished(String idtu, Duration maxWait) {
-    Duration pollInterval = Duration.ofSeconds(5);    // or whatever you like
-    Instant deadline = Instant.now().plus(maxWait);
-
-    while (true) {
-        TransferStatusResponse status = getTransferStatus(idtu);
-
-        String sentinel = status.getSentinel();
-        int diagi = status.getDiagi();
-        String diagText = status.getDiagnostic();
-
-        log.info("CFT status idtu={} sentinel={} diagi={} diagnostic={}",
-                 idtu, sentinel, diagi, diagText);
-
-        // ✅ success
-        if ("COMPLETED".equalsIgnoreCase(sentinel) && diagi == 0) {
-            return;
-        }
-
-        // ❌ business failure: this is the one case we want to retry POST once
-        if ("CANCELLED".equalsIgnoreCase(sentinel) || diagi != 0) {
-            // print diagi and diagnostic in log message
-            throw new TransferFailedException(
-                    String.format("CFT transfer FAILED idtu=%s sentinel=%s diagi=%d diagnostic=%s",
-                                  idtu, sentinel, diagi, diagText));
-        }
-
-        // ⏳ still running
-        if ("SENDING".equalsIgnoreCase(sentinel)) {
-            if (Instant.now().isAfter(deadline)) {
-                throw new IllegalStateException(
-                        String.format("CFT transfer still SENDING after %s for idtu=%s",
-                                      maxWait, idtu));
-            }
-
-            try {
-                Thread.sleep(pollInterval.toMillis());
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new IllegalStateException("Interrupted while waiting for CFT status", e);
-            }
-            continue;
-        }
-
-        // any unexpected sentinel
-        throw new IllegalStateException(
-                String.format("Unexpected CFT sentinel='%s' for idtu=%s diagi=%d diagnostic=%s",
-                              sentinel, idtu, diagi, diagText));
-    }
-}
-```
-
-**Important:** Only `CANCELLED` or `diagi != 0` throws `TransferFailedException`.
-Everything else throws other exceptions → will **not** be retried.
-
----
-
-## Step 5 – Extract your POST logic into a helper that returns `idtu`
-
-This is your current POST code, wrapped and returning `idtu`.
+This is basically your current POST, wrapped:
 
 ```java
 private String triggerTransferOnce(String outPath, String fileName, int attempt) throws Exception {
@@ -174,9 +123,8 @@ private String triggerTransferOnce(String outPath, String fileName, int attempt)
     log.info("CFT POST attempt {} status: {}", attempt, response.getStatusCode());
     log.info("CFT POST attempt {} body  : {}", attempt, response.getBody());
 
-    // Extract idtu from POST response
     JsonNode root = objectMapper.readTree(response.getBody());
-    String idtu = root.path("idtu").asText(null);    // adjust if field name is different
+    String idtu = root.path("idtu").asText(null);   // adjust field name if needed
 
     if (idtu == null || idtu.isEmpty()) {
         throw new IllegalStateException("CFT POST response did not contain idtu (attempt " + attempt + ")");
@@ -188,56 +136,119 @@ private String triggerTransferOnce(String outPath, String fileName, int attempt)
 
 ---
 
-## Step 6 – Retry POST (once) when we get `CANCELLED` or `diagi != 0`
+## 5. Helper: evaluate if this status is an **error**
 
-Now we glue it all together with a single retry.
+You said: *“retry POST request once again in case of error if (`sentinel = CANCELLED` or `diagi != 0`)”*.
 
 ```java
-public void notifyAndWaitForCompletion(String outPath,
-                                       String fileName,
-                                       Duration maxWait) {
-    // FIRST attempt
-    try {
-        String idtu = triggerTransferOnce(outPath, fileName, 1);
-        waitUntilTransferFinished(idtu, maxWait);    // may throw TransferFailedException
-        return;                                      // ✅ success, done
-    } catch (TransferFailedException ex) {
-        // This is specifically sentinel=CANCELLED or diagi!=0
-        log.warn("CFT transfer failed on first attempt for file {}: {}. Retrying POST once...",
-                 fileName, ex.getMessage());
-    } catch (Exception ex) {
-        // other errors in POST or parsing: you can choose to retry or not
-        log.warn("CFT POST failed on first attempt for file {}: {}. Retrying POST once...",
-                 fileName, ex.getMessage());
+private boolean isErrorStatus(TransferStatusResponse status) {
+    String sentinel = status.getSentinel();
+    int diagi = status.getDiagi();
+
+    // log always, for visibility
+    log.info("CFT status: idtu={} sentinel={} diagi={} diagnostic={}",
+             status.getIdtu(), sentinel, diagi, status.getDiagnostic());
+
+    // Only treat CANCELLED or diagi != 0 as errors
+    if ("CANCELLED".equalsIgnoreCase(sentinel) || diagi != 0) {
+        return true;
     }
 
-    // SECOND (and last) attempt – if this fails, we let it bubble up
+    // PRE_PROC, COMPLETED, SENDING with diagi==0 are considered OK
+    return false;
+}
+```
+
+So your `PRE_PROC` case with `diagi == 0` becomes **success** ✅
+
+---
+
+## 6. Single attempt: POST → wait → GET → decide
+
+```java
+private TransferStatusResponse doSingleAttempt(String outPath,
+                                               String fileName,
+                                               Duration waitTime,
+                                               int attempt) {
     try {
-        String retryIdtu = triggerTransferOnce(outPath, fileName, 2);
-        waitUntilTransferFinished(retryIdtu, maxWait);  // if this throws, job fails
+        // 1) POST
+        String idtu = triggerTransferOnce(outPath, fileName, attempt);
+
+        // 2) WAIT based on file size (you pass this in)
+        if (!waitTime.isZero() && !waitTime.isNegative()) {
+            log.info("Waiting {} ms before status GET for idtu={}", waitTime.toMillis(), idtu);
+            try {
+                Thread.sleep(waitTime.toMillis());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted while waiting before CFT GET", e);
+            }
+        }
+
+        // 3) GET once
+        TransferStatusResponse status = getTransferStatus(idtu);
+        return status;
+
     } catch (Exception ex) {
-        throw new IllegalStateException("CFT notify failed after retry for file " + fileName, ex);
+        throw new IllegalStateException("CFT POST/GET attempt " + attempt + " failed for file " + fileName, ex);
     }
 }
 ```
 
-So:
-
-* Only **CANCELLED / diagi != 0** throw `TransferFailedException` → triggers the retry.
-* If the second attempt also returns `CANCELLED` / error or something else goes wrong, the exception is thrown and your **batch step fails** as it does today.
+Note: **GET is now called only after the wait**, exactly as you asked.
 
 ---
 
-## Step 7 – Use your existing size-based wait in the tasklet
+## 7. Public method: retry POST+WAIT+GET once on error
 
-In your `PackageAndUploadFilesTasklet`, where you previously did:
+```java
+public void notifyAndWaitForCompletion(String outPath,
+                                       String fileName,
+                                       Duration waitTime) {
+
+    // FIRST attempt
+    TransferStatusResponse status = doSingleAttempt(outPath, fileName, waitTime, 1);
+
+    if (!isErrorStatus(status)) {
+        // OK: sentinel != CANCELLED and diagi == 0 (COMPLETED, PRE_PROC, SENDING, etc.)
+        log.info("CFT transfer considered SUCCESS on first attempt for file {} (sentinel={}, diagi={})",
+                 fileName, status.getSentinel(), status.getDiagi());
+        return;
+    }
+
+    // We are in the error scenario: CANCELLED or diagi != 0
+    log.warn("CFT transfer ERROR on first attempt for file {} – sentinel={} diagi={} diagnostic={}. Retrying once...",
+             fileName, status.getSentinel(), status.getDiagi(), status.getDiagnostic());
+
+    // SECOND (and last) attempt
+    TransferStatusResponse status2 = doSingleAttempt(outPath, fileName, waitTime, 2);
+
+    if (isErrorStatus(status2)) {
+        // still error → fail the batch
+        throw new IllegalStateException(
+                String.format("CFT transfer FAILED after retry for file %s. Last status: sentinel=%s diagi=%d diagnostic=%s",
+                              fileName,
+                              status2.getSentinel(),
+                              status2.getDiagi(),
+                              status2.getDiagnostic()));
+    }
+
+    log.info("CFT transfer considered SUCCESS on second attempt for file {} (sentinel={}, diagi={})",
+             fileName, status2.getSentinel(), status2.getDiagi());
+}
+```
+
+---
+
+## 8. How your tasklet calls it
+
+Back in `PackageAndUploadFilesTasklet`, you already compute a wait based on file size.
+
+Where you had:
 
 ```java
 if (cftEnabled) {
-    cftApiClient.notifyUpload(key, encryptedFileName);
-
-    // old: sleep based on size here
-    // Thread.sleep(grace.toMillis());
+    // old: notifyUpload(...) + Thread.sleep(...) here
 }
 ```
 
@@ -246,21 +257,21 @@ Change to:
 ```java
 if (cftEnabled) {
     long bytes = encryptedFile.length();
-    Duration maxWait = pickWaitByTier(bytes, waittime); // your existing logic
+    Duration waitTime = pickWaitByTier(bytes, waittime);  // your existing size-based logic
 
-    log.info("Payload size={} bytes. Using maxWait={} for CFT polling.", bytes, maxWait);
-    cftApiClient.notifyAndWaitForCompletion(key, encryptedFileName, maxWait);
+    log.info("Payload size={} bytes. Using waitTime={} before CFT status GET.", bytes, waitTime);
+    cftApiClient.notifyAndWaitForCompletion(key, encryptedFileName, waitTime);
 }
 ```
 
-Now:
+---
 
-* Your **size-based wait** becomes a graceful *deadline* for CFT to finish.
-* You **actively check** status (`sentinel`, `diagi`, `diagnostic`) instead of blind sleeping.
-* On `CANCELLED` / `diagi != 0`:
+### Summary
 
-  * You log everything,
-  * retry POST + GET once,
-  * then fail the job if it still doesn’t work.
+* We removed the polling loop and **multiple GETs**.
+* We now strictly do: **POST → wait → GET once**.
+* We only treat `sentinel = CANCELLED` or `diagi != 0` as error → triggers a **second full attempt** (POST+wait+GET).
+* `sentinel = PRE_PROC` with `diagi == 0` is treated as **success**, same for `COMPLETED`, `SENDING`, etc.
+* GET is **only** called after your size-based wait.
 
-If you want, next step we can add a tiny unit test for `waitUntilTransferFinished` that simulates `SENDING → SENDING → COMPLETED` and `CANCELLED`, but the above is the full set of “clean steps” to implement the behavior you described.
+If you paste a sample actual GET JSON (with `PRE_PROC`), I can double-check the field names so you don’t get parsing surprises.
