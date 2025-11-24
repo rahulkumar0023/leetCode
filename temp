@@ -1,3 +1,171 @@
+
+
+
+package com.bnpp.pf.einvoice.connect.notifycft;
+
+import org.junit.jupiter.api.Test;
+
+import java.time.Duration;
+import java.util.*;
+
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.assertThatCode;
+
+/**
+ * Tests only the transfer control logic (POST→wait→GET (+optional GET)→retry once),
+ * without mocking RestTemplate. HTTP is simulated by overriding methods.
+ */
+class CFTApiClientTransferLogicTest {
+
+    private static final Duration NO_WAIT = Duration.ZERO; // avoids actual Thread.sleep
+
+    /** Little fake client that simulates CFT behaviour for tests. */
+    static class FakeCFTApiClient extends CFTApiClient {
+
+        // Queue of idtus to return for successive POSTs
+        private final Queue<String> idtus = new ArrayDeque<>();
+        // For each idtu, a queue of statuses to return on successive GETs
+        private final Map<String, Queue<TransferStatusResponse>> statusByIdtu = new HashMap<>();
+
+        int triggerCalls = 0;
+        int statusCalls = 0;
+
+        FakeCFTApiClient() {
+            // pass nulls, we will never hit real HTTP in this subclass
+            super(null, null);
+        }
+
+        void addScenario(String idtu, TransferStatusResponse... statusesInOrder) {
+            idtus.add(idtu);
+            statusByIdtu.put(idtu, new ArrayDeque<>(Arrays.asList(statusesInOrder)));
+        }
+
+        @Override
+        protected String triggerTransferOnce(String outPath, String fileName, int attempt) {
+            triggerCalls++;
+            String idtu = idtus.poll();
+            if (idtu == null) {
+                throw new IllegalStateException("No more idtus configured in test");
+            }
+            return idtu;
+        }
+
+        @Override
+        protected TransferStatusResponse getTransferStatus(String idtu) {
+            statusCalls++;
+            Queue<TransferStatusResponse> q = statusByIdtu.get(idtu);
+            if (q == null || q.isEmpty()) {
+                throw new IllegalStateException("No more statuses configured for idtu=" + idtu);
+            }
+            return q.poll();
+        }
+    }
+
+    private static TransferStatusResponse status(String idtu,
+                                                 String sentinel,
+                                                 int diagi,
+                                                 String diagnostic) {
+        TransferStatusResponse s = new TransferStatusResponse();
+        s.setIdtu(idtu);
+        s.setSentinel(sentinel);
+        s.setDiagi(diagi);
+        s.setDiagnostic(diagnostic);
+        return s;
+    }
+
+    @Test
+    void successOnFirstAttempt_whenCompletedImmediately() {
+        FakeCFTApiClient client = new FakeCFTApiClient();
+
+        // First attempt: POST -> idtu1, GET -> COMPLETED / diagi 0
+        client.addScenario(
+                "idtu1",
+                status("idtu1", "COMPLETED", 0, "ok")
+        );
+
+        assertThatCode(() ->
+                client.notifyAndWaitForCompletion("out/path/file.pgp", "file.pgp", NO_WAIT)
+        ).doesNotThrowAnyException();
+
+        // 1 POST, 1 GET
+        assertThat(client.triggerCalls).isEqualTo(1);
+        assertThat(client.statusCalls).isEqualTo(1);
+    }
+
+    @Test
+    void successOnFirstAttempt_whenSendingThenCompleted() {
+        FakeCFTApiClient client = new FakeCFTApiClient();
+
+        // First attempt: GET1 -> SENDING, GET2 -> COMPLETED
+        client.addScenario(
+                "idtu1",
+                status("idtu1", "SENDING", 0, "in progress"),
+                status("idtu1", "COMPLETED", 0, "done")
+        );
+
+        assertThatCode(() ->
+                client.notifyAndWaitForCompletion("out/path/file.pgp", "file.pgp", NO_WAIT)
+        ).doesNotThrowAnyException();
+
+        // 1 POST, 2 GETs (second GET because first was SENDING)
+        assertThat(client.triggerCalls).isEqualTo(1);
+        assertThat(client.statusCalls).isEqualTo(2);
+    }
+
+    @Test
+    void retryOnce_whenFirstAttemptCancelled_thenSecondAttemptSuccess() {
+        FakeCFTApiClient client = new FakeCFTApiClient();
+
+        // First attempt: CANCELLED -> error -> trigger retry
+        client.addScenario(
+                "idtu1",
+                status("idtu1", "CANCELLED", 5, "cancelled")
+        );
+
+        // Second attempt: COMPLETED -> success
+        client.addScenario(
+                "idtu2",
+                status("idtu2", "COMPLETED", 0, "ok on retry")
+        );
+
+        assertThatCode(() ->
+                client.notifyAndWaitForCompletion("out/path/file.pgp", "file.pgp", NO_WAIT)
+        ).doesNotThrowAnyException();
+
+        // 2 POSTs, 2 GETs (1 per attempt)
+        assertThat(client.triggerCalls).isEqualTo(2);
+        assertThat(client.statusCalls).isEqualTo(2);
+    }
+
+    @Test
+    void throwsWhenBothAttemptsFail() {
+        FakeCFTApiClient client = new FakeCFTApiClient();
+
+        // 1st attempt: CANCELLED
+        client.addScenario(
+                "idtu1",
+                status("idtu1", "CANCELLED", 5, "first fail")
+        );
+        // 2nd attempt: still CANCELLED
+        client.addScenario(
+                "idtu2",
+                status("idtu2", "CANCELLED", 7, "second fail")
+        );
+
+        assertThatThrownBy(() ->
+                client.notifyAndWaitForCompletion("out/path/file.pgp", "file.pgp", NO_WAIT)
+        )
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("FAILED after retry");
+
+        // still 2 POSTs, 2 GETs
+        assertThat(client.triggerCalls).isEqualTo(2);
+        assertThat(client.statusCalls).isEqualTo(2);
+    }
+}
+
+
+----------
 Nice, good to hear it’s working 🎉
 Let’s add JUnit tests around the new behaviour.
 
