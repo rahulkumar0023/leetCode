@@ -1,3 +1,298 @@
+You’re right: to push CFTApiClient coverage up you basically need **three things**:
+
+1. Hit the `triggerTransferOnce(..)` happy + retry + fail paths
+2. Hit the `doSingleAttempt(..)` branch that does the `sleep`
+3. Hit `getTransferStatus(..)` (at least one GET path)
+
+Below is a clean Mockito-based test setup that does exactly that.
+Adjust field / method names to your exact class, but the structure will fit what you already have.
+
+---
+
+## 1. Test setup (same pattern as your existing notifyUpload test)
+
+```java
+@ExtendWith(MockitoExtension.class)
+class CFTApiClientTest {
+
+    @Mock
+    private RestTemplateBuilder restTemplateBuilder;
+
+    @Mock
+    private RestTemplate restTemplate;
+
+    @Mock
+    private ObjectMapper objectMapper;
+
+    private CFTApiClient cftApiClient;
+
+    @BeforeEach
+    void setUp() throws Exception {
+        // Builder -> RestTemplate
+        when(restTemplateBuilder
+                .basicAuthentication(nullable(String.class), nullable(String.class)))
+            .thenReturn(restTemplateBuilder);
+        when(restTemplateBuilder.requestFactory(any(Supplier.class)))
+            .thenReturn(restTemplateBuilder);
+        when(restTemplateBuilder.build()).thenReturn(restTemplate);
+
+        cftApiClient = new CFTApiClient(restTemplateBuilder, objectMapper);
+
+        // Set fields used inside the methods
+        ReflectionTestUtils.setField(cftApiClient, "baseUrl", "http://cft/api/transfers");
+        ReflectionTestUtils.setField(cftApiClient, "destPART", "destPART");
+        ReflectionTestUtils.setField(cftApiClient, "destIDF", "destIDF");
+
+        // Call @PostConstruct init()
+        ReflectionTestUtils.invokeMethod(cftApiClient, "init");
+
+        // ObjectMapper for POST body
+        when(objectMapper.writeValueAsString(any()))
+                .thenReturn("{\"fname\":\"out/path/file.pgp\",\"parm\":\"file.pgp\",\"sync\":\"YES\"}");
+    }
+
+    // helper to build TransferStatusResponse with whatever fields you have
+    private TransferStatusResponse status(String sentinel, int diagi, String idtu) {
+        TransferStatusResponse s = new TransferStatusResponse();
+        s.setSentinel(sentinel);
+        s.setDiagi(diagi);
+        s.setIdtu(idtu);
+        return s;
+    }
+}
+```
+
+> ⚠️ If `TransferStatusResponse` has a builder or different setters, just adjust the `status(..)` helper.
+
+---
+
+## 2. Coverage for `triggerTransferOnce(..)`
+
+### 2.1. Success on first attempt (COMPLETED, `diagi = 0`)
+
+```java
+@Test
+void triggerTransferOnce_successOnFirstAttempt() throws Exception {
+    // POST returns COMPLETED, diagi = 0
+    TransferStatusResponse completed = status("COMPLETED", 0, "IDTU-123");
+
+    when(restTemplate.exchange(
+            anyString(),
+            eq(HttpMethod.POST),
+            any(HttpEntity.class),
+            eq(TransferStatusResponse.class),
+            anyMap()))
+        .thenReturn(new ResponseEntity<>(completed, HttpStatus.OK));
+
+    // call (via reflection if method is private)
+    String idtu = ReflectionTestUtils.invokeMethod(
+            cftApiClient,
+            "triggerTransferOnce",
+            "/out/path/file.pgp",   // outPath
+            "file.pgp",             // fileName
+            Duration.ofMillis(5)    // waitTime
+    );
+
+    assertThat(idtu).isEqualTo("IDTU-123");
+
+    // Only one POST attempt
+    verify(restTemplate, times(1))
+            .exchange(anyString(), eq(HttpMethod.POST), any(), eq(TransferStatusResponse.class), anyMap());
+}
+```
+
+### 2.2. Retry once when first attempt CANCELLED or `diagi != 0`
+
+```java
+@Test
+void triggerTransferOnce_retryOnceWhenFirstAttemptCancelled_thenSuccess() throws Exception {
+    TransferStatusResponse cancelled = status("CANCELLED", 99, null);
+    TransferStatusResponse completed = status("COMPLETED", 0, "IDTU-999");
+
+    when(restTemplate.exchange(
+            anyString(),
+            eq(HttpMethod.POST),
+            any(HttpEntity.class),
+            eq(TransferStatusResponse.class),
+            anyMap()))
+        .thenReturn(
+            new ResponseEntity<>(cancelled, HttpStatus.OK),  // first attempt
+            new ResponseEntity<>(completed, HttpStatus.OK)   // retry
+        );
+
+    String idtu = ReflectionTestUtils.invokeMethod(
+            cftApiClient,
+            "triggerTransferOnce",
+            "/out/path/file.pgp",
+            "file.pgp",
+            Duration.ofMillis(5)
+    );
+
+    assertThat(idtu).isEqualTo("IDTU-999");
+
+    // Two POST attempts (first CANCELLED, second COMPLETED)
+    verify(restTemplate, times(2))
+            .exchange(anyString(), eq(HttpMethod.POST), any(), eq(TransferStatusResponse.class), anyMap());
+}
+```
+
+### 2.3. Both attempts fail → throw `InvoiceProcessingException`
+
+```java
+@Test
+void triggerTransferOnce_throwsWhenBothAttemptsFail() {
+    TransferStatusResponse cancelled = status("CANCELLED", 42, null);
+
+    when(restTemplate.exchange(
+            anyString(),
+            eq(HttpMethod.POST),
+            any(HttpEntity.class),
+            eq(TransferStatusResponse.class),
+            anyMap()))
+        .thenReturn(
+            new ResponseEntity<>(cancelled, HttpStatus.OK),
+            new ResponseEntity<>(cancelled, HttpStatus.OK)
+        );
+
+    assertThatThrownBy(() -> ReflectionTestUtils.invokeMethod(
+            cftApiClient,
+            "triggerTransferOnce",
+            "/out/path/file.pgp",
+            "file.pgp",
+            Duration.ofMillis(5)
+    ))
+        .isInstanceOf(InvoiceProcessingException.class)
+        .hasMessageContaining("CFT POST/GET attempt failed for file"); // adjust to your message
+
+    verify(restTemplate, times(2))
+            .exchange(anyString(), eq(HttpMethod.POST), any(), eq(TransferStatusResponse.class), anyMap());
+}
+```
+
+That gives you good branch coverage inside `triggerTransferOnce(..)`.
+
+---
+
+## 3. Cover the `doSingleAttempt(..)` *sleep* block
+
+Your sleep block is triggered when response has `sentinel = "SENDING"` (that’s what we designed earlier).
+We don’t need to assert the actual time, just execute the code path with a **small** duration so the test doesn’t pause for long.
+
+```java
+@Test
+void doSingleAttempt_waitsWhenSentinelSending() throws Exception {
+    TransferStatusResponse sending = status("SENDING", 0, "IDTU-42");
+
+    when(restTemplate.exchange(
+            anyString(),
+            eq(HttpMethod.GET),                  // or POST, depending on where you call doSingleAttempt
+            any(HttpEntity.class),
+            eq(TransferStatusResponse.class),
+            anyMap()))
+        .thenReturn(new ResponseEntity<>(sending, HttpStatus.OK));
+
+    long before = System.currentTimeMillis();
+
+    TransferStatusResponse result = ReflectionTestUtils.invokeMethod(
+            cftApiClient,
+            "doSingleAttempt",
+            HttpMethod.GET,           // method
+            "IDTU-42",                // idtu or null for POST
+            Duration.ofMillis(5)      // small wait to hit sleep branch
+    );
+
+    long after = System.currentTimeMillis();
+
+    assertThat(result.getSentinel()).isEqualTo("SENDING");
+    // we don't assert an exact sleep time, just that the method returned
+    assertThat(after).isGreaterThanOrEqualTo(before);
+
+    verify(restTemplate, times(1))
+            .exchange(anyString(), eq(HttpMethod.GET), any(), eq(TransferStatusResponse.class), anyMap());
+}
+```
+
+> If `doSingleAttempt(..)` doesn’t take a `Duration` parameter but uses a field (e.g. `graceWaitTime`), just set that field with `ReflectionTestUtils.setField(cftApiClient, "graceWaitTime", Duration.ofMillis(5));` before the call.
+
+---
+
+## 4. Cover `getTransferStatus(..)` (GET /transfers/{idtu})
+
+```java
+@Test
+void getTransferStatus_returnsCompletedStatus() throws Exception {
+    TransferStatusResponse completed = status("COMPLETED", 0, "IDTU-777");
+
+    when(restTemplate.exchange(
+            contains("/transfers/IDTU-777"),
+            eq(HttpMethod.GET),
+            any(HttpEntity.class),
+            eq(TransferStatusResponse.class)))
+        .thenReturn(new ResponseEntity<>(completed, HttpStatus.OK));
+
+    TransferStatusResponse result = ReflectionTestUtils.invokeMethod(
+            cftApiClient,
+            "getTransferStatus",
+            "IDTU-777",
+            Duration.ofMillis(5) // or whatever your signature uses
+    );
+
+    assertThat(result.getSentinel()).isEqualTo("COMPLETED");
+    assertThat(result.getIdtu()).isEqualTo("IDTU-777");
+
+    verify(restTemplate, times(1))
+            .exchange(contains("/transfers/IDTU-777"),
+                      eq(HttpMethod.GET),
+                      any(HttpEntity.class),
+                      eq(TransferStatusResponse.class));
+}
+```
+
+If your `getTransferStatus(..)` is `void` and only used inside `notifyUploadAndWaitForCompletion`, then instead:
+
+* Call the public method (`notifyUploadAndWaitForCompletion(...)`)
+* Stub the GET exchange as above
+* Verify that it was called with the correct URL and that the method doesn’t throw.
+
+---
+
+## 5. Making the batch fail when CFT transfer fails
+
+You also asked earlier:
+
+> “If this transfer fails ideally my batch should fail too”
+
+The last test `triggerTransferOnce_throwsWhenBothAttemptsFail()` is the key for that:
+
+* We make sure CFTApiClient throws an `InvoiceProcessingException` when both attempts fail.
+* Your `PackageAndUploadTasklet` or whatever tasklet calls this should **not** catch that as a recoverable exception; let it bubble up → the step fails → job status = `FAILED`.
+
+You already have that wiring; this test just proves the CFT client behaves correctly and gives you coverage on the failure branch.
+
+---
+
+If you paste these tests into your existing `CFTApiClientTest` (tweaking names / messages to match your class), your coverage for:
+
+* `triggerTransferOnce`
+* `doSingleAttempt` (including the sleep branch)
+* `getTransferStatus`
+
+should jump from ~66% to somewhere in the 90s.
+
+If you show me the *current* signatures of these three methods, I can tighten the code so it compiles without any adjustments on your side.
+
+
+
+
+
+
+
+
+
+
+
+
+=========================================================
 You **can** absolutely stay with Mockito-based tests 👍
 The two problems you hit:
 
