@@ -1,3 +1,321 @@
+Gotcha, let’s clean this up properly:
+
+* ✅ No `ReflectionTestUtils.invokeMethod`
+* ✅ Keep using Mockito
+* ✅ No “unnecessary stubbing” / PotentialStubbingProblem
+* ✅ Actually hit `triggerTransferOnce`, `doSingleAttempt` (including sleep block) and `getTransferStatus`
+
+Below is a **pattern** that you can drop into your existing `CFTApiClientTest` (same package as `CFTApiClient`). Adjust names slightly if your signatures differ, but this is very close to what you described.
+
+---
+
+## 1. Test setup – real `ObjectMapper`, mocked HTTP
+
+Key idea: **don’t mock `ObjectMapper` at all**. Use a real one and only mock `RestTemplate`. That removes a lot of stubbing noise and avoids the line you mentioned:
+
+```java
+when(objectMapper.writeValueAsString(any()))...
+```
+
+```java
+@ExtendWith(MockitoExtension.class)
+class CFTApiClientTest {
+
+    @Mock
+    private RestTemplateBuilder restTemplateBuilder;
+
+    @Mock
+    private RestTemplate restTemplate;
+
+    // REAL object mapper – no Mockito
+    private ObjectMapper objectMapper;
+
+    private CFTApiClient cftApiClient;
+
+    private static final Duration NO_WAIT = Duration.ZERO;
+
+    @BeforeEach
+    void setUp() {
+        objectMapper = new ObjectMapper();
+
+        // RestTemplateBuilder → RestTemplate
+        when(restTemplateBuilder.basicAuthentication(
+                nullable(String.class), nullable(String.class)))
+                .thenReturn(restTemplateBuilder);
+        when(restTemplateBuilder.requestFactory(any()))
+                .thenReturn(restTemplateBuilder);
+        when(restTemplateBuilder.build()).thenReturn(restTemplate);
+
+        cftApiClient = new CFTApiClient(restTemplateBuilder, objectMapper);
+
+        // configure fields without invokeMethod
+        ReflectionTestUtils.setField(cftApiClient, "baseUrl", "baseUrl");
+        ReflectionTestUtils.setField(cftApiClient, "destPART", "destPART");
+        ReflectionTestUtils.setField(cftApiClient, "destIDF", "destIDF");
+        // restTemplate is normally set by init(); we inject it directly:
+        ReflectionTestUtils.setField(cftApiClient, "restTemplate", restTemplate);
+    }
+
+    private static TransferStatusResponse status(String idtu,
+                                                 String sentinel,
+                                                 int diagi,
+                                                 String diagnostic) {
+        TransferStatusResponse s = new TransferStatusResponse();
+        s.setIdtu(idtu);
+        s.setSentinel(sentinel);
+        s.setDiagi(diagi);
+        s.setDiagnostic(diagnostic);
+        return s;
+    }
+}
+```
+
+> Note: no `invokeMethod` anywhere; just `setField` to inject config + restTemplate.
+
+---
+
+## 2. Cover `triggerTransferOnce` (success + failure)
+
+Here I assume:
+
+```java
+/* package */ String triggerTransferOnce(String outPath, String fileName, int attempt)
+```
+
+### 2.1 success: POST returns body with `idtu`
+
+```java
+@Test
+void triggerTransferOnce_returnsIdtuOnSuccess() throws Exception {
+    String outPath = "out/path/file.pgp";
+    String fileName = "file.pgp";
+
+    String responseBody = "{\"idtu\":\"IDTU-123\"}";
+    ResponseEntity<String> response =
+            new ResponseEntity<>(responseBody, HttpStatus.OK);
+
+    when(restTemplate.exchange(
+            anyString(),
+            eq(HttpMethod.POST),
+            any(HttpEntity.class),
+            eq(String.class),
+            any(Map.class)
+    )).thenReturn(response);
+
+    String idtu = cftApiClient.triggerTransferOnce(outPath, fileName, 1);
+
+    assertThat(idtu).isEqualTo("IDTU-123");
+
+    verify(restTemplate, times(1)).exchange(
+            anyString(),
+            eq(HttpMethod.POST),
+            any(HttpEntity.class),
+            eq(String.class),
+            any(Map.class)
+    );
+}
+```
+
+### 2.2 failure: POST body has no `idtu` → exception
+
+```java
+@Test
+void triggerTransferOnce_throwsWhenIdtuMissing() {
+    String outPath = "out/path/file.pgp";
+    String fileName = "file.pgp";
+
+    String responseBody = "{\"foo\":\"bar\"}";
+    ResponseEntity<String> response =
+            new ResponseEntity<>(responseBody, HttpStatus.OK);
+
+    when(restTemplate.exchange(
+            anyString(),
+            eq(HttpMethod.POST),
+            any(HttpEntity.class),
+            eq(String.class),
+            any(Map.class)
+    )).thenReturn(response);
+
+    assertThatThrownBy(() ->
+            cftApiClient.triggerTransferOnce(outPath, fileName, 1)
+    ).isInstanceOf(IllegalStateException.class);
+
+    verify(restTemplate, times(1)).exchange(
+            anyString(),
+            eq(HttpMethod.POST),
+            any(HttpEntity.class),
+            eq(String.class),
+            any(Map.class)
+    );
+}
+```
+
+Both tests **use** the stubbed `exchange`, so no “unnecessary stubbing”.
+
+---
+
+## 3. Cover `getTransferStatus` (happy path)
+
+Assuming:
+
+```java
+/* package */ TransferStatusResponse getTransferStatus(String idtu)
+```
+
+```java
+@Test
+void getTransferStatus_parsesResponseCorrectly() throws Exception {
+    String idtu = "IDTU-777";
+
+    String body = "{\"idtu\":\"IDTU-777\",\"sentinel\":\"COMPLETED\",\"diagi\":0,\"diagnostic\":\"ok\"}";
+    ResponseEntity<String> response =
+            new ResponseEntity<>(body, HttpStatus.OK);
+
+    when(restTemplate.exchange(
+            anyString(),
+            eq(HttpMethod.GET),
+            isNull(),
+            eq(String.class),
+            any(Map.class)
+    )).thenReturn(response);
+
+    TransferStatusResponse status = cftApiClient.getTransferStatus(idtu);
+
+    assertThat(status.getIdtu()).isEqualTo("IDTU-777");
+    assertThat(status.getSentinel()).isEqualTo("COMPLETED");
+    assertThat(status.getDiagi()).isEqualTo(0);
+    assertThat(status.getDiagnostic()).isEqualTo("ok");
+
+    verify(restTemplate, times(1)).exchange(
+            anyString(),
+            eq(HttpMethod.GET),
+            isNull(),
+            eq(String.class),
+            any(Map.class)
+    );
+}
+```
+
+Again: stub is *used* → no unnecessary stubbing.
+
+---
+
+## 4. Cover `doSingleAttempt` including the sleep + second GET
+
+For this one, we don’t care about HTTP; we want to cover:
+
+* first GET returns `SENDING`
+* method sleeps
+* second GET returns `COMPLETED`
+* final status is returned.
+
+We do this with a **spy** and stub only `triggerTransferOnce` + `getTransferStatus`. No `RestTemplate` or `ObjectMapper` stubbing at all → no strict-stubbing issues.
+
+Assuming:
+
+```java
+/* package */ TransferStatusResponse doSingleAttempt(String outPath,
+                                                     String fileName,
+                                                     Duration waitTime,
+                                                     int attempt)
+```
+
+```java
+@Test
+void doSingleAttempt_whenSendingThenCompleted_coversSleepBlock() throws Exception {
+    // spy so we can stub internal methods but keep the rest of logic
+    CFTApiClient spyClient = Mockito.spy(cftApiClient);
+
+    // 1) triggerTransferOnce returns idtu1
+    doReturn("idtu1").when(spyClient)
+            .triggerTransferOnce(anyString(), anyString(), anyInt());
+
+    // 2) First getTransferStatus(idtu1) -> SENDING, second -> COMPLETED
+    TransferStatusResponse sending   = status("idtu1", "SENDING",   0, "in progress");
+    TransferStatusResponse completed = status("idtu1", "COMPLETED", 0, "done");
+
+    AtomicInteger counter = new AtomicInteger();
+    doAnswer(invocation -> {
+        // first call -> SENDING, second call -> COMPLETED
+        return counter.getAndIncrement() == 0 ? sending : completed;
+    }).when(spyClient).getTransferStatus("idtu1");
+
+    // small wait time to hit the sleep blocks but keep tests fast
+    Duration waitTime = Duration.ofMillis(5);
+
+    long before = System.currentTimeMillis();
+    TransferStatusResponse result =
+            spyClient.doSingleAttempt("out/path/file.pgp", "file.pgp", waitTime, 1);
+    long after = System.currentTimeMillis();
+
+    assertThat(result.getSentinel()).isEqualTo("COMPLETED");
+    // We don't assert exact sleep time, only that code ran
+    assertThat(after).isGreaterThanOrEqualTo(before);
+
+    // internal methods were used
+    verify(spyClient, times(1))
+            .triggerTransferOnce(anyString(), anyString(), anyInt());
+    verify(spyClient, times(2))
+            .getTransferStatus("idtu1");
+}
+```
+
+Because we **don’t** stub `restTemplate.exchange` or `objectMapper` in this test, there is zero chance of “unnecessary stubbing” here.
+
+This test drives:
+
+* both `Thread.sleep(waitTime)` calls in `doSingleAttempt` (before first GET and before second GET when first is SENDING),
+* the branch that does the second GET.
+
+That gives you coverage for the “sleep block” and the SENDING→COMPLETED logic.
+
+---
+
+## 5. Fail-case → batch fail
+
+You already have `notifyAndWaitForCompletion(...)` throwing an exception when both attempts fail. One more logic test (using the spy again) confirms that:
+
+```java
+@Test
+void notifyAndWaitForCompletion_bothAttemptsFail_throwsException() throws Exception {
+    CFTApiClient spyClient = Mockito.spy(cftApiClient);
+
+    // first attempt: CANCELLED
+    TransferStatusResponse cancelled1 = status("idtu1", "CANCELLED", 5, "first fail");
+    // second attempt: CANCELLED again
+    TransferStatusResponse cancelled2 = status("idtu2", "CANCELLED", 7, "second fail");
+
+    // triggerTransferOnce returns idtu1 then idtu2
+    doReturn("idtu1", "idtu2").when(spyClient)
+            .triggerTransferOnce(anyString(), anyString(), anyInt());
+
+    // map idtu -> status
+    doAnswer(inv -> {
+        String idtu = inv.getArgument(0, String.class);
+        return "idtu1".equals(idtu) ? cancelled1 : cancelled2;
+    }).when(spyClient).getTransferStatus(anyString());
+
+    assertThatThrownBy(() ->
+            spyClient.notifyAndWaitForCompletion("out/path/file.pgp", "file.pgp", Duration.ofMillis(1))
+    ).isInstanceOf(IllegalStateException.class);
+}
+```
+
+If your tasklet simply calls `notifyAndWaitForCompletion` and does **not** catch this exception, Spring Batch will mark the step and job as `FAILED`.
+
+---
+
+### Why this should fix your issues
+
+* No `invokeMethod` at all.
+* Only the tests that **need** HTTP stubbing stub `restTemplate.exchange`, and every stub is used → no “unnecessary stubbing” warnings.
+* `ObjectMapper` is real, so you don’t need to stub it (and can delete the `writeValueAsString(any())` stub line you mentioned).
+* `triggerTransferOnce`, `getTransferStatus`, and `doSingleAttempt` are all called directly (they’re package-private now), so coverage goes up on those methods, including the sleep branch.
+
+If you paste your current signatures for the three methods (`triggerTransferOnce`, `doSingleAttempt`, `getTransferStatus`), I can tweak the method calls (parameters) to match them exactly, but this structure will already be very close to what you need.
+---------------
+
+
 You’re right: to push CFTApiClient coverage up you basically need **three things**:
 
 1. Hit the `triggerTransferOnce(..)` happy + retry + fail paths
