@@ -1,3 +1,210 @@
+Nice, you’re *very* close now — you just need a few focused tests to hit:
+
+* the new `sleep(Duration)` method (both normal + interrupted),
+* the **catch** block in `getTransferStatus`,
+* the **catch** block in `doSingleAttempt`.
+
+I’ll assume these (or very similar) signatures in `CFTApiClient`:
+
+```java
+// package-private (default) now
+void sleep(Duration waitTime) {
+    try {
+        Thread.sleep(waitTime.toMillis());
+    } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new IllegalStateException("Interrupted while waiting", e);
+    }
+}
+
+TransferStatusResponse getTransferStatus(String idtu) {
+    try {
+        // restTemplate.exchange(... String.class)
+        // objectMapper.readValue(body, TransferStatusResponse.class)
+    } catch (Exception e) {
+        throw new IllegalStateException("Failed to parse CFT status for idtu=" + idtu, e);
+    }
+}
+
+TransferStatusResponse doSingleAttempt(String outPath,
+                                       String fileName,
+                                       Duration waitTime,
+                                       int attempt) {
+    try {
+        String idtu = triggerTransferOnce(outPath, fileName, attempt);
+        sleep(waitTime);
+        TransferStatusResponse status = getTransferStatus(idtu);
+        // maybe second sleep + GET when SENDING...
+        return status;
+    } catch (Exception e) {
+        throw new IllegalStateException(
+                "CFT POST/GET attempt " + attempt + " failed for file " + fileName, e);
+    }
+}
+```
+
+> ⚠️ Make sure your **test class is in the same package** as `CFTApiClient` so it can access these default/package-private methods directly.
+
+Below are **only the new tests** you need to add to your existing `CFTApiClientTest` (the one that already sets up `restTemplateBuilder`, `restTemplate`, and a real `ObjectMapper`).
+
+---
+
+## 1️⃣ Tests for `sleep(Duration waitTime)`
+
+### a) Normal case – no interrupt
+
+```java
+@Test
+void sleep_shouldNotThrow_whenNotInterrupted() {
+    // very small duration so the test stays fast
+    Duration waitTime = Duration.ofMillis(5);
+
+    assertDoesNotThrow(() -> cftApiClient.sleep(waitTime));
+}
+```
+
+This hits the **try** path in `sleep` (no exception, no catch).
+
+### b) Interrupted case – covers catch block
+
+We run `sleep` in a separate thread, interrupt it, and assert it throws `IllegalStateException`.
+
+```java
+@Test
+void sleep_whenInterrupted_shouldThrowIllegalStateException() throws Exception {
+    Duration waitTime = Duration.ofSeconds(5); // long enough to be sleeping
+
+    AtomicReference<Throwable> caught = new AtomicReference<>();
+
+    Thread t = new Thread(() -> {
+        try {
+            cftApiClient.sleep(waitTime);
+        } catch (Throwable ex) {
+            caught.set(ex);
+        }
+    });
+
+    t.start();
+
+    // give the thread a moment to enter Thread.sleep
+    Thread.sleep(50);
+    t.interrupt();      // this will cause InterruptedException inside sleep
+    t.join(1000);       // wait for thread to finish
+
+    Throwable ex = caught.get();
+    assertNotNull(ex, "Expected an exception from sleep, but none was caught");
+    assertThat(ex).isInstanceOf(IllegalStateException.class)
+                  .hasMessageContaining("Interrupted");
+}
+```
+
+That test executes the `catch (InterruptedException e)` block and the `IllegalStateException` rethrow.
+
+---
+
+## 2️⃣ Test catch block of `getTransferStatus`
+
+We’ll make `restTemplate` return **invalid JSON**, so the real `ObjectMapper` throws and we hit the catch.
+
+```java
+@Test
+void getTransferStatus_whenJsonInvalid_shouldThrowIllegalStateException() {
+    String idtu = "IDTU-123";
+
+    // invalid JSON: objectMapper.readValue(...) will fail here
+    ResponseEntity<String> response =
+            new ResponseEntity<>("NOT_VALID_JSON", HttpStatus.OK);
+
+    when(restTemplate.exchange(
+            anyString(),
+            eq(HttpMethod.GET),
+            isNull(),
+            eq(String.class),
+            any(Map.class)
+    )).thenReturn(response);
+
+    assertThatThrownBy(() -> cftApiClient.getTransferStatus(idtu))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("Failed to parse CFT status"); // adjust to your message
+
+    verify(restTemplate, times(1)).exchange(
+            anyString(),
+            eq(HttpMethod.GET),
+            isNull(),
+            eq(String.class),
+            any(Map.class)
+    );
+}
+```
+
+This covers the **catch (Exception e)** part inside `getTransferStatus`.
+
+---
+
+## 3️⃣ Test catch block of `doSingleAttempt`
+
+We don’t need HTTP here at all. We just want `doSingleAttempt` to see some exception and wrap it in `IllegalStateException`.
+
+Simplest way: spy the client and make `triggerTransferOnce` throw. That guarantees the `try` in `doSingleAttempt` hits its catch.
+
+```java
+@Test
+void doSingleAttempt_whenTriggerTransferThrows_shouldWrapInIllegalStateException() throws Exception {
+    // spy so we can stub only internal methods, everything else remains real
+    CFTApiClient spyClient = Mockito.spy(cftApiClient);
+
+    // whenever doSingleAttempt calls triggerTransferOnce, throw a RuntimeException
+    doThrow(new RuntimeException("boom"))
+            .when(spyClient)
+            .triggerTransferOnce(anyString(), anyString(), anyInt());
+
+    Duration waitTime = Duration.ofMillis(1);
+
+    assertThatThrownBy(() ->
+            spyClient.doSingleAttempt("out/path/file.pgp", "file.pgp", waitTime, 1)
+    )
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("CFT POST/GET attempt 1 failed"); // match your message prefix
+}
+```
+
+If your error message is slightly different, just relax the assertion to only check type:
+
+```java
+assertThatThrownBy(() ->
+        spyClient.doSingleAttempt("out/path/file.pgp", "file.pgp", waitTime, 1)
+).isInstanceOf(IllegalStateException.class);
+```
+
+That covers the catch inside `doSingleAttempt`.
+
+---
+
+### Recap
+
+With these three additions:
+
+* **`sleep(Duration)`**:
+
+  * normal case → try block,
+  * interrupt case → catch block.
+* **`getTransferStatus`**:
+
+  * invalid JSON → `IllegalStateException` wrapper in catch block.
+* **`doSingleAttempt`**:
+
+  * internal failure (simulated via spy) → `IllegalStateException` wrapper in catch block.
+
+you’ll cover exactly the missing bits:
+
+* `sleep` method,
+* catch of `getTransferStatus`,
+* catch of `doSingleAttempt`.
+
+If you paste your actual `doSingleAttempt` and `getTransferStatus` method signatures, I can tweak the test method calls so they align 1:1 with your code, but structurally this is exactly what you need.
+======-=-=-=-=-=h-=-h=-f=-=f-=f
+
+
 Gotcha, let’s clean this up properly:
 
 * ✅ No `ReflectionTestUtils.invokeMethod`
