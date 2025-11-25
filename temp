@@ -1,3 +1,94 @@
+Yeah, Sonar is right to complain about `Thread.sleep(50)` in tests – it hates explicit sleeps in unit tests and prefers something like Awaitility that *waits for a condition* instead of a fixed time.
+
+You can keep your `sleep(Duration waitTime)` method in **production** as-is (Sonar usually tolerates that if justified), and just fix the **test** to use Awaitility.
+
+---
+
+## 1️⃣ Add Awaitility (if not already there)
+
+In your `pom.xml` (test scope):
+
+```xml
+<dependency>
+    <groupId>org.awaitility</groupId>
+    <artifactId>awaitility</artifactId>
+    <version>4.2.0</version>
+    <scope>test</scope>
+</dependency>
+```
+
+Then in the test class:
+
+```java
+import static org.awaitility.Awaitility.await;
+import java.time.Duration;
+import java.util.concurrent.atomic.AtomicReference;
+```
+
+---
+
+## 2️⃣ Replace the `Thread.sleep(50)` test with an Awaitility-based one
+
+Here’s a Sonar-friendly version of the **interrupted sleep** test, no `Thread.sleep` at all:
+
+```java
+@Test
+void sleep_whenInterrupted_shouldThrowIllegalStateException() {
+    Duration waitTime = Duration.ofSeconds(5); // long enough to ensure it's really sleeping
+
+    AtomicReference<Throwable> caught = new AtomicReference<>();
+
+    Thread t = new Thread(() -> {
+        try {
+            cftApiClient.sleep(waitTime);
+        } catch (Throwable ex) {
+            caught.set(ex);
+        }
+    });
+
+    t.start();
+    // immediately interrupt; if the thread hasn't called sleep yet,
+    // the interrupted flag is set and Thread.sleep will still throw
+    t.interrupt();
+
+    // Wait until the worker thread has actually caught something
+    await()
+        .atMost(Duration.ofSeconds(1))
+        .untilAsserted(() -> assertThat(caught.get()).isNotNull());
+
+    Throwable ex = caught.get();
+    assertThat(ex)
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("Interrupted");
+}
+```
+
+What’s happening here:
+
+* We start a thread that calls your **production** `sleep(Duration)` method.
+* We interrupt the thread right away (no `Thread.sleep(50)`).
+* `sleep()`’s internal `Thread.sleep(...)` will see the interrupt flag and throw `InterruptedException`.
+* Your `sleep()` catches that and rethrows `IllegalStateException` → caught in `caught.set(ex)`.
+* Awaitility keeps polling until `caught.get()` is non-null or 1s passes.
+* Then we assert on the type/message.
+
+This covers the **catch block** of `sleep(Duration waitTime)` and keeps Sonar happy.
+
+---
+
+Your other tests for:
+
+* the happy path of `sleep(Duration)`
+* the catch in `getTransferStatus`
+* the catch in `doSingleAttempt`
+
+can stay as they are, since they don’t use `Thread.sleep` directly in the test.
+
+If you want, you can paste your current `sleep(Duration)` method, and I’ll quickly double-check that this test matches it exactly.
+
+
+-=-=-=--=-----
+
 Nice, you’re *very* close now — you just need a few focused tests to hit:
 
 * the new `sleep(Duration)` method (both normal + interrupted),
