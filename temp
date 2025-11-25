@@ -1,3 +1,192 @@
+Yep, we can keep Sonar happy **without** adding Awaitility or any new jar 👍
+
+The key is:
+
+* Don’t use `Thread.sleep(...)` in your **test**
+* Let `Thread.sleep(...)` live only in your **production** `sleep(Duration)` method
+* Use `Thread.join(...)` + an `AtomicReference` to capture the exception instead of sleeping in the test
+
+Below is what you need for:
+
+1. `sleep(Duration waitTime)` – interrupted branch (no extra dependency, no sleep in test)
+2. Catch blocks for `getTransferStatus` and `doSingleAttempt` (these don’t need `sleep` at all)
+
+---
+
+## 1️⃣ Test for `sleep(Duration waitTime)` (interrupted, no Awaitility, no sleep in test)
+
+Assuming your prod code:
+
+```java
+void sleep(Duration waitTime) {
+    try {
+        Thread.sleep(waitTime.toMillis());
+    } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new IllegalStateException("Interrupted while waiting", e);
+    }
+}
+```
+
+Test:
+
+```java
+@Test
+void sleep_whenInterrupted_shouldThrowIllegalStateException() throws Exception {
+    Duration waitTime = Duration.ofSeconds(5); // long enough to be sleeping
+
+    AtomicReference<Throwable> caught = new AtomicReference<>();
+
+    Thread t = new Thread(() -> {
+        try {
+            cftApiClient.sleep(waitTime);
+        } catch (Throwable ex) {
+            caught.set(ex);
+        }
+    });
+
+    t.start();
+    // Immediately interrupt – no Thread.sleep in the test
+    t.interrupt();
+    // Wait (blocking) until the worker thread finishes
+    t.join(1000);
+
+    Throwable ex = caught.get();
+    assertNotNull(ex, "Expected an exception from sleep, but none was caught");
+    assertThat(ex)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("Interrupted");
+}
+```
+
+✅ No `Thread.sleep` in the test
+✅ No extra jar
+✅ Covers the catch branch in `sleep(Duration)`
+Sonar’s “don’t use Thread.sleep in tests” rule now has nothing to complain about.
+
+You can still keep the “happy path” test:
+
+```java
+@Test
+void sleep_shouldNotThrow_whenNotInterrupted() {
+    assertDoesNotThrow(() -> cftApiClient.sleep(Duration.ofMillis(5)));
+}
+```
+
+---
+
+## 2️⃣ Catch block of `getTransferStatus`
+
+Prod (rough outline):
+
+```java
+TransferStatusResponse getTransferStatus(String idtu) {
+    try {
+        ResponseEntity<String> response = restTemplate.exchange(... String.class ...);
+        return objectMapper.readValue(response.getBody(), TransferStatusResponse.class);
+    } catch (Exception e) {
+        throw new IllegalStateException("Failed to parse CFT status for idtu=" + idtu, e);
+    }
+}
+```
+
+Test – make JSON invalid so `objectMapper.readValue` explodes and we hit the catch:
+
+```java
+@Test
+void getTransferStatus_whenJsonInvalid_shouldThrowIllegalStateException() {
+    String idtu = "IDTU-123";
+
+    // Invalid JSON on purpose
+    ResponseEntity<String> response =
+            new ResponseEntity<>("NOT_VALID_JSON", HttpStatus.OK);
+
+    when(restTemplate.exchange(
+            anyString(),
+            eq(HttpMethod.GET),
+            isNull(),
+            eq(String.class),
+            any(Map.class)
+    )).thenReturn(response);
+
+    assertThatThrownBy(() -> cftApiClient.getTransferStatus(idtu))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("Failed to parse CFT status");
+
+    verify(restTemplate, times(1)).exchange(
+            anyString(),
+            eq(HttpMethod.GET),
+            isNull(),
+            eq(String.class),
+            any(Map.class)
+    );
+}
+```
+
+No sleeps, no extra libs, and the catch in `getTransferStatus` is covered.
+
+---
+
+## 3️⃣ Catch block of `doSingleAttempt`
+
+Prod (roughly):
+
+```java
+TransferStatusResponse doSingleAttempt(String outPath,
+                                       String fileName,
+                                       Duration waitTime,
+                                       int attempt) {
+    try {
+        String idtu = triggerTransferOnce(outPath, fileName, attempt);
+        sleep(waitTime);
+        TransferStatusResponse status = getTransferStatus(idtu);
+        // maybe second sleep + GET when SENDING...
+        return status;
+    } catch (Exception e) {
+        throw new IllegalStateException(
+                "CFT POST/GET attempt " + attempt + " failed for file " + fileName, e);
+    }
+}
+```
+
+To cover the catch, just force an exception from inside:
+
+```java
+@Test
+void doSingleAttempt_whenTriggerTransferThrows_shouldWrapInIllegalStateException() throws Exception {
+    CFTApiClient spyClient = Mockito.spy(cftApiClient);
+
+    // whenever doSingleAttempt calls triggerTransferOnce, throw
+    doThrow(new RuntimeException("boom"))
+            .when(spyClient)
+            .triggerTransferOnce(anyString(), anyString(), anyInt());
+
+    Duration waitTime = Duration.ofMillis(1);
+
+    assertThatThrownBy(() ->
+            spyClient.doSingleAttempt("out/path/file.pgp", "file.pgp", waitTime, 1)
+    )
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("CFT POST/GET attempt 1 failed");
+}
+```
+
+Again, no sleep in the test, no new dependency, and you hit the catch in `doSingleAttempt`.
+
+---
+
+### Summary
+
+* ✅ You can **avoid Awaitility** and any new jar.
+* ✅ Remove `Thread.sleep(...)` from the test; use `Thread.join(...)` to wait for the worker thread to finish.
+* ✅ Use invalid JSON and a spy-throw to cover the `getTransferStatus` and `doSingleAttempt` catch blocks.
+
+If you paste your exact `sleep`, `getTransferStatus`, and `doSingleAttempt` signatures, I can tweak the test snippets exactly to your method names/parameters, but structurally this will keep both **Sonar** and **coverage** happy.
+
+
+--
+
+
 Yeah, Sonar is right to complain about `Thread.sleep(50)` in tests – it hates explicit sleeps in unit tests and prefers something like Awaitility that *waits for a condition* instead of a fixed time.
 
 You can keep your `sleep(Duration waitTime)` method in **production** as-is (Sonar usually tolerates that if justified), and just fix the **test** to use Awaitility.
