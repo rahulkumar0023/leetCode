@@ -1,3 +1,273 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Good catch – and you’re right to question both things:
+
+1. **Current tasklet patch only covers decrypt/unzip errors.**
+2. The `/failed/failed/...` path happens because of how the COS key is built.
+
+Let me fix both **using your existing `SkipLoggingListener`**, with minimal changes and no new step/reader/writer.
+
+---
+
+## 1️⃣ What happens *today*
+
+### In `FetchDecryptUnzipTasklet`
+
+* If `decryptFile()` or `extract()` throws → inner `catch` moves the `.zip.pgp` (and maybe `.zip`) to failed and **continues**.
+* This covers **technical bundle errors** (bad PGP, corrupt ZIP).
+
+### But XML errors happen later
+
+When the XML is:
+
+* not well-formed
+* fails XSD validation / JAXB
+* causes an exception in your processor/writer
+
+…that happens in the **chunk step**, not in the tasklet.
+
+So those exceptions show up as **skips**, and your current `SkipLoggingListener` just logs:
+
+```java
+public class SkipLoggingListener implements SkipListener<Object, Object> {
+
+    @Override
+    public void onSkipInRead(Throwable t) { ... }
+
+    @Override
+    public void onSkipInWrite(Object item, Throwable t) { ... }
+}
+```
+
+👉 It **does not** move `.zip.pgp` / `.zip` to failed when XML is bad.
+
+That’s the missing piece.
+
+---
+
+## 2️⃣ Fix the `/failed/failed/...` issue
+
+That happens when you do something like:
+
+```java
+String failedKey = "failed/" + originalKey;
+cosStorageService.moveFile("processed/" + originalKey, failedKey);
+```
+
+If `originalKey` already contains `"processed/"` or `"failed/"`, you end up with `failed/failed/...`.
+
+Instead, we should always derive keys from the **base name**:
+
+```java
+String base = xmlFileNameWithoutExtension;
+String processedPgpKey = "processed/" + base + ".zip.pgp";
+String processedZipKey = "processed/" + base + ".zip";
+String failedPgpKey    = "failed/"    + base + ".zip.pgp";
+String failedZipKey    = "failed/"    + base + ".zip";
+```
+
+No nesting, always a clean path.
+
+---
+
+## 3️⃣ Upgrade your existing `SkipLoggingListener` (minimal change)
+
+We’ll keep it as **one class**, but:
+
+* inject `CosStorageService`
+* add `onSkipInProcess`
+* when an XML item is skipped in process/write, we:
+
+  * figure out its XML file name
+  * derive base name
+  * move `.zip.pgp` + `.zip` from `processed/` → `failed/`
+
+### Updated listener
+
+```java
+@Slf4j
+public class SkipLoggingListener implements SkipListener<Object, Object> {
+
+    private final CosStorageService cosStorageService;
+
+    public SkipLoggingListener(CosStorageService cosStorageService) {
+        this.cosStorageService = cosStorageService;
+    }
+
+    @Override
+    public void onSkipInRead(Throwable t) {
+        String msg = (t != null) ? t.getMessage() : "unknown";
+        log.error("Skipped XML during read: {}", msg);
+        // here we usually don't know which file, so just log
+    }
+
+    @Override
+    public void onSkipInProcess(Object item, Throwable t) {
+        handleSkip("process", item, t);
+    }
+
+    @Override
+    public void onSkipInWrite(Object item, Throwable t) {
+        handleSkip("write", item, t);
+    }
+
+    private void handleSkip(String phase, Object item, Throwable t) {
+        String msg = (t != null) ? t.getMessage() : "unknown";
+        String itemName = resolveXmlFileName(item);
+
+        log.error("Skipped XML during {}: item={} - {}", phase, itemName, msg);
+
+        if (itemName != null) {
+            moveBundleToFailed(itemName);
+        }
+    }
+
+    /**
+     * Try to determine the XML file name from the item.
+     * Supports File, Path, and Spring Resource; otherwise returns null.
+     */
+    private String resolveXmlFileName(Object item) {
+        if (item == null) {
+            return null;
+        }
+        if (item instanceof java.io.File file) {
+            return file.getName();
+        }
+        if (item instanceof java.nio.file.Path path) {
+            return path.getFileName().toString();
+        }
+        if (item instanceof org.springframework.core.io.Resource res) {
+            return res.getFilename();
+        }
+        // if your reader passes some DTO that contains the original filename,
+        // you can extend this with a custom case here.
+        return null;
+    }
+
+    /**
+     * Move the corresponding .zip.pgp and .zip from /processed to /failed in COS.
+     */
+    private void moveBundleToFailed(String xmlFileName) {
+        // strip extension: invoice_123.xml -> invoice_123
+        String base = xmlFileName;
+        int dot = base.lastIndexOf('.');
+        if (dot > 0) {
+            base = base.substring(0, dot);
+        }
+
+        String processedPgpKey = "processed/" + base + ".zip.pgp";
+        String processedZipKey = "processed/" + base + ".zip";
+        String failedPgpKey    = "failed/"    + base + ".zip.pgp";
+        String failedZipKey    = "failed/"    + base + ".zip";
+
+        try {
+            // move .zip.pgp if it exists in /processed
+            if (cosStorageService.exists(processedPgpKey)) {
+                cosStorageService.moveFile(processedPgpKey, failedPgpKey);
+                log.info("Moved {} -> {}", processedPgpKey, failedPgpKey);
+            } else {
+                log.debug("No processed PGP key {} found; nothing to move", processedPgpKey);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to move {} to {}: {}", processedPgpKey, failedPgpKey, e.getMessage());
+        }
+
+        try {
+            // move .zip if it exists in /processed
+            if (cosStorageService.exists(processedZipKey)) {
+                cosStorageService.moveFile(processedZipKey, failedZipKey);
+                log.info("Moved {} -> {}", processedZipKey, failedZipKey);
+            } else {
+                log.debug("No processed ZIP key {} found; nothing to move", processedZipKey);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to move {} to {}: {}", processedZipKey, failedZipKey, e.getMessage());
+        }
+    }
+}
+```
+
+### Notes
+
+* Uses your existing methods:
+  `moveFile(String, String)` and `exists(String)`.
+* No `/failed/failed/...` because we always build keys from `base`.
+* If we cannot resolve a file name from `item`, we just log and skip moving.
+
+---
+
+## 4️⃣ Wire it into your step
+
+You already have the listener; now you just need to inject `CosStorageService`:
+
+```java
+@Bean
+public SkipLoggingListener skipLoggingListener(CosStorageService cosStorageService) {
+    return new SkipLoggingListener(cosStorageService);
+}
+
+@Bean
+public Step xmlInvoiceStep( /* ... */ SkipLoggingListener skipLoggingListener ) {
+    return stepBuilderFactory.get("xmlInvoiceStep")
+            .<Object, Object>chunk(10)
+            .reader(xmlReader)
+            .processor(xmlProcessor)
+            .writer(xmlWriter)
+            .faultTolerant()
+            .skip(Exception.class)
+            .skipLimit(Integer.MAX_VALUE)
+            .listener(skipLoggingListener)
+            .build();
+}
+```
+
+(Adjust generics and names to your actual step.)
+
+---
+
+## 5️⃣ What’s covered now?
+
+### Decrypt / unzip issues
+
+* Covered by the **inner try/catch** in `FetchDecryptUnzipTasklet`.
+* That part moves `.zip.pgp` / `.zip` when decrypt/extract fails.
+
+### XML issues (the part you were worried about)
+
+Now covered by updated `SkipLoggingListener`:
+
+* XML invalid (schema, JAXB, business rules)
+* Exceptions in processor
+* Exceptions in writer
+
+→ Listener derives the `baseName` from the XML filename and moves:
+
+```text
+processed/<base>.zip.pgp → failed/<base>.zip.pgp
+processed/<base>.zip     → failed/<base>.zip
+```
+
+Batch stays green; only that invoice bundle is marked failed.
+
+---
+
+If you tell me what **type** your item is in that XML step (File, Path, Resource, InvoiceType, etc.), I can tweak the `resolveXmlFileName(...)` method exactly to your reality.
+
+-------------------------------------------------------------------------------------------------------------------------------
 Perfect. I can now adapt **your existing FetchDecryptUnzipTasklet** with **minimal changes**, no redesign, no new step, no new reader/writer, and no structural impact on your batch.
 
 Below is your current code (based on the screenshot), annotated so you see exactly where the new logic “fits” without changing your batch architecture.
