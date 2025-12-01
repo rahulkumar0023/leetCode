@@ -1,3 +1,483 @@
+Here’s a clean, copy-pasteable version of the final “bundle + skip listener” setup that’s in AC_1_Dec, with all the pieces you need in one place.
+
+I’m **not** touching your existing CSV reader / XML writer / PathConfig / CosStorageService / PGPDecrypt logic. Where you already have an implementation (decrypt, unzip, validate), I just call your existing methods.
+
+---
+
+## 1. Bundle model
+
+```java
+// package com.bnpp.pf.einvoice.connect.batch.model;
+
+import java.io.File;
+import java.nio.file.Path;
+
+public class InvoiceBundle {
+
+    private final String baseName;             // e.g. invoice_123
+    private final File pgpFile;               // local .zip.pgp
+    private final File zipFile;               // local .zip
+    private final Path xmlPath;               // extracted XML
+    private final Path pdfPath;               // extracted PDF
+    private final String processedPgpCosKey;  // processed/<file>.zip.pgp in COS
+
+    public InvoiceBundle(String baseName,
+                         File pgpFile,
+                         File zipFile,
+                         Path xmlPath,
+                         Path pdfPath,
+                         String processedPgpCosKey) {
+        this.baseName = baseName;
+        this.pgpFile = pgpFile;
+        this.zipFile = zipFile;
+        this.xmlPath = xmlPath;
+        this.pdfPath = pdfPath;
+        this.processedPgpCosKey = processedPgpCosKey;
+    }
+
+    public String getBaseName() {
+        return baseName;
+    }
+
+    public File getPgpFile() {
+        return pgpFile;
+    }
+
+    public File getZipFile() {
+        return zipFile;
+    }
+
+    public Path getXmlPath() {
+        return xmlPath;
+    }
+
+    public Path getPdfPath() {
+        return pdfPath;
+    }
+
+    public String getProcessedPgpCosKey() {
+        return processedPgpCosKey;
+    }
+}
+```
+
+---
+
+## 2. FetchDecryptUnzipTasklet – EARLY extraction + register bundles
+
+This replaces the `execute` of your existing `FetchDecryptUnzipTasklet`.
+Keep your existing `decryptFile(...)`, `extract(...)`, `validateFile(...)` bodies.
+
+```java
+// package com.bnpp.pf.einvoice.connect.batch.tasklet;
+
+import com.bnpp.pf.einvoice.connect.batch.cos.CosProcessedContextSupport;
+import com.bnpp.pf.einvoice.connect.batch.model.InvoiceBundle;
+import com.bnpp.pf.einvoice.connect.config.PathConfig;
+import com.bnpp.pf.einvoice.connect.service.CosStorageService;
+import com.bnpp.pf.einvoice.connect.service.PGPDecrypt;
+import org.springframework.batch.core.*;
+import org.springframework.batch.core.configuration.annotation.StepScope;
+import org.springframework.batch.core.scope.context.ChunkContext;
+import org.springframework.batch.core.step.tasklet.Tasklet;
+import org.springframework.batch.repeat.RepeatStatus;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.Stream;
+
+@Component
+@StepScope
+public class FetchDecryptUnzipTasklet
+        implements Tasklet, StepExecutionListener, CosProcessedContextSupport {
+
+    private final CosStorageService cosStorageService;
+    private final PGPDecrypt pgpDecrypt;
+    private final PathConfig pathConfig;
+
+    private StepExecution stepExecution;
+
+    @Value("#{jobParameters['jobType'] ?: 'xml'}")
+    private String jobType; // "xml" or "csv"
+
+    // COS prefix where processed PGP files live, adapt if needed
+    private final String processedPrefix = "processed/";
+
+    public FetchDecryptUnzipTasklet(CosStorageService cosStorageService,
+                                    PGPDecrypt pgpDecrypt,
+                                    PathConfig pathConfig) {
+        this.cosStorageService = cosStorageService;
+        this.pgpDecrypt = pgpDecrypt;
+        this.pathConfig = pathConfig;
+    }
+
+    @Override
+    public void beforeStep(StepExecution stepExecution) {
+        this.stepExecution = stepExecution;
+    }
+
+    @Override
+    public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext) throws Exception {
+        // 1. Fetch encrypted .zip.pgp files from COS into local temp
+        List<File> encryptedFiles = cosStorageService.fetchEncryptedFiles(jobType);
+
+        List<InvoiceBundle> bundles = new ArrayList<>();
+
+        Path unzippedBaseDir = pathConfig.getUnzipped(); // e.g. ${java.io.tmpdir}/alphacredit/unzipped
+        Files.createDirectories(unzippedBaseDir);
+
+        for (File pgpFile : encryptedFiles) {
+            String fileName = pgpFile.getName();       // e.g. something.zip.pgp (name may not match XML/PDF)
+            String baseName = fileName.replaceFirst("\\.zip\\.pgp$", "");
+            String processedPgpKey = processedPrefix + fileName;
+
+            try {
+                // 2. Decrypt → .zip
+                File zipFile = decryptFile(pgpFile);   // use your existing implementation
+
+                // 3. Extract XML + PDF into a bundle-specific directory
+                Path bundleOutDir = unzippedBaseDir.resolve(baseName);
+                Files.createDirectories(bundleOutDir);
+
+                // Your existing unzip method; just change target dir to bundleOutDir
+                extract(zipFile.toPath(), bundleOutDir);
+
+                // 4. Locate XML and PDF (same name or not, we do not care here)
+                Path xmlPath = null;
+                Path pdfPath = null;
+
+                try (Stream<Path> walk = Files.walk(bundleOutDir, 1)) {
+                    for (Path p : (Iterable<Path>) walk::iterator) {
+                        if (Files.isRegularFile(p)) {
+                            String n = p.getFileName().toString().toLowerCase();
+                            if (n.endsWith(".xml")) {
+                                xmlPath = p;
+                            } else if (n.endsWith(".pdf")) {
+                                pdfPath = p;
+                            }
+                        }
+                    }
+                }
+
+                // 5. Your existing validation (null checks, etc.)
+                validateFile(xmlPath, pdfPath);
+
+                // 6. Build bundle
+                InvoiceBundle bundle =
+                        new InvoiceBundle(baseName, pgpFile, zipFile, xmlPath, pdfPath, processedPgpKey);
+                bundles.add(bundle);
+
+                // 7. Register processed COS key for later cleanup
+                addProcessedKey(stepExecution, processedPgpKey);
+
+            } catch (Exception e) {
+                // Any failure during decrypt/unzip/validate → move .zip.pgp to FAILED in COS
+                moveToFailedInCos(processedPgpKey, pgpFile);
+                // Do NOT fail the tasklet; continue with the next file
+            }
+        }
+
+        // 8. Store bundles list into JobExecutionContext for the reader
+        ExecutionContext jobCtx = stepExecution.getJobExecution().getExecutionContext();
+        jobCtx.put("invoiceBundles", bundles);
+
+        return RepeatStatus.FINISHED;
+    }
+
+    private void moveToFailedInCos(String processedPgpKey, File pgpFile) {
+        try {
+            String failedPgpKey = processedPgpKey.replaceFirst("^processed/", "failed/");
+            cosStorageService.moveFile(processedPgpKey, failedPgpKey);
+            // optional: also upload decrypted zip here if you want, but we usually do that in the SkipListener
+        } catch (Exception ex) {
+            // log if you like
+        }
+    }
+
+    @Override
+    public ExitStatus afterStep(StepExecution stepExecution) {
+        return ExitStatus.COMPLETED;
+    }
+
+    // ---------------------------------------------------------
+    // Keep your existing implementations of these methods
+    // (I only show signatures so this compiles)
+    // ---------------------------------------------------------
+
+    private File decryptFile(File pgpFile) throws IOException {
+        // Use your existing decrypt implementation:
+        // - create decrypted File (strip .pgp)
+        // - pgpDecrypt.decrypt(InputStream, OutputStream)
+        // - return decrypted File
+        throw new UnsupportedOperationException("Use your existing decryptFile implementation here");
+    }
+
+    private void extract(Path zipFile, Path targetDir) throws IOException {
+        // Use your existing safe unzip implementation that extracts zipFile into targetDir
+        throw new UnsupportedOperationException("Use your existing extract implementation here");
+    }
+
+    private void validateFile(Path xmlPath, Path pdfPath) {
+        // Use your existing validation for "one XML + one PDF present" etc.
+        // Throw an exception if invalid.
+        throw new UnsupportedOperationException("Use your existing validateFile implementation here");
+    }
+}
+```
+
+> In your project, replace the `throw new UnsupportedOperationException(...)` bodies with the current bodies from your existing `FetchDecryptUnzipTasklet` methods.
+
+---
+
+## 3. Bundle reader – read from job context
+
+```java
+// package com.bnpp.pf.einvoice.connect.batch.reader;
+
+import com.bnpp.pf.einvoice.connect.batch.model.InvoiceBundle;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.StepExecution;
+import org.springframework.batch.core.StepExecutionListener;
+import org.springframework.batch.core.ExitStatus;
+import org.springframework.batch.core.configuration.annotation.StepScope;
+import org.springframework.batch.item.ItemReader;
+import org.springframework.stereotype.Component;
+
+import java.util.Iterator;
+import java.util.List;
+
+@Component
+@StepScope
+public class InvoiceBundleItemReader
+        implements ItemReader<InvoiceBundle>, StepExecutionListener {
+
+    private Iterator<InvoiceBundle> iterator;
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public void beforeStep(StepExecution stepExecution) {
+        JobExecution jobExecution = stepExecution.getJobExecution();
+        List<InvoiceBundle> bundles =
+                (List<InvoiceBundle>) jobExecution.getExecutionContext().get("invoiceBundles");
+        this.iterator = (bundles != null ? bundles.iterator() : List.<InvoiceBundle>of().iterator());
+    }
+
+    @Override
+    public ExitStatus afterStep(StepExecution stepExecution) {
+        return ExitStatus.COMPLETED;
+    }
+
+    @Override
+    public InvoiceBundle read() {
+        if (iterator != null && iterator.hasNext()) {
+            return iterator.next();
+        }
+        return null; // end of stream
+    }
+}
+```
+
+---
+
+## 4. BundleValidationException
+
+```java
+// package com.bnpp.pf.einvoice.connect.batch.exception;
+
+public class BundleValidationException extends Exception {
+
+    public BundleValidationException(String message, Throwable cause) {
+        super(message, cause);
+    }
+}
+```
+
+---
+
+## 5. Processor – XSD validation on XML
+
+This is where XML is validated. If invalid, we throw `BundleValidationException`, which Spring Batch will treat as skippable.
+
+```java
+// package com.bnpp.pf.einvoice.connect.batch.processor;
+
+import com.bnpp.pf.einvoice.connect.batch.exception.BundleValidationException;
+import com.bnpp.pf.einvoice.connect.batch.model.InvoiceBundle;
+import org.springframework.batch.item.ItemProcessor;
+
+import javax.xml.XMLConstants;
+import javax.xml.bind.JAXBContext;
+import javax.xml.bind.Unmarshaller;
+import javax.xml.transform.stream.StreamSource;
+import javax.xml.validation.Schema;
+import javax.xml.validation.SchemaFactory;
+import java.nio.file.Files;
+
+public class InvoiceBundleProcessor implements ItemProcessor<InvoiceBundle, Object> {
+
+    private final Unmarshaller unmarshaller;
+    private final Schema schema;
+
+    public InvoiceBundleProcessor() throws Exception {
+        // Adapt: use your actual UBL classes
+        JAXBContext jaxbContext = JAXBContext.newInstance(
+                oasis.names.specification.ubl.schema.xsd.invoice_2.InvoiceType.class,
+                oasis.names.specification.ubl.schema.xsd.creditnote_2.CreditNoteType.class
+        );
+        this.unmarshaller = jaxbContext.createUnmarshaller();
+
+        SchemaFactory sf = SchemaFactory.newInstance(XMLConstants.W3C_XML_SCHEMA_NS_URI);
+        // Adjust XSD location to your setup
+        this.schema = sf.newSchema(getClass().getResource("/xsd/UBL-Invoice-2.1.xsd"));
+        this.unmarshaller.setSchema(schema);
+    }
+
+    @Override
+    public Object process(InvoiceBundle bundle) throws Exception {
+        try (var in = Files.newInputStream(bundle.getXmlPath())) {
+            // XSD validation happens because schema is attached to unmarshaller
+            Object ubl = unmarshaller.unmarshal(new StreamSource(in));
+            // You can return InvoiceType / CreditNoteType or map to your DTO if writer expects something else.
+            return ubl;
+        } catch (Exception e) {
+            // Tell Spring Batch to skip this bundle
+            throw new BundleValidationException("XML validation failed for " + bundle.getBaseName(), e);
+        }
+    }
+}
+```
+
+---
+
+## 6. SkipListener – move .zip.pgp + .zip to FAILED on skip
+
+This is the piece you were focusing on: **based on the item** (the bundle) we move the COS files when the processor fails (invalid XML). The item is **never null** in `onSkipInProcess`.
+
+```java
+// package com.bnpp.pf.einvoice.connect.batch.listener;
+
+import com.bnpp.pf.einvoice.connect.batch.model.InvoiceBundle;
+import com.bnpp.pf.einvoice.connect.service.CosStorageService;
+import org.springframework.batch.core.SkipListener;
+
+import java.io.File;
+
+public class InvoiceBundleSkipListener implements SkipListener<InvoiceBundle, Object> {
+
+    private final CosStorageService cosStorageService;
+    private final String failedPrefix = "failed/"; // adjust if needed
+
+    public InvoiceBundleSkipListener(CosStorageService cosStorageService) {
+        this.cosStorageService = cosStorageService;
+    }
+
+    @Override
+    public void onSkipInRead(Throwable t) {
+        // nothing – no item available here, so we cannot know which file to move
+    }
+
+    @Override
+    public void onSkipInProcess(InvoiceBundle bundle, Throwable t) {
+        // XML invalid → move both .zip.pgp + decrypted .zip to FAILED
+        try {
+            String processedPgpKey = bundle.getProcessedPgpCosKey();
+            String failedPgpKey = processedPgpKey.replaceFirst("^processed/", failedPrefix);
+
+            // Move PGP in COS: processed/<file>.zip.pgp → failed/<file>.zip.pgp
+            cosStorageService.moveFile(processedPgpKey, failedPgpKey);
+
+            // Also upload the decrypted zip to FAILED
+            File zipFile = bundle.getZipFile();
+            if (zipFile != null && zipFile.exists()) {
+                cosStorageService.uploadFile(failedPrefix, zipFile); // FAILED/<zipFile.getName()>
+            }
+
+        } catch (Exception ex) {
+            // log if you want, but do not fail the batch
+        }
+    }
+
+    @Override
+    public void onSkipInWrite(Object item, Throwable t) {
+        // optional – you can log here if you want
+    }
+}
+```
+
+Note: this does not depend on XML/PDF file names matching the `.zip.pgp`. We always move the COS object for the PGP using the key recorded in the bundle.
+
+---
+
+## 7. Step configuration – wire everything together
+
+Finally, the step that consumes bundles:
+
+```java
+// package com.bnpp.pf.einvoice.connect.batch.config;
+
+import com.bnpp.pf.einvoice.connect.batch.exception.BundleValidationException;
+import com.bnpp.pf.einvoice.connect.batch.listener.InvoiceBundleSkipListener;
+import com.bnpp.pf.einvoice.connect.batch.model.InvoiceBundle;
+import com.bnpp.pf.einvoice.connect.batch.processor.InvoiceBundleProcessor;
+import com.bnpp.pf.einvoice.connect.batch.reader.InvoiceBundleItemReader;
+import com.bnpp.pf.einvoice.connect.service.CosStorageService;
+import org.springframework.batch.core.Step;
+import org.springframework.batch.core.job.builder.JobBuilder;
+import org.springframework.batch.core.repository.JobRepository;
+import org.springframework.batch.core.step.builder.StepBuilder;
+import org.springframework.batch.item.ItemWriter;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.transaction.PlatformTransactionManager;
+
+@Configuration
+public class BundleProcessingStepConfig {
+
+    @Bean
+    public InvoiceBundleProcessor invoiceBundleProcessor() throws Exception {
+        return new InvoiceBundleProcessor();
+    }
+
+    @Bean
+    public Step processBundlesStep(JobRepository jobRepository,
+                                   PlatformTransactionManager transactionManager,
+                                   InvoiceBundleItemReader bundleReader,
+                                   InvoiceBundleProcessor bundleProcessor,
+                                   ItemWriter<Object> xmlWriter,      // your existing XML writer
+                                   CosStorageService cosStorageService) {
+
+        return new StepBuilder("processBundlesStep", jobRepository)
+                .<InvoiceBundle, Object>chunk(10, transactionManager)
+                .reader(bundleReader)
+                .processor(bundleProcessor)
+                .writer(xmlWriter)
+                .faultTolerant()
+                .skip(BundleValidationException.class)
+                .skipLimit(Integer.MAX_VALUE)
+                .listener(new InvoiceBundleSkipListener(cosStorageService))
+                .build();
+    }
+}
+```
+
+You then plug `processBundlesStep` into your job (instead of directly reading XML files from the unzip directory).
+
+---
+
+If you paste these classes in and swap the three `UnsupportedOperationException` bodies with your existing decrypt / unzip / validate logic, you’ll have:
+
+* early decrypt + unzip
+* per-bundle identity (so `item` in the listener tells you exactly which COS keys to move)
+* skip-on-XML-failure with `.zip.pgp` + `.zip` moved to `failed/`
+* your existing writer untouched.
+
+
+------------------df-dfd-fd-fd-----
 Here’s how I’d adapt your existing FetchDecryptUnzipTasklet without touching the Fortify-fixed extract(...) logic.
 I’ll keep your unzip code as is and only add the minimal lines for:
 	•	per-file “bundle failed → move .zip.pgp + .zip to COS/failed”
