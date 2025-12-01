@@ -1,3 +1,300 @@
+Ahh, got it — the **“cannot resolve method”** is because in *your* Spring Batch version,
+`FlatFileParseException` **does not have** `getInputResource()` – so the IDE is right to complain.
+
+So let’s fix this properly **without** relying on that method, and still:
+
+* make the **reader** fail-safe (skip + move file), and
+* make the **writer** fail-safe (skip + move file),
+* using your existing **AC_1_Dec `SkipLoggingListener`**.
+
+---
+
+## 1️⃣ Why `ffpe.getInputResource()` doesn’t work
+
+In the Spring Batch 4.x APIs, `FlatFileParseException` only gives you things like:
+
+* `getInput()` (the line content)
+* `getLineNumber()`
+
+It **does not expose** the `Resource` directly, so there is no `getInputResource()` method to call. That’s why you see *“cannot resolve method”*.
+
+So we need another way to know **which XML file** failed during **read**.
+
+---
+
+## 2️⃣ Recommended pattern: carry the filename in the exception
+
+You already have the pattern in the older design: you wrap errors in a custom exception that **contains the file name** (e.g. `BadXmlException`, `ValidationException`).
+
+Let’s use that idea here:
+
+### 2.1. Define `BadXmlException` with a `xmlFileName` field
+
+```java
+public class BadXmlException extends RuntimeException {
+
+    private final String xmlFileName;
+
+    public BadXmlException(String message, String xmlFileName, Throwable cause) {
+        super(message, cause);
+        this.xmlFileName = xmlFileName;
+    }
+
+    public BadXmlException(String message, String xmlFileName) {
+        super(message);
+        this.xmlFileName = xmlFileName;
+    }
+
+    public String getXmlFileName() {
+        return xmlFileName;
+    }
+}
+```
+
+---
+
+### 2.2. In your **reader**, wrap parse errors with the filename
+
+Where your reader is currently doing something like:
+
+```java
+public Object read() throws Exception {
+    // ...
+    try (InputStream in = resource.getInputStream()) {
+        // parse XML, unmarshal, etc.
+    } catch (Exception e) {
+        // OLD:
+        // throw e;
+        // NEW:
+        String fileName = resource != null ? resource.getFilename() : null;
+        throw new BadXmlException("Failed to parse XML: " + fileName, fileName, e);
+    }
+}
+```
+
+Now, when the reader fails, Spring Batch sees `BadXmlException`, and:
+
+* your **skip policy / skip()** allows it to be skipped, and
+* your **SkipLoggingListener.onSkipInRead** gets a `BadXmlException` that has `getXmlFileName()`.
+
+---
+
+### 2.3. In your **writer**, do the same for write failures
+
+If you’re using the `SafeUblWriter` pattern from earlier (or something similar), wrap write errors as `BadXmlException` as well, including the source filename (which you already carry in your item or context). 
+
+Example pattern:
+
+```java
+catch (Exception e) {
+    log.error("Failed to write XML for file '{}': {}", source, e.getMessage(), e);
+    throw new BadXmlException("Write failed for " + source, source, e);
+}
+```
+
+Now both **read** and **write** failures use the same exception type and carry the XML file name.
+
+---
+
+## 3️⃣ Update your existing `SkipLoggingListener` from AC_1_Dec
+
+Starting from your AC_1_Dec version (which already moves `.zip.pgp` + `.zip` based on XML name) , we just add logic for:
+
+* **onSkipInRead** → use `BadXmlException` to get the XML file name, then move bundle
+* **onSkipInWrite** → use the item *or* `BadXmlException`
+
+Here is a **drop-in** version that avoids `getInputResource()` and works in your setup:
+
+```java
+@Slf4j
+public class SkipLoggingListener implements SkipListener<Object, Object> {
+
+    private final CosStorageService cosStorageService;
+
+    public SkipLoggingListener(CosStorageService cosStorageService) {
+        this.cosStorageService = cosStorageService;
+    }
+
+    @Override
+    public void onSkipInRead(Throwable t) {
+        log.warn("Skipped XML during read: {}", t != null ? t.getMessage() : "unknown");
+
+        String xmlFileName = resolveXmlFileNameFromThrowable(t);
+        if (xmlFileName != null) {
+            moveBundleToFailed(xmlFileName);
+        }
+    }
+
+    @Override
+    public void onSkipInWrite(Object item, Throwable t) {
+        log.warn("Skipped XML during write: item={} - {}",
+                 item,
+                 t != null ? t.getMessage() : "unknown");
+
+        // 1) Try to resolve from item (for writer skips where item carries info)
+        String xmlFileName = resolveXmlFileName(item);
+
+        // 2) If that fails, fall back to exception (BadXmlException)
+        if (xmlFileName == null) {
+            xmlFileName = resolveXmlFileNameFromThrowable(t);
+        }
+
+        if (xmlFileName != null) {
+            moveBundleToFailed(xmlFileName);
+        }
+    }
+
+    @Override
+    public void onSkipInProcess(Object item, Throwable t) {
+        // if you ever add a processor, same logic applies
+        log.warn("Skipped XML during process: item={} - {}",
+                 item,
+                 t != null ? t.getMessage() : "unknown");
+
+        String xmlFileName = resolveXmlFileName(item);
+        if (xmlFileName == null) {
+            xmlFileName = resolveXmlFileNameFromThrowable(t);
+        }
+
+        if (xmlFileName != null) {
+            moveBundleToFailed(xmlFileName);
+        }
+    }
+
+    /**
+     * For writer/processor skips: resolve XML filename from the *item*.
+     * This is your existing logic from AC_1_Dec.
+     */
+    private String resolveXmlFileName(Object item) {
+        if (item == null) {
+            return null;
+        }
+        if (item instanceof java.io.File f) {
+            return f.getName();
+        }
+        if (item instanceof java.nio.file.Path p) {
+            return p.getFileName().toString();
+        }
+        if (item instanceof org.springframework.core.io.Resource res) {
+            return res.getFilename();
+        }
+        // if your item is a DTO that has xmlFileName, handle it here:
+        // if (item instanceof MyDto dto) return dto.getXmlFileName();
+        return null;
+    }
+
+    /**
+     * For read skips: resolve XML filename from the *exception*, e.g. BadXmlException.
+     * No FlatFileParseException.getInputResource() needed.
+     */
+    private String resolveXmlFileNameFromThrowable(Throwable t) {
+        if (t == null) {
+            return null;
+        }
+
+        // Direct BadXmlException
+        if (t instanceof BadXmlException be) {
+            return be.getXmlFileName();
+        }
+
+        // If wrapped, dig one level into the cause
+        Throwable cause = t.getCause();
+        if (cause instanceof BadXmlException be) {
+            return be.getXmlFileName();
+        }
+
+        // Fallback: try to parse name from message if you want (optional)
+        // Example: "Failed to parse XML: invoice123.xml"
+        String msg = t.getMessage();
+        if (msg != null && msg.contains(".xml")) {
+            int idx = msg.indexOf(".xml");
+            int start = msg.lastIndexOf(' ', idx);
+            if (start == -1) {
+                start = 0;
+            } else {
+                start = start + 1;
+            }
+            return msg.substring(start, idx + 4).trim();
+        }
+
+        return null;
+    }
+
+    /**
+     * Same moveBundleToFailed(...) you already had in AC_1_Dec.
+     * Takes xmlFileName like "invoice_123.xml" and moves:
+     * processed/invoice_123.zip.pgp -> failed/invoice_123.zip.pgp
+     * processed/invoice_123.zip     -> failed/invoice_123.zip
+     */
+    private void moveBundleToFailed(String xmlFileName) {
+        if (xmlFileName == null || !xmlFileName.endsWith(".xml")) {
+            log.warn("Unable to resolve XML file name for moving bundle: {}", xmlFileName);
+            return;
+        }
+
+        String base = xmlFileName.substring(0, xmlFileName.length() - 4); // strip .xml
+
+        String processedPgpKey = "processed/" + base + ".zip.pgp";
+        String processedZipKey = "processed/" + base + ".zip";
+        String failedPgpKey    = "failed/"   + base + ".zip.pgp";
+        String failedZipKey    = "failed/"   + base + ".zip";
+
+        try {
+            if (cosStorageService.exists(processedPgpKey)) {
+                cosStorageService.moveFile(processedPgpKey, failedPgpKey);
+                log.info("Moved {} -> {}", processedPgpKey, failedPgpKey);
+            } else {
+                log.debug("No processed PGP key {} found; nothing to move", processedPgpKey);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to move {} to {}: {}", processedPgpKey, failedPgpKey, e.getMessage());
+        }
+
+        try {
+            if (cosStorageService.exists(processedZipKey)) {
+                cosStorageService.moveFile(processedZipKey, failedZipKey);
+                log.info("Moved {} -> {}", processedZipKey, failedZipKey);
+            } else {
+                log.debug("No processed ZIP key {} found; nothing to move", processedZipKey);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to move {} to {}: {}", processedZipKey, failedZipKey, e.getMessage());
+        }
+    }
+}
+```
+
+This version:
+
+* ✅ Compiles (no `getInputResource()` call)
+* ✅ Moves bundles when the **reader fails** (using `BadXmlException`)
+* ✅ Moves bundles when the **writer fails** (using item → filename, or fallback to exception)
+* ✅ Still matches the Cos path logic from AC_1_Dec (`processed/…` → `failed/…`).
+
+---
+
+## 4️⃣ Don’t forget step config
+
+To make both reader + writer failures **skippable** (so the listener is invoked), your step needs something like:
+
+```java
+.stepBuilderFactory.get("xmlInvoiceStep")
+    .<Object, Object>chunk(10)
+    .reader(xmlReader)
+    .writer(xmlWriter)
+    .faultTolerant()
+    .skip(BadXmlException.class)
+    .skipLimit(Integer.MAX_VALUE)
+    .listener(skipLoggingListener)
+    .build();
+```
+
+---
+
+If you paste your current reader `catch` block and your `SkipLoggingListener` class, I can adjust them exactly to your package names so you can literally copy–paste into the project.
+
+
+---------------------------------
 Perfect, let's anchor everything on the **existing `SkipLoggingListener` from AC_1_Dec** and tweak it so:
 
 * It **handles both reader and writer failures**
