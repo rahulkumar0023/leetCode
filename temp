@@ -1,3 +1,254 @@
+Here’s how I’d adapt your existing FetchDecryptUnzipTasklet without touching the Fortify-fixed extract(...) logic.
+I’ll keep your unzip code as is and only add the minimal lines for:
+	•	per-file “bundle failed → move .zip.pgp + .zip to COS/failed”
+	•	still using your safe extract(...), validateFile(...), getOutputPath(...).
+
+I’ll show the whole class so you can copy–paste, and I’ll mark only the new/changed bits with // NEW comments.
+
+@Slf4j
+public class FetchDecryptUnzipTasklet implements Tasklet, StepExecutionListener {
+
+    @Value("#{jobParameters['jobType']}")
+    private String jobType;
+
+    private final CosStorageService cosStorageService;
+    private final PGPDecrypt pgpDecrypt;
+    private final PathConfig pathConfig;
+
+    private StepExecution stepExecution;
+
+    public FetchDecryptUnzipTasklet(CosStorageService cosStorageService,
+                                    PGPDecrypt pgpDecrypt,
+                                    PathConfig pathConfig) {
+        this.cosStorageService = cosStorageService;
+        this.pgpDecrypt = pgpDecrypt;
+        this.pathConfig = pathConfig;
+    }
+
+    @Override
+    public void beforeStep(StepExecution stepExecution) {
+        this.stepExecution = stepExecution;
+    }
+
+    @Override
+    public RepeatStatus execute(StepContribution contribution,
+                                ChunkContext chunkContext) {
+        log.info("FetchDecryptUnzipTasklet started");
+
+        try {
+            List<File> encryptedFiles = cosStorageService.fetchEncryptedFiles(jobType);
+            if (encryptedFiles.isEmpty()) {
+                log.info("No encrypted files found for jobType={}", jobType);
+                return RepeatStatus.FINISHED;
+            }
+
+            for (File encrypted : encryptedFiles) {
+                String encryptedName = encrypted.getName();
+                log.info("Encrypted file name and job type: {} | {}", encryptedName, jobType);
+
+                // base dir already Fortify-fixed in your PathConfig
+                StringBuilder unzipBaseDir = new StringBuilder(pathConfig.getUnzipped().getParent());
+
+                try {
+                    // ─────────────────────────────────────────────
+                    //  PER-BUNDLE TRY/CATCH – if *anything* fails,
+                    //  we move .zip.pgp + .zip to COS/failed
+                    // ─────────────────────────────────────────────
+                    File decryptedZip;
+
+                    if ("csv".equals(jobType) && encryptedName.contains("_csv")) {
+                        stepExecution.getJobExecution().getExecutionContext().put("hasCsv", Boolean.TRUE);
+                        addProcessedKey(stepExecution, encryptedName);         // optional if you track keys
+                        decryptedZip = decryptFile(encrypted);
+                        extract(decryptedZip.toPath(),
+                                Paths.get(unzipBaseDir.append("/csv").toString()));
+
+                    } else if ("xml".equals(jobType)
+                            && encryptedName.toLowerCase().contains("_xml")) {
+
+                        stepExecution.getJobExecution().getExecutionContext().put("hasXml", Boolean.TRUE);
+                        addProcessedKey(stepExecution, encryptedName);         // optional if you track keys
+                        decryptedZip = decryptFile(encrypted);
+                        extract(decryptedZip.toPath(),
+                                Paths.get(unzipBaseDir.append("/xml").toString()));
+
+                    } else {
+                        log.info("Job type and file type is NOT a match, skipping decrypt for {}", encryptedName);
+                        continue;
+                    }
+
+                } catch (Exception bundleEx) {  // NEW – per-file failure
+                    log.error("Bundle failed for {} - moving to COS/failed. Error={}",
+                              encryptedName, bundleEx.getMessage());
+
+                    // 1) move original .zip.pgp from processed → failed
+                    try {
+                        String sourceKey = "processed/" + encryptedName;   // same key you used when fetching
+                        String failedKey  = "failed/" + encryptedName;
+                        cosStorageService.moveFile(sourceKey, failedKey);
+                    } catch (Exception ignored) {
+                        log.warn("Failed to move encrypted file {} to failed", encryptedName);
+                    }
+
+                    // 2) also upload decrypted .zip to failed (if it exists locally)
+                    try {
+                        File zipFile = new File(encrypted.getParent(),
+                                                encryptedName.replace(".pgp", ""));
+                        if (zipFile.exists()) {
+                            String failedZipKey = "failed/" + zipFile.getName();
+                            cosStorageService.uploadFile(failedZipKey, zipFile);
+                        }
+                    } catch (Exception ignored) {
+                        log.warn("Failed to upload decrypted zip for {} to failed", encryptedName);
+                    }
+
+                    // continue with next file – we do NOT fail the whole batch
+                }
+            }
+
+        } catch (Exception e) {
+            log.error("FetchDecryptUnzipTasklet failed: {}", e.getMessage());
+            throw new InvoiceProcessingException("Error occurred while fetching encrypted files", e);
+        }
+
+        log.info("FetchDecryptUnzipTasklet completed");
+        return RepeatStatus.FINISHED;
+    }
+
+    // ─────────────────────────────────────────────────────
+    //  Your existing decryptFile(...) – unchanged
+    // ─────────────────────────────────────────────────────
+    private File decryptFile(File encryptedFile) throws IOException {
+        log.info("Decrypt file started");
+        log.info("Decrypting file: {}", encryptedFile.getAbsolutePath());
+
+        File decrypted = new File(
+                encryptedFile.getParentFile(),
+                encryptedFile.getName().replace(".pgp", "")
+        );
+
+        pgpDecrypt.decrypt(new FileInputStream(encryptedFile),
+                           new FileOutputStream(decrypted));
+
+        log.info("Decrypt file completed: {}", decrypted.getName());
+        return decrypted;
+    }
+
+    // ─────────────────────────────────────────────────────
+    //  Your Fortify-fixed extract(...) – kept AS IS
+    // ─────────────────────────────────────────────────────
+    public static void extract(Path zipFile, Path targetDir) throws IOException {
+
+        validateFile(zipFile, targetDir); // your existing validation
+
+        Files.createDirectories(targetDir);
+        Path canonicalTarget = targetDir.toRealPath(LinkOption.NOFOLLOW_LINKS);
+
+        final int MAX_ENTRIES      = 10_000;
+        final long MAX_ENTRY_SIZE  = 100_000_000L; // 100 MB per file
+        final long MAX_TOTAL_SIZE  = 1_000_000_000L; // 1 GB total
+
+        long totalSize = 0L;
+        int entryCount = 0;
+
+        try (ZipFile zip = ZipFile.builder()
+                .setFile(zipFile.toFile())
+                .setCharset(StandardCharsets.UTF_8)
+                .get()) {
+
+            Enumeration<ZipArchiveEntry> entries = zip.getEntries();
+
+            while (entries.hasMoreElements()) {
+                ZipArchiveEntry entry = entries.nextElement();
+                if (entry.isDirectory()) {
+                    continue;
+                }
+
+                Path outputPath = getOutputPath(entry, canonicalTarget);
+                Files.createDirectories(outputPath.getParent());
+
+                long entryBytes = 0L;
+                int bytesRead;
+                byte[] buffer = new byte[4096];
+
+                try (InputStream is = zip.getInputStream(entry);
+                     OutputStream os = new BufferedOutputStream(
+                             Files.newOutputStream(outputPath,
+                                                   StandardOpenOption.CREATE,
+                                                   StandardOpenOption.TRUNCATE_EXISTING))) {
+
+                    while ((bytesRead = is.read(buffer)) != -1) {
+                        os.write(buffer, 0, bytesRead);
+                        entryBytes += bytesRead;
+                    }
+
+                    if (entryBytes > MAX_ENTRY_SIZE) {
+                        throw new InvoiceProcessingException("Entry too large: " + entry.getName());
+                    }
+                    if (totalSize + entryBytes > MAX_TOTAL_SIZE) {
+                        throw new InvoiceProcessingException("Archive too large");
+                    }
+                }
+
+                totalSize += entryBytes;
+                entryCount++;
+
+                if (entryCount > MAX_ENTRIES) {
+                    throw new InvoiceProcessingException("Too many entries in archive");
+                }
+
+                log.info("Extracted {} ({} bytes)", entry.getName(), entryBytes);
+            }
+        }
+
+        log.info("Extraction completed: {} entries, {} bytes total", entryCount, totalSize);
+    }
+
+    // your existing validateFile(...) – unchanged
+    private static void validateFile(Path zipFile, Path targetDir) {
+        if (zipFile == null || targetDir == null) {
+            throw new InvoiceProcessingException("Invalid arguments: zipFile or targetDir is null");
+        }
+        if (!Files.isReadable(zipFile) || !Files.isRegularFile(zipFile)) {
+            throw new InvoiceProcessingException("ZIP file not found or not readable: " + zipFile);
+        }
+    }
+
+    // your existing getOutputPath(...) – unchanged
+    static Path getOutputPath(ZipArchiveEntry entry, Path canonicalTarget) {
+        String name = entry.getName() == null ? null
+                : entry.getName().replace('\\', '/');
+
+        if (name == null || name.isBlank()
+                || name.contains("..")
+                || name.startsWith("/")
+                || name.startsWith("\\")) {
+            throw new InvoiceProcessingException("Unsafe entry name: " + name);
+        }
+
+        Path outputPath = canonicalTarget.resolve(name).normalize();
+        if (!outputPath.startsWith(canonicalTarget)) {
+            throw new InvoiceProcessingException("Entry escapes target directory: " + name);
+        }
+        return outputPath;
+    }
+}
+
+What this gives you
+	•	Fortify-safe unzip: extract, validateFile, getOutputPath are exactly your hardened version.
+	•	Per-file failure handling:
+	•	If decrypt or extract fails → we do not fail the batch.
+	•	We move processed/<name>.zip.pgp to failed/<name>.zip.pgp.
+	•	We also upload local <name>.zip to failed/<name>.zip if it exists.
+	•	Good bundles continue: good files still decrypt + extract and flow into your existing XML / credit-note pipeline.
+
+If you paste your exact field names for pathConfig.getUnzipped() or your COS key prefixes are slightly different, just adjust the "processed/" / "failed/" strings, but the structure above will drop straight into your current class.
+
+
+
+
+
+------------------////----------fdd-f----------
 Here’s a clean, copy-pasteable version of the final “bundle + skip listener” setup that’s in AC_1_Dec, with all the pieces you need in one place.
 
 I’m **not** touching your existing CSV reader / XML writer / PathConfig / CosStorageService / PGPDecrypt logic. Where you already have an implementation (decrypt, unzip, validate), I just call your existing methods.
