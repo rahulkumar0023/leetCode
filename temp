@@ -1,3 +1,387 @@
+Nice, thanks for the extra details + screenshots — that helps a lot.
+
+You’re right: to fully cover decrypt failures + XML failures and handle the “XML name can be different from zip name” case, we really do need a small InvoiceBundle mapping.
+
+Below is exactly what you asked for:
+	•	keep your existing Fortify-safe zip logic as-is
+	•	only add lines where needed
+	•	introduce a Lombok-based InvoiceBundle
+	•	wire it into FetchDecryptUnzipTasklet and your SkipLoggingListener so that:
+	•	decrypt/unzip failures → .zip.pgp + .zip go to failed/
+	•	XML failures in processor/writer → same .zip.pgp + .zip also go to failed/ (even if XML name ≠ zip name)
+
+⸻
+
+1️⃣ New InvoiceBundle class (Lombok, tiny)
+
+// package com.bnpp.pf.einvoice.connect.batch.model;
+
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+
+@Getter
+@AllArgsConstructor
+public class InvoiceBundle {
+
+    /**
+     * The *file name* of the XML inside the ZIP (no path, e.g. "invoice123.xml").
+     */
+    private final String xmlFileName;
+
+    /**
+     * COS key for the encrypted PGP file, e.g. "processed/invoice_123.zip.pgp".
+     */
+    private final String processedPgpKey;
+
+    /**
+     * COS key for the decrypted ZIP file, e.g. "processed/invoice_123.zip".
+     */
+    private final String processedZipKey;
+}
+
+That’s it for the new class.
+
+⸻
+
+2️⃣ Changes in FetchDecryptUnzipTasklet
+
+We’ll:
+	1.	Keep extract(...), validateFile(...), getOutputPath(...) exactly as they are.
+	2.	Add:
+	•	a per-file try/catch (you already started this)
+	•	a small registerBundle(...) helper that:
+	•	opens the decryptedZip
+	•	finds the XML entry name
+	•	stores an InvoiceBundle in the job execution context under "invoiceBundles".
+
+2.1 At top of execute(...) – get/create bundle map in the JobExecutionContext
+
+Right after:
+
+log.info("FetchDecryptUnzipTasklet started");
+
+add:
+
+ExecutionContext jobCtx = stepExecution.getJobExecution().getExecutionContext();
+
+@SuppressWarnings("unchecked")
+Map<String, InvoiceBundle> bundleMap =
+        (Map<String, InvoiceBundle>) jobCtx.get("invoiceBundles");
+
+if (bundleMap == null) {
+    bundleMap = new HashMap<>();
+    jobCtx.put("invoiceBundles", bundleMap);
+}
+
+2.2 Update your for (File encrypted : encryptedFiles) loop
+
+You already have the inner try/catch; we just:
+	•	call registerBundle(...) after successful extract
+	•	still handle decrypt/unzip failures in the catch (move to failed/)
+
+for (File encrypted : encryptedFiles) {
+    String encryptedName = encrypted.getName();
+    log.info("Encrypted file name and job type: {} | {}", encryptedName, jobType);
+    StringBuilder unzipBaseDir = new StringBuilder(pathConfig.getUnzipped().getParent());
+
+    try {
+        File decryptedZip;
+
+        if ("csv".equals(jobType) && encryptedName.contains("_csv")) {
+            stepExecution.getJobExecution().getExecutionContext().put("hasCsv", Boolean.TRUE);
+            addProcessedKey(stepExecution, encryptedName);
+
+            decryptedZip = decryptFile(encrypted);
+            extract(decryptedZip.toPath(),
+                    Paths.get(unzipBaseDir.append("/csv").toString()));
+
+            // CSV doesn’t need bundle mapping → do nothing
+
+        } else if ("xml".equals(jobType)
+                && encryptedName.toLowerCase().contains("_xml")) {
+
+            stepExecution.getJobExecution().getExecutionContext().put("hasXml", Boolean.TRUE);
+            addProcessedKey(stepExecution, encryptedName);
+
+            decryptedZip = decryptFile(encrypted);
+            extract(decryptedZip.toPath(),
+                    Paths.get(unzipBaseDir.append("/xml").toString()));
+
+            // 🔹 NEW: register XML → PGP/ZIP mapping for this bundle
+            registerBundle(bundleMap, decryptedZip, encryptedName);
+
+        } else {
+            log.info("Job type and file type is NOT a match, skipping decrypt!!");
+        }
+
+    } catch (Exception bundleEx) {
+        log.error("Bundle failed for {} - moving to COS/failed. Error={}",
+                  encryptedName, bundleEx.getMessage());
+
+        // 1) Move .zip.pgp from processed → failed
+        try {
+            String processedPgpKey = "processed/" + encryptedName;
+            String failedPgpKey    = "failed/"    + encryptedName;
+            cosStorageService.moveFile(processedPgpKey, failedPgpKey);
+        } catch (Exception ignored) {
+            log.warn("Failed to move encrypted file {} to failed", encryptedName);
+        }
+
+        // 2) Also upload decrypted .zip to failed (if exists locally)
+        try {
+            File zipFile = new File(encrypted.getParent(),
+                                    encryptedName.replace(".pgp", ""));
+            if (zipFile.exists()) {
+                String failedZipKey = "failed/" + zipFile.getName();
+                cosStorageService.uploadFile(failedZipKey, zipFile);
+            }
+        } catch (Exception ignored) {
+            log.warn("Failed to upload decrypted zip for {} to failed", encryptedName);
+        }
+        // do NOT rethrow → next file
+    }
+}
+
+2.3 New helper in FetchDecryptUnzipTasklet: registerBundle(...)
+
+Add this inside the same class, below decryptFile(...) or wherever you like:
+
+private void registerBundle(Map<String, InvoiceBundle> bundleMap,
+                            File decryptedZip,
+                            String encryptedName) {
+    try (org.apache.commons.compress.archivers.zip.ZipFile zip =
+                 org.apache.commons.compress.archivers.zip.ZipFile.builder()
+                         .setFile(decryptedZip)
+                         .setCharset(StandardCharsets.UTF_8)
+                         .get()) {
+
+        Enumeration<org.apache.commons.compress.archivers.zip.ZipArchiveEntry> entries =
+                zip.getEntries();
+
+        while (entries.hasMoreElements()) {
+            org.apache.commons.compress.archivers.zip.ZipArchiveEntry entry = entries.nextElement();
+            if (entry.isDirectory()) {
+                continue;
+            }
+
+            String entryName = entry.getName();
+            if (entryName == null) {
+                continue;
+            }
+
+            // We only care about the XML entry; assume exactly one per bundle
+            if (entryName.toLowerCase().endsWith(".xml")) {
+                String xmlFileName =
+                        Paths.get(entryName).getFileName().toString(); // e.g. "file123.xml"
+
+                // Build processed COS keys
+                String baseName = encryptedName.replace(".zip.pgp", "").replace(".pgp", "");
+                String processedPgpKey = "processed/" + encryptedName;
+                String processedZipKey = "processed/" + baseName + ".zip";
+
+                InvoiceBundle bundle =
+                        new InvoiceBundle(xmlFileName, processedPgpKey, processedZipKey);
+
+                bundleMap.put(xmlFileName, bundle);
+
+                log.info("Registered bundle mapping: xml={} -> pgpKey={}, zipKey={}",
+                         xmlFileName, processedPgpKey, processedZipKey);
+                return; // we expect only one xml per bundle
+            }
+        }
+
+        log.warn("No XML entry found in zip {} - bundle mapping not registered", decryptedZip.getName());
+
+    } catch (Exception e) {
+        log.warn("Failed to register bundle mapping for {}: {}", encryptedName, e.getMessage());
+    }
+}
+
+💡 This does not change your extraction logic. It just re-opens the same zip to inspect entries and capture the XML filename → COS keys mapping.
+
+⸻
+
+3️⃣ Update SkipLoggingListener to use the bundle map
+
+Now we plug the mapping into your existing skip listener so that XML failures move the corresponding .zip.pgp + .zip from /processed to /failed.
+
+We’ll:
+	•	keep your logging
+	•	make the class also implement StepExecutionListener
+	•	in beforeStep, read the invoiceBundles map from job context
+	•	in onSkipInProcess / onSkipInWrite, resolve XML filename from item, look up the InvoiceBundle, and move keys.
+
+3.1 Updated SkipLoggingListener
+
+@Slf4j
+public class SkipLoggingListener
+        implements SkipListener<Object, Object>, StepExecutionListener {
+
+    private final CosStorageService cosStorageService;
+
+    // Loaded from JobExecutionContext in beforeStep()
+    private Map<String, InvoiceBundle> bundleMap = Collections.emptyMap();
+
+    public SkipLoggingListener(CosStorageService cosStorageService) {
+        this.cosStorageService = cosStorageService;
+    }
+
+    // ───────── StepExecutionListener ─────────
+
+    @Override
+    public void beforeStep(StepExecution stepExecution) {
+        ExecutionContext ctx = stepExecution.getJobExecution().getExecutionContext();
+        Object mapObj = ctx.get("invoiceBundles");
+        if (mapObj instanceof Map) {
+            //noinspection unchecked
+            this.bundleMap = (Map<String, InvoiceBundle>) mapObj;
+        } else {
+            this.bundleMap = Collections.emptyMap();
+        }
+        log.info("SkipLoggingListener loaded {} bundles from context", bundleMap.size());
+    }
+
+    @Override
+    public ExitStatus afterStep(StepExecution stepExecution) {
+        return ExitStatus.COMPLETED;
+    }
+
+    // ───────── SkipListener ─────────
+
+    @Override
+    public void onSkipInRead(Throwable t) {
+        String msg = (t != null) ? t.getMessage() : "unknown";
+        log.error("Skipped XML during read: {}", msg);
+    }
+
+    @Override
+    public void onSkipInProcess(Object item, Throwable t) {
+        handleSkip("process", item, t);
+    }
+
+    @Override
+    public void onSkipInWrite(Object item, Throwable t) {
+        handleSkip("write", item, t);
+    }
+
+    // ───────── Helpers ─────────
+
+    private void handleSkip(String phase, Object item, Throwable t) {
+        String msg = (t != null) ? t.getMessage() : "unknown";
+        String xmlFileName = resolveXmlFileName(item);
+
+        log.error("Skipped XML during {}: {} - {}", phase, xmlFileName, msg);
+
+        if (xmlFileName == null) {
+            return;
+        }
+
+        InvoiceBundle bundle = bundleMap.get(xmlFileName);
+        if (bundle == null) {
+            log.warn("No bundle mapping found for skipped XML {}", xmlFileName);
+            return;
+        }
+
+        moveBundleToFailed(bundle);
+    }
+
+    /**
+     * Extracts the XML file name from the skipped item.
+     * Adapt if your reader yields a different type.
+     */
+    private String resolveXmlFileName(Object item) {
+        if (item instanceof File f) {
+            return f.getName();
+        }
+        if (item instanceof Path p) {
+            return p.getFileName().toString();
+        }
+        // Add more cases if needed (e.g., Resource or DTO with a filename field)
+        return null;
+    }
+
+    private void moveBundleToFailed(InvoiceBundle bundle) {
+        String processedPgpKey = bundle.getProcessedPgpKey();
+        String processedZipKey = bundle.getProcessedZipKey();
+
+        String failedPgpKey = processedPgpKey.replaceFirst("^processed/", "failed/");
+        String failedZipKey = processedZipKey.replaceFirst("^processed/", "failed/");
+
+        try {
+            cosStorageService.moveFile(processedPgpKey, failedPgpKey);
+            log.info("Moved {} -> {}", processedPgpKey, failedPgpKey);
+        } catch (Exception e) {
+            log.warn("Failed to move {} to {}: {}", processedPgpKey, failedPgpKey, e.getMessage());
+        }
+
+        try {
+            cosStorageService.moveFile(processedZipKey, failedZipKey);
+            log.info("Moved {} -> {}", processedZipKey, failedZipKey);
+        } catch (Exception e) {
+            log.warn("Failed to move {} to {}: {}", processedZipKey, failedZipKey, e.getMessage());
+        }
+    }
+}
+
+⚠️ Make sure your step bean registers this listener and still uses .faultTolerant().skip(...) as before.
+
+Example:
+
+@Bean
+public SkipLoggingListener skipLoggingListener(CosStorageService cosStorageService) {
+    return new SkipLoggingListener(cosStorageService);
+}
+
+@Bean
+public Step xmlInvoiceStep(StepBuilderFactory stepBuilderFactory,
+                           ItemReader<File> xmlReader,
+                           ItemProcessor<File, ?> xmlProcessor,
+                           ItemWriter<?> xmlWriter,
+                           SkipLoggingListener skipLoggingListener) {
+
+    return stepBuilderFactory.get("xmlInvoiceStep")
+            .<File, Object>chunk(10)
+            .reader(xmlReader)
+            .processor(xmlProcessor)
+            .writer(xmlWriter)
+            .faultTolerant()
+            .skip(Exception.class)
+            .skipLimit(Integer.MAX_VALUE)
+            .listener(skipLoggingListener)
+            .build();
+}
+
+(adjust generics/types to your real ones).
+
+⸻
+
+4️⃣ Behavior check vs your scenarios
+
+With these exact changes:
+	1.	Decrypt failure
+	•	inner catch in tasklet → moves .zip.pgp + .zip to failed/
+	•	file never reaches XML step
+	2.	Bad XML (XSD/parse/processor/writer error)
+	•	bundle was registered in bundleMap during unzip
+	•	XML step throws → skipped
+	•	SkipLoggingListener.handleSkip(...) resolves XML filename
+	•	finds InvoiceBundle from bundleMap
+	•	moves processed/...zip.pgp + processed/...zip → failed/...
+	•	cleanup may still try to delete old processed keys, but these files are already moved (harmless)
+	3.	Good file
+	•	bundle registered
+	•	processing succeeds → no skip
+	•	.zip.pgp + .zip behave exactly as before (stays processed or later deleted, depending on your cleanup)
+	4.	XML name different from zip name
+	•	we do not rely on naming conventions
+	•	mapping is built from actual zip entry XML filename → PGP/ZIP keys
+	•	skip listener uses that mapping
+
+⸻
+
+If you paste how your XML reader exposes the item type (File/Path/Resource), I can tweak resolveXmlFileName(...) to be 100% accurate, but this version should already fit your current setup with minimal edits.
+
+----------------------------------last1701---
 Here’s a clean, copy-pasteable version of the final “bundle + skip listener” setup that’s in AC_1_Dec, with all the pieces you need in one place.
 
 I’m **not** touching your existing CSV reader / XML writer / PathConfig / CosStorageService / PGPDecrypt logic. Where you already have an implementation (decrypt, unzip, validate), I just call your existing methods.
