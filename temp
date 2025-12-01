@@ -1,18 +1,296 @@
+Perfect, let's anchor everything on the **existing `SkipLoggingListener` from AC_1_Dec** and tweak it so:
+
+* It **handles both reader and writer failures**
+* It **moves the bundle** (`.zip.pgp` + `.zip`) in *both* cases
+* Your existing behaviour & COS paths stay consistent with AC_1_Dec
+
+Right now your code (from AC_1_Dec) basically looks like this:
+
+```java
+@Slf4j
+public class SkipLoggingListener implements SkipListener<Object, Object> {
+
+    private final CosStorageService cosStorageService;
+
+    public SkipLoggingListener(CosStorageService cosStorageService) {
+        this.cosStorageService = cosStorageService;
+    }
+
+    @Override
+    public void onSkipInRead(Throwable t) {
+        String msg = (t != null) ? t.getMessage() : "unknown";
+        log.error("Skipped XML during read: {}", msg);
+        // here we usually don't know which file, so just log
+    }
+
+    @Override
+    public void onSkipInProcess(Object item, Throwable t) {
+        handleSkip("process", item, t);
+    }
+
+    @Override
+    public void onSkipInWrite(Object item, Throwable t) {
+        handleSkip("write", item, t);
+    }
+
+    private void handleSkip(String phase, Object item, Throwable t) {
+        String msg = (t != null) ? t.getMessage() : "unknown";
+        String itemName = resolveXmlFileName(item);
+        log.error("Skipped XML during {}: item={} - {}", phase, itemName, msg);
+        if (itemName != null) {
+            moveBundleToFailed(itemName);
+        }
+    }
+
+    private String resolveXmlFileName(Object item) {
+        if (item == null) {
+            return null;
+        }
+        if (item instanceof java.io.File file) {
+            return file.getName();
+        }
+        if (item instanceof java.nio.file.Path path) {
+            return path.getFileName().toString();
+        }
+        if (item instanceof org.springframework.core.io.Resource res) {
+            return res.getFilename();
+        }
+        // extend for DTOs if needed
+        return null;
+    }
+
+    private void moveBundleToFailed(String xmlFileName) {
+        String base = xmlFileName;
+        int dot = base.lastIndexOf('.');
+        if (dot > 0) {
+            base = base.substring(0, dot); // strip .xml
+        }
+
+        String processedPgpKey = "processed/" + base + ".zip.pgp";
+        String processedZipKey = "processed/" + base + ".zip";
+        String failedPgpKey    = "failed/"   + base + ".zip.pgp";
+        String failedZipKey    = "failed/"   + base + ".zip";
+
+        try {
+            if (cosStorageService.exists(processedPgpKey)) {
+                cosStorageService.moveFile(processedPgpKey, failedPgpKey);
+                log.info("Moved {} -> {}", processedPgpKey, failedPgpKey);
+            } else {
+                log.debug("No processed PGP key {} found; nothing to move", processedPgpKey);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to move {} to {}: {}", processedPgpKey, failedPgpKey, e.getMessage());
+        }
+
+        try {
+            if (cosStorageService.exists(processedZipKey)) {
+                cosStorageService.moveFile(processedZipKey, failedZipKey);
+                log.info("Moved {} -> {}", processedZipKey, failedZipKey);
+            } else {
+                log.debug("No processed ZIP key {} found; nothing to move", processedZipKey);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to move {} to {}: {}", processedZipKey, failedZipKey, e.getMessage());
+        }
+    }
+}
+```
+
+### Why you only see `onSkipInRead` and not `handleSkip`
+
+* The exception is happening in the **reader**, so Spring Batch calls **only** `onSkipInRead`.
+* Your current `onSkipInRead` **does not call `handleSkip`**, so `moveBundleToFailed()` is never triggered for reader failures.
+* You also don’t have a processor, so `onSkipInProcess` is never called.
+* And if your writer hasn’t thrown a skippable exception yet, `onSkipInWrite` doesn’t fire either.
+
+So we’ll:
+
+1. Make `onSkipInRead` call `handleSkip("read", null, t)`.
+2. Teach `handleSkip` how to derive the XML file name from the **exception** when `item` is `null`.
+3. Keep writer logic as-is, so if writer fails, `handleSkip("write", item, t)` still works.
+
+---
+
+## ✅ Updated `SkipLoggingListener` (minimal changes on top of AC_1_Dec)
+
+Key changes are marked with `// NEW` comments.
+
+```java
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.batch.core.SkipListener;
+import org.springframework.batch.item.file.FlatFileParseException;
+import org.springframework.core.io.Resource;
+
+@Slf4j
+public class SkipLoggingListener implements SkipListener<Object, Object> {
+
+    private final CosStorageService cosStorageService;
+
+    public SkipLoggingListener(CosStorageService cosStorageService) {
+        this.cosStorageService = cosStorageService;
+    }
+
+    @Override
+    public void onSkipInRead(Throwable t) {
+        // 🔹 Instead of only logging, reuse the same handling logic
+        handleSkip("read", null, t);   // NEW
+    }
+
+    @Override
+    public void onSkipInProcess(Object item, Throwable t) {
+        handleSkip("process", item, t);
+    }
+
+    @Override
+    public void onSkipInWrite(Object item, Throwable t) {
+        handleSkip("write", item, t);
+    }
+
+    private void handleSkip(String phase, Object item, Throwable t) {
+        String msg = (t != null) ? t.getMessage() : "unknown";
+
+        // 1️⃣ Try to resolve from the item (writer/processor case)
+        String itemName = resolveXmlFileName(item);
+
+        // 2️⃣ If item is null (read skip) or we couldn't resolve, try from Throwable
+        if (itemName == null) {                       // NEW
+            itemName = resolveXmlFileNameFromThrowable(t);
+        }
+
+        log.error("Skipped XML during {}: item={} - {}",
+                  phase,
+                  itemName != null ? itemName : "<unknown>",
+                  msg);
+
+        if (itemName != null) {
+            // Move .zip.pgp + .zip from processed/ -> failed/
+            moveBundleToFailed(itemName);
+        }
+    }
+
+    /**
+     * Resolve XML filename from the item (writer/processor skips).
+     */
+    private String resolveXmlFileName(Object item) {
+        if (item == null) {
+            return null;
+        }
+        if (item instanceof java.io.File file) {
+            return file.getName();
+        }
+        if (item instanceof java.nio.file.Path path) {
+            return path.getFileName().toString();
+        }
+        if (item instanceof Resource res) {
+            return res.getFilename();
+        }
+        // If you use a DTO that contains the original filename, extend here:
+        // if (item instanceof MyDto dto) return dto.getXmlFileName();
+        return null;
+    }
+
+    /**
+     * Resolve XML filename from the exception (read skips).
+     * Works when the reader throws FlatFileParseException.
+     */
+    private String resolveXmlFileNameFromThrowable(Throwable t) {   // NEW
+        if (t instanceof FlatFileParseException ffpe) {
+            Resource res = ffpe.getInputResource();
+            if (res != null) {
+                return res.getFilename(); // e.g. invoice_123.xml
+            }
+        }
+        // Add more cases if your reader throws another exception type that carries file info
+        return null;
+    }
+
+    /**
+     * Move the corresponding .zip.pgp and .zip from /processed to /failed in COS.
+     * Same as in AC_1_Dec.
+     */
+    private void moveBundleToFailed(String xmlFileName) {
+        // strip extension: invoice_123.xml -> invoice_123
+        String base = xmlFileName;
+        int dot = base.lastIndexOf('.');
+        if (dot > 0) {
+            base = base.substring(0, dot);
+        }
+
+        String processedPgpKey = "processed/" + base + ".zip.pgp";
+        String processedZipKey = "processed/" + base + ".zip";
+        String failedPgpKey    = "failed/"   + base + ".zip.pgp";
+        String failedZipKey    = "failed/"   + base + ".zip";
+
+        try {
+            if (cosStorageService.exists(processedPgpKey)) {
+                cosStorageService.moveFile(processedPgpKey, failedPgpKey);
+                log.info("Moved {} -> {}", processedPgpKey, failedPgpKey);
+            } else {
+                log.debug("No processed PGP key {} found; nothing to move", processedPgpKey);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to move {} to {}: {}", processedPgpKey, failedPgpKey, e.getMessage());
+        }
+
+        try {
+            if (cosStorageService.exists(processedZipKey)) {
+                cosStorageService.moveFile(processedZipKey, failedZipKey);
+                log.info("Moved {} -> {}", processedZipKey, failedZipKey);
+            } else {
+                log.debug("No processed ZIP key {} found; nothing to move", processedZipKey);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to move {} to {}: {}", processedZipKey, failedZipKey, e.getMessage());
+        }
+    }
+}
+```
+
+### What this gives you now
+
+* **Reader failure (your current case)**
+
+  * Reader throws e.g. `FlatFileParseException`.
+  * Spring calls `onSkipInRead(t)`.
+  * We call `handleSkip("read", null, t)`.
+  * `resolveXmlFileName(item)` → `null`, so we fall back to `resolveXmlFileNameFromThrowable(t)`, which uses `ffpe.getInputResource().getFilename()`.
+  * We call `moveBundleToFailed(xmlFileName)` → moves:
+
+    * `processed/<base>.zip.pgp → failed/<base>.zip.pgp`
+    * `processed/<base>.zip     → failed/<base>.zip`
+
+* **Writer failure (fail-safe writer)**
+
+  * Writer throws a skippable exception.
+  * Spring calls `onSkipInWrite(item, t)`.
+  * We call `handleSkip("write", item, t)`.
+  * `resolveXmlFileName(item)` gets the name from `File` / `Path` / `Resource` (or DTO if you extend it).
+  * Same `moveBundleToFailed(...)` logic runs.
+
+So you now move the file **in both reader and writer failures**, with **zero changes** to the rest of the design from AC_1_Dec.
+
+---
+
+### Don’t forget: step configuration must be fault-tolerant
+
+To make sure both reader and writer failures become **skips** (so the listener is actually called) and not hard failures, your step should still be like:
+
+```java
+.stepBuilderFactory.get("processInvoicesStep")
+    .<Object, Object>chunk(10)
+    .reader(xmlReader)
+    .writer(xmlWriter)          // no processor – that’s fine
+    .faultTolerant()
+    .skip(Exception.class)      // or narrower: FlatFileParseException, MyWriterException, etc.
+    .skipLimit(Integer.MAX_VALUE)
+    .listener(skipLoggingListener)
+    .build();
+```
+
+If you want, you can paste your step config + the exception type thrown by the writer, and I can narrow the `.skip(...)` to the exact classes instead of `Exception.class`.
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
+pppppp,pppp/-----------------------------------------
 
 Good catch – and you’re right to question both things:
 
