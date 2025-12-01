@@ -1,3 +1,251 @@
+
+Good question, and with your UblXmlReader screenshot this is finally clear enough to tie everything together.
+
+Right now the honest answer is:
+
+You are not moving the .zip.pgp to /failed when there is an XML read error.
+
+You only move it on:
+	•	decrypt/unzip error (inside FetchDecryptUnzipTasklet)
+	•	and (after our changes) XML process/write errors (SkipListener with item).
+
+For read errors, Spring calls onSkipInRead(Throwable t) with no item, so the listener doesn’t know which file / bundle failed.
+
+We can fix this cleanly using your existing UblXmlReader.
+
+⸻
+
+1️⃣ Tiny change in UblXmlReader – remember current XML filename
+
+Your reader already knows the Resource and filename:
+
+@Component
+@Slf4j
+@StepScope
+public class UblXmlReader implements ResourceAwareItemReaderItemStream<Object> {
+
+    private Resource resource;
+    private boolean alreadyRead;
+
+    @Override
+    public void setResource(Resource resource) {
+        log.debug("UblXmlReader - setResource started");
+        log.debug("Setting resource: {}", resource);
+        this.resource = resource;
+        alreadyRead = false;
+        updateExecutionContext(resource);
+        log.debug("UblXmlReader - setResource completed");
+    }
+
+    @Override
+    public Object read() throws Exception {
+        log.info("Inside UblXmlReader");
+        if (resource == null || alreadyRead) {
+            return null;
+        }
+        alreadyRead = true;
+        String fileName = resource != null ? resource.getFilename() : "unknown";
+        ...
+    }
+}
+
+We just need UblXmlReader to store fileName into the step execution context, so the SkipListener can read it when onSkipInRead fires.
+
+Step 1: make UblXmlReader a StepExecutionListener
+
+@Component
+@Slf4j
+@StepScope
+public class UblXmlReader implements ResourceAwareItemReaderItemStream<Object>, StepExecutionListener {
+
+    private Resource resource;
+    private boolean alreadyRead;
+
+    private StepExecution stepExecution;   // NEW
+
+    @Override
+    public void beforeStep(StepExecution stepExecution) {
+        this.stepExecution = stepExecution;
+    }
+
+    @Override
+    public ExitStatus afterStep(StepExecution stepExecution) {
+        return ExitStatus.COMPLETED;
+    }
+
+Step 2: in setResource(...) also store the current XML filename
+
+Right after this.resource = resource; alreadyRead = false; add:
+
+    @Override
+    public void setResource(Resource resource) {
+        log.debug("UblXmlReader - setResource started");
+        log.debug("Setting resource: {}", resource);
+        this.resource = resource;
+        alreadyRead = false;
+
+        // NEW: remember current XML filename in the step context
+        if (stepExecution != null && resource != null && resource.getFilename() != null) {
+            stepExecution.getExecutionContext()
+                    .putString("currentXmlFileName", resource.getFilename());
+        }
+
+        updateExecutionContext(resource);
+        log.debug("UblXmlReader - setResource completed");
+    }
+
+You don’t have to touch the Fortify-locked read(), XMLInputFactory config, or validateId(...) at all.
+
+Now, whichever XML file is currently being read is always stored as currentXmlFileName in the step’s ExecutionContext.
+
+⸻
+
+2️⃣ Update SkipLoggingListener so xml read errors move .zip.pgp → /failed
+
+Now we wire this into the listener.
+
+Listener fields
+
+@Slf4j
+public class SkipLoggingListener
+        implements SkipListener<Object, Object>, StepExecutionListener {
+
+    private final CosStorageService cosStorageService;
+
+    private Map<String, InvoiceBundle> bundleMap = Collections.emptyMap();
+    private StepExecution stepExecution;  // NEW
+
+    public SkipLoggingListener(CosStorageService cosStorageService) {
+        this.cosStorageService = cosStorageService;
+    }
+
+beforeStep – load bundle map and remember stepExecution
+
+    @Override
+    public void beforeStep(StepExecution stepExecution) {
+        this.stepExecution = stepExecution;
+
+        ExecutionContext ctx = stepExecution.getJobExecution().getExecutionContext();
+        Object bundles = ctx.get("invoiceBundles");
+        if (bundles instanceof Map) {
+            //noinspection unchecked
+            this.bundleMap = (Map<String, InvoiceBundle>) bundles;
+        } else {
+            this.bundleMap = Collections.emptyMap();
+        }
+
+        log.info("SkipLoggingListener loaded {} bundles from context", bundleMap.size());
+    }
+
+    @Override
+    public ExitStatus afterStep(StepExecution stepExecution) {
+        return ExitStatus.COMPLETED;
+    }
+
+onSkipInRead – now use currentXmlFileName to move bundle
+
+    @Override
+    public void onSkipInRead(Throwable t) {
+        String msg = (t != null) ? t.getMessage() : "unknown";
+        log.error("Skipped XML during read: {}", msg);
+
+        if (stepExecution == null) {
+            return;
+        }
+        String xmlFileName = stepExecution.getExecutionContext()
+                                          .getString("currentXmlFileName", null);
+        if (xmlFileName == null) {
+            log.warn("currentXmlFileName not set in execution context; cannot move bundle");
+            return;
+        }
+
+        handleSkipByFileName("read", xmlFileName, t);  // reuse common logic
+    }
+
+onSkipInProcess / onSkipInWrite stay as before but delegate to handleSkipByFileName
+
+    @Override
+    public void onSkipInProcess(Object item, Throwable t) {
+        handleSkip("process", item, t);
+    }
+
+    @Override
+    public void onSkipInWrite(Object item, Throwable t) {
+        handleSkip("write", item, t);
+    }
+
+    private void handleSkip(String phase, Object item, Throwable t) {
+        String xmlFileName = resolveXmlFileName(item);
+        if (xmlFileName == null) {
+            log.error("Skipped XML during {} but could not resolve file name", phase);
+            return;
+        }
+        handleSkipByFileName(phase, xmlFileName, t);
+    }
+
+    private void handleSkipByFileName(String phase, String xmlFileName, Throwable t) {
+        String msg = (t != null) ? t.getMessage() : "unknown";
+        log.error("Skipped XML during {}: {} - {}", phase, xmlFileName, msg);
+
+        InvoiceBundle bundle = bundleMap.get(xmlFileName);
+        if (bundle == null) {
+            log.warn("No bundle mapping found for skipped XML {}", xmlFileName);
+            return;
+        }
+        moveBundleToFailed(bundle);
+    }
+
+    private String resolveXmlFileName(Object item) {
+        if (item instanceof File f) return f.getName();
+        if (item instanceof Path p) return p.getFileName().toString();
+        if (item instanceof Resource r) return r.getFilename();
+        return null;
+    }
+
+Moving .zip.pgp + .zip based on InvoiceBundle
+
+    private void moveBundleToFailed(InvoiceBundle bundle) {
+        String processedPgpKey = bundle.getProcessedPgpKey();
+        String processedZipKey = bundle.getProcessedZipKey();
+
+        String failedPgpKey = processedPgpKey.replaceFirst("^processed/", "failed/");
+        String failedZipKey = processedZipKey.replaceFirst("^processed/", "failed/");
+
+        try {
+            cosStorageService.moveFile(processedPgpKey, failedPgpKey);
+            log.info("Moved {} -> {}", processedPgpKey, failedPgpKey);
+        } catch (Exception e) {
+            log.warn("Failed to move {} to {}: {}", processedPgpKey, failedPgpKey, e.getMessage());
+        }
+
+        try {
+            cosStorageService.moveFile(processedZipKey, failedZipKey);
+            log.info("Moved {} -> {}", processedZipKey, failedZipKey);
+        } catch (Exception e) {
+            log.warn("Failed to move {} to {}: {}", processedZipKey, failedZipKey, e.getMessage());
+        }
+    }
+
+
+⸻
+
+3️⃣ Final answer to your question
+
+So how are we moving the .zip.pgp to failed if there is an error in xml read?
+
+With the changes above:
+	1.	UblXmlReader.setResource(...) writes the XML filename into the step ExecutionContext as currentXmlFileName.
+	2.	If XML read throws (e.g. BadXmlException), Spring triggers onSkipInRead(Throwable t).
+	3.	SkipLoggingListener.onSkipInRead(...) reads currentXmlFileName, finds the corresponding InvoiceBundle in bundleMap, and calls moveBundleToFailed(bundle).
+	4.	moveBundleToFailed(...) uses the bundle’s processedPgpKey and processedZipKey to move:
+	•	processed/<base>.zip.pgp → failed/<base>.zip.pgp
+	•	processed/<base>.zip     → failed/<base>.zip
+
+So yes, after these changes a pure XML read error will also move the .zip.pgp (and .zip) into /failed, just like decrypt/unzip and process/write errors.
+
+
+1737
+
 Here is the direct answer to your exact question:
 
 ⸻
