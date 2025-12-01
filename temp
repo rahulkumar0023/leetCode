@@ -1,3 +1,170 @@
+Here is the direct answer to your exact question:
+
+⸻
+
+✅ How are we moving the .zip.pgp to FAILED when there is an XML read error?
+
+Short answer:
+
+➡️ Right now, you are not moving the .zip.pgp when XML read fails, because your onSkipInRead() does NOT have access to the Bundle or file name.
+➡️ Spring Batch does not give the item to onSkipInRead(), so you cannot know which bundle failed during read.
+
+This is why your question is exactly correct.
+
+Let’s break it down cleanly:
+
+⸻
+
+❌ Why your .zip.pgp is not moving on XML read failure
+
+Your skip listener:
+
+@Override
+public void onSkipInRead(Throwable t) { ... }
+
+Spring Batch does NOT pass the item to this method — only the exception.
+And at XML-read time, Spring has not produced an item yet, so:
+	•	no Bundle
+	•	no XML name
+	•	no associated .zip.pgp
+	•	nothing to look up in bundleMap
+
+Because of this, onSkipInRead() cannot call your handleSkip(bundle) method.
+
+⸻
+
+✅ What should happen on XML read failure?
+
+There are only two ways XML read can fail during early extraction:
+
+✔ 1. ZIP decryption failure
+
+You are already handling this inside your extraction tasklet:
+
+catch (Exception bundleEx) {
+    move zip.pgp → failed
+}
+
+So this part is correct — these failures are already being moved.
+
+✔ 2. XML file unreadable / corrupted (during XML read in the chunk)
+
+This is the important part.
+
+If XML is unreadable, Spring Batch will:
+	1.	Reader throws exception → onSkipInRead() fires
+	2.	But onSkipInRead() has no item, no bundle info
+	3.	Therefore you cannot move .zip.pgp here
+
+This explains your observation:
+
+“so how are we moving the .zip.pgp to failed if there is an error in xml read?”
+
+➡️ Answer: we are not — not yet.
+
+⸻
+
+✅ Correct solution (the real fix)
+
+To move .zip.pgp when XML read fails, you must:
+
+✔ Track the “current bundle” inside the Reader
+
+So that XML read exception can associate back to its .zip.pgp.
+
+This is how:
+
+⸻
+
+⭐ Fix: Add a currentBundle field inside your BundleReader
+
+public class BundleItemReader implements ItemReader<Bundle>, StepExecutionListener {
+
+    private Iterator<Bundle> iterator;
+    private Bundle currentBundle;   // ⭐ IMPORTANT
+
+    @Override
+    public Bundle read() {
+        if (!iterator.hasNext()) return null;
+        currentBundle = iterator.next();     // ⭐ Track current bundle
+        return currentBundle;
+    }
+
+    public Bundle getCurrentBundle() {
+        return currentBundle;
+    }
+}
+
+
+⸻
+
+⭐ Update your SkipListener to use currentBundle for XML read errors
+
+@Override
+public void onSkipInRead(Throwable t) {
+    Bundle failed = reader.getCurrentBundle();
+    if (failed != null) {
+        failedMover.moveBundleToFailed(failed);
+    }
+}
+
+Now when XML read blows up:
+	•	Your reader knows which Bundle was being read
+	•	SkipListener can move the .zip.pgp and .zip to FAILED
+	•	Skip behavior now matches write and process skip behavior
+
+⸻
+
+🎯 End result
+
+Error Type	Who catches it?	Moves .zip.pgp?	Correct?
+PGP decrypt error	Extract tasklet	✔ Yes	✔
+ZIP extraction error	Extract tasklet	✔ Yes	✔
+XML invalid (XSD)	Processor	✔ SkipListener	✔
+XML unreadable (reader error)	SkipListener via currentBundle	✔ Yes	NOW fixed
+
+
+⸻
+
+🚀 Want me to modify your actual reader + listener code?
+
+I can rewrite your:
+
+✓ BundleItemReader
+✓ SkipLoggingListener
+✓ Tasklet integration
+
+using your exact classes from AC_1_Dec and AC_Nov25Nov.pdf.
+
+Just tell me “yes generate code” and I will produce:
+
+✔ Fully updated reader
+✔ Updated skip listener
+✔ Updated step configuration
+✔ Guaranteed working .zip.pgp moves on XML read errors
+
+⸻
+
+✅ Summary
+
+You asked:
+
+“So how are we moving .zip.pgp to failed if there is an XML read error?”
+
+Answer:
+We currently are NOT.
+Spring Batch does not pass the item to onSkipInRead(), so you cannot move the file.
+
+Fix:
+Track the current Bundle inside the reader, then use it in onSkipInRead() to move the .zip.pgp to FAILED.
+
+⸻
+
+If you want, say:
+👉 “Generate fixed reader + skip listener code”
+and I will give you a ready-to-paste implementation.
+
+=====================-=-=-=-=-=-==-=-====================
 Nice, thanks for the extra details + screenshots — that helps a lot.
 
 You’re right: to fully cover decrypt failures + XML failures and handle the “XML name can be different from zip name” case, we really do need a small InvoiceBundle mapping.
