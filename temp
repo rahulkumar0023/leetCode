@@ -1,4 +1,191 @@
 
+Nice, that explains it perfectly 👌
+
+Right now the logic for **XML failures** assumes there is already a:
+
+```text
+processed/<name>.zip
+```
+
+in COS so it tries to **move** it. But in your flow you never upload that decrypted `.zip` to `processed/` — it only exists **locally**. So:
+
+* `.zip.pgp` → ✔ in COS `processed/…`
+* `.zip` → ❌ only local, not in COS `processed/…`
+
+So `moveFile(processedZipKey, failedZipKey)` silently does nothing because there is no source object.
+
+We need to:
+
+* still **move** `.zip.pgp` from `processed/` → `failed/…xml_failed…`
+* but **upload** the local `.zip` file to `failed/…xml_failed…` (not move from COS).
+
+That means the `InvoiceBundle` needs to carry the **local zip file**, and the listener should call `uploadFile` for the zip.
+
+Below are the minimal code changes on top of your latest **AC_2_Dec**.
+
+---
+
+## 1️⃣ Update `InvoiceBundle` to hold local zip file
+
+```java
+package com.bnpp.pf.einvoice.connect.batch.model;
+
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+
+import java.io.File;
+import java.io.Serializable;
+
+/**
+ * Mapping between XML and its COS artefacts plus local decrypted zip.
+ */
+@Getter
+@AllArgsConstructor
+public class InvoiceBundle implements Serializable {
+
+    private static final long serialVersionUID = 1L;
+
+    /** XML filename (including .xml) used as key in the bundle map */
+    private final String xmlFileName;
+
+    /** COS key for the processed .zip.pgp, e.g. "processed/invoice_123.zip.pgp" */
+    private final String processedPgpKey;
+
+    /** Local decrypted zip file on disk, e.g. /tmp/alphacredit/unzipped/xml/invoice_123.zip */
+    private final File localZipFile;
+}
+```
+
+---
+
+## 2️⃣ Update `FetchDecryptUnzipTasklet.registerBundle(...)`
+
+When you decrypt and unzip the XML bundle, build the `InvoiceBundle` with the **local zip file** instead of a non-existent processed-zip key.
+
+```java
+private void registerBundle(Map<String, InvoiceBundle> bundleMap,
+                            File decryptedZip,
+                            String encryptedName) {
+
+    try (ZipFile zip = ZipFile.builder()
+                              .setFile(decryptedZip)
+                              .setCharset(StandardCharsets.UTF_8)
+                              .get()) {
+
+        Enumeration<ZipArchiveEntry> entries = zip.getEntries();
+        while (entries.hasMoreElements()) {
+            ZipArchiveEntry entry = entries.nextElement();
+            if (entry.isDirectory()) {
+                continue;
+            }
+
+            String entryName = entry.getName();
+            if (entryName == null || !entryName.toLowerCase().endsWith(".xml")) {
+                continue;
+            }
+
+            // XML file name with extension (key in the map)
+            String xmlFileName = Paths.get(entryName).getFileName().toString();
+
+            // PGP in COS: processed/<encryptedName>
+            String processedPgpKey = "processed/" + encryptedName;
+
+            InvoiceBundle bundle =
+                    new InvoiceBundle(xmlFileName, processedPgpKey, decryptedZip);
+
+            bundleMap.put(xmlFileName, bundle);
+
+            log.info("Registered bundle mapping: xml={} -> pgpKey={}, localZip={}",
+                     xmlFileName, processedPgpKey, decryptedZip.getAbsolutePath());
+            return; // one XML per zip
+        }
+
+        log.warn("No XML entry found in zip {} - bundle mapping not registered",
+                 decryptedZip.getName());
+    } catch (Exception e) {
+        log.warn("Failed to register bundle mapping for {}: {}",
+                 encryptedName, e.getMessage());
+    }
+}
+```
+
+> 🔸 `decryptedZip` is the *local* `.zip` file you just created when decrypting the `.zip.pgp`.
+
+---
+
+## 3️⃣ Fix `SkipLoggingListener.moveBundleToFailed(...)`
+
+Now, for **XML read/write failures**:
+
+* move `.zip.pgp` from `processed/…` → `failed/<base>.xml_failed.zip.pgp`
+* **upload** local `.zip` → `failed/<base>.xml_failed.zip`
+
+```java
+private void moveBundleToFailed(InvoiceBundle bundle) {
+
+    String processedPgpKey = bundle.getProcessedPgpKey();  // processed/invoice_123.zip.pgp
+    File   localZipFile    = bundle.getLocalZipFile();     // local decrypted zip
+
+    log.info("Handling XML failure for xml={}, pgpKey={}, localZip={}",
+             bundle.getXmlFileName(), processedPgpKey,
+             localZipFile != null ? localZipFile.getAbsolutePath() : "null");
+
+    // derive base name from the PGP filename
+    String pgpFileName = Paths.get(processedPgpKey).getFileName().toString();
+    String baseName    = pgpFileName.replace(".zip.pgp", "").replace(".pgp", "");
+
+    // failed targets
+    String failedPgpKey = "failed/" + baseName + ".xml_failed.zip.pgp";
+    String failedZipKey = "failed/" + baseName + ".xml_failed.zip";
+
+    // 1) move .zip.pgp inside COS
+    try {
+        cosStorageService.moveFile(processedPgpKey, failedPgpKey);
+        log.info("XML failure: moved PGP {} -> {}", processedPgpKey, failedPgpKey);
+    } catch (Exception e) {
+        log.warn("XML failure: could not move PGP {} to {}: {}",
+                 processedPgpKey, failedPgpKey, e.getMessage());
+    }
+
+    // 2) upload local .zip to COS failed
+    if (localZipFile != null && localZipFile.exists()) {
+        try {
+            cosStorageService.uploadFile(failedZipKey, localZipFile);
+            log.info("XML failure: uploaded ZIP {} -> {}", localZipFile.getAbsolutePath(), failedZipKey);
+        } catch (Exception e) {
+            log.warn("XML failure: could not upload ZIP {} to {}: {}",
+                     localZipFile.getAbsolutePath(), failedZipKey, e.getMessage());
+        }
+    } else {
+        log.warn("XML failure: local zip file not found for bundle xml={} (zip={})",
+                 bundle.getXmlFileName(),
+                 localZipFile != null ? localZipFile.getAbsolutePath() : "null");
+    }
+}
+```
+
+---
+
+### 🔚 Net effect
+
+For **decrypt/unzip** failures (already working):
+
+* `.zip.pgp` & `.zip` go to `failed/<name>.zip.pgp` / `failed/<name>.zip`
+  (`uploadFile` used for zip in that tasklet)
+
+For **XML read/write** failures (now fixed):
+
+* `.zip.pgp` moves from `processed/<name>.zip.pgp` →
+  `failed/<name>.xml_failed.zip.pgp`
+* local `.zip` uploads to
+  `failed/<name>.xml_failed.zip`
+
+No assumptions that a processed zip exists in COS 🎯
+
+Run once with this and you should now see **both** files in COS `failed/` for XML errors.
+
+
+====17:32==
 Absolutely — let’s add **diagnostic-level logging** so you can **see exactly:**
 
 1. **Which XML filename was detected**
