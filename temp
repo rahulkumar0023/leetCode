@@ -1,3 +1,311 @@
+
+Nice, that `updateExecutionContext(resource)` method is actually **exactly what we need** – you’ve already done half the work 👏
+
+Let’s look at what it does:
+
+```java
+public static void updateExecutionContext(Resource resource) {
+    String base = resource.getFilename();
+    if (base != null && base.toLowerCase().endsWith(".xml"))
+        base = base.substring(0, base.length() - 4);
+
+    var ctx = StepSynchronizationManager.getContext();
+    if (ctx != null)
+        ctx.getStepExecution().getExecutionContext()
+           .putString("currentResourceBaseName", base);
+}
+```
+
+So for every XML resource, you are already storing:
+
+* `currentResourceBaseName = "<xml file name without .xml>"`
+
+in the **step execution context**. Perfect.
+
+We just need to **reuse that** in the skip listener instead of adding our own “current file” tracking.
+
+Below is how all the pieces fit together with *minimal changes*.
+
+---
+
+## 1️⃣ `InvoiceBundle` – Lombok, keyed by *base name*
+
+```java
+@Getter
+@AllArgsConstructor
+public class InvoiceBundle {
+    /** xml base name without ".xml" — same as currentResourceBaseName */
+    private final String baseName;
+    private final String processedPgpKey; // e.g. processed/in123.zip.pgp
+    private final String processedZipKey; // e.g. processed/in123.zip
+}
+```
+
+---
+
+## 2️⃣ `FetchDecryptUnzipTasklet` – register bundles keyed by the same base
+
+Only **two small additions**:
+
+### a) At start of `execute(...)` – create/get bundle map in **job** context
+
+```java
+ExecutionContext jobCtx = stepExecution.getJobExecution().getExecutionContext();
+
+@SuppressWarnings("unchecked")
+Map<String, InvoiceBundle> bundleMap =
+        (Map<String, InvoiceBundle>) jobCtx.get("invoiceBundles");
+
+if (bundleMap == null) {
+    bundleMap = new HashMap<>();
+    jobCtx.put("invoiceBundles", bundleMap);
+}
+```
+
+### b) After successful `extract(...)` for XML, register bundle
+
+Right after your existing:
+
+```java
+} else if (jobType.equals("xml") && encryptedName.toLowerCase().contains("_xml")) {
+    stepExecution.getJobExecution().getExecutionContext().put("hasXml", Boolean.TRUE);
+    addProcessedKey(stepExecution, encryptedName);
+    File decryptedZip = decryptFile(encrypted);
+    extract(decryptedZip.toPath(), Paths.get(unzipBaseDir.append("/xml")));
+```
+
+add:
+
+```java
+    registerBundle(bundleMap, decryptedZip, encryptedName); // NEW
+```
+
+### c) New helper in the same class
+
+```java
+private void registerBundle(Map<String, InvoiceBundle> bundleMap,
+                            File decryptedZip,
+                            String encryptedName) {
+    try (ZipFile zip = ZipFile.builder()
+            .setFile(decryptedZip)
+            .setCharset(StandardCharsets.UTF_8)
+            .get()) {
+
+        Enumeration<ZipArchiveEntry> entries = zip.getEntries();
+        while (entries.hasMoreElements()) {
+            ZipArchiveEntry entry = entries.nextElement();
+            if (entry.isDirectory()) {
+                continue;
+            }
+            String entryName = entry.getName();
+            if (entryName == null || !entryName.toLowerCase().endsWith(".xml")) {
+                continue;
+            }
+
+            // xml file base name (without path & without .xml)
+            String xmlFileName = Paths.get(entryName).getFileName().toString(); // e.g. inv123.xml
+            String base = xmlFileName.substring(0, xmlFileName.length() - 4);   // inv123
+
+            String pgpKey = "processed/" + encryptedName;                         // your convention
+            String zipKey = "processed/" + encryptedName.replace(".pgp", "");     // inv123.zip etc.
+
+            InvoiceBundle bundle = new InvoiceBundle(base, pgpKey, zipKey);
+            bundleMap.put(base, bundle);
+
+            log.info("Registered bundle: base={} pgpKey={} zipKey={}",
+                     base, pgpKey, zipKey);
+            return; // one xml per zip
+        }
+
+        log.warn("No XML entry found in zip {} – bundle not registered", decryptedZip.getName());
+    } catch (Exception e) {
+        log.warn("Failed to register bundle for {}: {}", encryptedName, e.getMessage());
+    }
+}
+```
+
+👉 Note: the **key** we put into the map is `base` – the same thing you store as `currentResourceBaseName` in `updateExecutionContext`.
+
+---
+
+## 3️⃣ `UblXmlReader` – you’re already calling `updateExecutionContext(resource)`
+
+You don’t need to change it. This line:
+
+```java
+updateExecutionContext(resource);
+```
+
+is already doing:
+
+* get filename
+* strip `.xml`
+* store `"currentResourceBaseName"` in the step `ExecutionContext`.
+
+Exactly what we need.
+
+---
+
+## 4️⃣ `SkipLoggingListener` – use `currentResourceBaseName` in `onSkipInRead`
+
+Now we wire the two together:
+
+### a) Keep a reference to `StepExecution` and `bundleMap`
+
+```java
+@Slf4j
+public class SkipLoggingListener
+        implements SkipListener<Object, Object>, StepExecutionListener {
+
+    private final CosStorageService cosStorageService;
+
+    private Map<String, InvoiceBundle> bundleMap = Collections.emptyMap();
+    private StepExecution stepExecution;
+
+    public SkipLoggingListener(CosStorageService cosStorageService) {
+        this.cosStorageService = cosStorageService;
+    }
+
+    @Override
+    public void beforeStep(StepExecution stepExecution) {
+        this.stepExecution = stepExecution;
+        ExecutionContext ctx = stepExecution.getJobExecution().getExecutionContext();
+        Object mapObj = ctx.get("invoiceBundles");
+        if (mapObj instanceof Map) {
+            //noinspection unchecked
+            this.bundleMap = (Map<String, InvoiceBundle>) mapObj;
+        } else {
+            this.bundleMap = Collections.emptyMap();
+        }
+    }
+
+    @Override
+    public ExitStatus afterStep(StepExecution stepExecution) {
+        return ExitStatus.COMPLETED;
+    }
+```
+
+### b) `onSkipInRead` – use your `currentResourceBaseName`
+
+```java
+    @Override
+    public void onSkipInRead(Throwable t) {
+        String msg = (t != null) ? t.getMessage() : "unknown";
+        log.error("Skipped XML during read: {}", msg);
+
+        if (stepExecution == null) {
+            return;
+        }
+        String base = stepExecution.getExecutionContext()
+                                   .getString("currentResourceBaseName", null);
+        if (base == null) {
+            log.warn("currentResourceBaseName not set, cannot move bundle");
+            return;
+        }
+
+        handleSkipByBase("read", base, t);
+    }
+```
+
+### c) `onSkipInProcess / onSkipInWrite` – derive base from item filename
+
+```java
+    @Override
+    public void onSkipInProcess(Object item, Throwable t) {
+        String base = resolveBaseName(item);
+        if (base != null) {
+            handleSkipByBase("process", base, t);
+        }
+    }
+
+    @Override
+    public void onSkipInWrite(Object item, Throwable t) {
+        String base = resolveBaseName(item);
+        if (base != null) {
+            handleSkipByBase("write", base, t);
+        }
+    }
+
+    private String resolveBaseName(Object item) {
+        String name = null;
+        if (item instanceof File f) name = f.getName();
+        else if (item instanceof Path p) name = p.getFileName().toString();
+        else if (item instanceof Resource r) name = r.getFilename();
+
+        if (name == null) return null;
+        name = name.toLowerCase();
+        if (name.endsWith(".xml")) {
+            return name.substring(0, name.length() - 4); // strip .xml
+        }
+        return name;
+    }
+```
+
+### d) Common handler / move logic
+
+```java
+    private void handleSkipByBase(String phase, String base, Throwable t) {
+        String msg = (t != null) ? t.getMessage() : "unknown";
+        log.error("Skipped XML during {}: {} - {}", phase, base, msg);
+
+        InvoiceBundle bundle = bundleMap.get(base);
+        if (bundle == null) {
+            log.warn("No bundle mapping found for base {}", base);
+            return;
+        }
+        moveBundleToFailed(bundle);
+    }
+
+    private void moveBundleToFailed(InvoiceBundle bundle) {
+        String processedPgpKey = bundle.getProcessedPgpKey();
+        String processedZipKey = bundle.getProcessedZipKey();
+
+        String failedPgpKey = processedPgpKey.replaceFirst("^processed/", "failed/");
+        String failedZipKey  = processedZipKey.replaceFirst("^processed/", "failed/");
+
+        try {
+            cosStorageService.moveFile(processedPgpKey, failedPgpKey);
+            log.info("Moved {} -> {}", processedPgpKey, failedPgpKey);
+        } catch (Exception e) {
+            log.warn("Failed to move {} to {}: {}", processedPgpKey, failedPgpKey, e.getMessage());
+        }
+
+        try {
+            cosStorageService.moveFile(processedZipKey, failedZipKey);
+            log.info("Moved {} -> {}", processedZipKey, failedZipKey);
+        } catch (Exception e) {
+            log.warn("Failed to move {} to {}: {}", processedZipKey, failedZipKey, e.getMessage());
+        }
+    }
+}
+```
+
+---
+
+## 🔚 What this gives you
+
+Now, **using the `currentResourceBaseName` you already set:**
+
+* **Decrypt / unzip failure**
+  → inner `catch` in `FetchDecryptUnzipTasklet`
+  → `.zip.pgp` + `.zip` immediately moved to `failed/`.
+
+* **XML read failure (e.g. `BadXmlException` in `UblXmlReader`)**
+  → Spring calls `onSkipInRead`
+  → we read `currentResourceBaseName`
+  → find `InvoiceBundle` by that base
+  → move **that bundle’s** `.zip.pgp` + `.zip` to `failed/`.
+
+* **XML process / write failure**
+  → `onSkipInProcess` / `onSkipInWrite`
+  → derive base from item filename
+  → same `handleSkipByBase` / `InvoiceBundle` logic
+  → move `.zip.pgp` + `.zip` to `failed/`.
+
+So your existing `updateExecutionContext(resource)` is not wasted at all — it’s the perfect hook to make **XML read errors** also move the correct `.zip.pgp` to `failed`.
+
+
+1040--
 Good question, and with your UblXmlReader screenshot this is finally clear enough to tie everything together.
 
 Right now the honest answer is:
