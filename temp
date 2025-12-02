@@ -1,3 +1,208 @@
+Yep, that’s a really good clean-up to add 👍
+Right now:
+
+* `processedCosKeys` still contains keys for files we already **moved to `/failed`**,
+* so the cleanup listener later tries to delete them from `/processed`, but they’re gone.
+
+Let’s fix that by **removing any keys from `processedCosKeys` as soon as we move them to `/failed`**.
+
+We’ll do it in three small steps:
+
+---
+
+## 1️⃣ Extend `CosProcessedContextSupport` with `removeProcessedKey`
+
+Update your existing interface so it can *also* remove entries from the job context list.
+
+```java
+package com.yourcompany.batch.cos;
+
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.StepExecution;
+import org.springframework.batch.item.ExecutionContext;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.stream.Collectors;
+
+public interface CosProcessedContextSupport {
+
+    String PROCESSED_COS_KEYS = "processedCosKeys";
+
+    @SuppressWarnings("unchecked")
+    default void addProcessedKey(StepExecution stepExecution, String key) {
+        JobExecution jobExecution = stepExecution.getJobExecution();
+        ExecutionContext jobContext = jobExecution.getExecutionContext();
+        List<String> keys = (List<String>) jobContext.get(PROCESSED_COS_KEYS);
+        if (keys == null) {
+            keys = new ArrayList<>();
+        }
+        keys.add(key);
+        jobContext.put(PROCESSED_COS_KEYS, keys);
+    }
+
+    @SuppressWarnings("unchecked")
+    default List<String> getProcessedKeys(JobExecution jobExecution) {
+        ExecutionContext jobContext = jobExecution.getExecutionContext();
+        List<String> keys = (List<String>) jobContext.get(PROCESSED_COS_KEYS);
+        if (keys == null) {
+            return Collections.emptyList();
+        }
+        return keys;
+    }
+
+    // 🔹 NEW: remove a single key from the list
+    default void removeProcessedKey(JobExecution jobExecution, String keyToRemove) {
+        @SuppressWarnings("unchecked")
+        List<String> keys = (List<String>) jobExecution
+                .getExecutionContext()
+                .get(PROCESSED_COS_KEYS);
+
+        if (keys == null || keys.isEmpty()) {
+            return;
+        }
+
+        List<String> updated = keys.stream()
+                .filter(k -> !k.equals(keyToRemove))
+                .collect(Collectors.toList());
+
+        jobExecution.getExecutionContext().put(PROCESSED_COS_KEYS, updated);
+    }
+
+    // convenience overload for StepExecution
+    default void removeProcessedKey(StepExecution stepExecution, String keyToRemove) {
+        removeProcessedKey(stepExecution.getJobExecution(), keyToRemove);
+    }
+}
+```
+
+> 🔁 This assumes you’re storing **full COS keys** like `processed/<file>.zip.pgp` in `processedCosKeys`.
+> If you’re still storing bare filenames, just pass that same string to `removeProcessedKey` (it uses exact `equals`).
+
+---
+
+## 2️⃣ Use `removeProcessedKey` in decrypt/unzip failure (Tasklet)
+
+In your **decrypt/unzip error** handling (the place where you already move the files to `/failed`), do this:
+
+```java
+// inside FetchDecryptUnzipTasklet, which already implements CosProcessedContextSupport
+
+} catch (Exception bundleEx) {
+    log.error("Decrypt/unzip failed for {} - moving to COS/failed. Error={}",
+              encryptedName, bundleEx.getMessage());
+
+    String processedPgpKey = "processed/" + encryptedName;
+    String baseName        = encryptedName.replace(".pgp", "");
+    String processedZipKey = "processed/" + baseName;
+
+    // 1) move to failed (existing logic)
+    try {
+        cosStorageService.moveFile(processedPgpKey, "failed/" + encryptedName);
+    } catch (Exception e) { /* log... */ }
+
+    try {
+        cosStorageService.moveFile(processedZipKey, "failed/" + baseName);
+    } catch (Exception e) { /* log... */ }
+
+    // 2) NEW: remove from processedCosKeys so cleanup won't see them
+    removeProcessedKey(stepExecution, processedPgpKey);
+    removeProcessedKey(stepExecution, processedZipKey);
+
+    // do NOT rethrow, continue loop...
+}
+```
+
+So for decrypt/unzip failures:
+
+* COS: `processed/...` → `failed/...`
+* Context: corresponding entries are removed from `processedCosKeys`.
+
+---
+
+## 3️⃣ Use `removeProcessedKey` in XML failure (SkipLoggingListener)
+
+Your `SkipLoggingListener` already knows:
+
+* `bundle.getProcessedPgpKey()` (COS key in `processed/`),
+* and it now **uploads** the local `.zip` instead of moving it.
+
+Make the listener also implement `CosProcessedContextSupport` and capture the `StepExecution`:
+
+```java
+public class SkipLoggingListener implements
+        SkipListener<Object, Object>,
+        StepExecutionListener,
+        CosProcessedContextSupport {
+
+    private final CosStorageService cosStorageService;
+    private StepExecution stepExecution;
+
+    // existing constructor...
+
+    @Override
+    public void beforeStep(StepExecution stepExecution) {
+        this.stepExecution = stepExecution;
+        // existing bundleMap loading, etc...
+    }
+
+    @Override
+    public ExitStatus afterStep(StepExecution stepExecution) {
+        return ExitStatus.COMPLETED;
+    }
+
+    // ... onSkipInRead/onSkipInProcess/onSkipInWrite stay as you already have
+```
+
+Then at the **end of** `moveBundleToFailed(InvoiceBundle bundle)` add:
+
+```java
+    // after moving PGP and uploading zip to failed
+
+    if (stepExecution != null) {
+        // processedPgpKey was registered with addProcessedKey earlier
+        removeProcessedKey(stepExecution, bundle.getProcessedPgpKey());
+    }
+}
+```
+
+If you also ever add the **zip** COS key to `processedCosKeys` (for some jobs), you can remove that too:
+
+```java
+    if (stepExecution != null) {
+        removeProcessedKey(stepExecution, bundle.getProcessedPgpKey());
+        // removeProcessedKey(stepExecution, "processed/" + baseName + ".zip"); // if stored
+    }
+```
+
+---
+
+## 🎯 End result
+
+For **any file** that is moved to `/failed`:
+
+* its `processed/...` key is **immediately removed** from `processedCosKeys`,
+* so `CosProcessedCleanupListener` will **never** try to delete it later.
+
+So:
+
+1. Decrypt/unzip failure
+
+   * `.zip.pgp` and `.zip` moved to `failed/`
+   * keys removed from `processedCosKeys`
+
+2. XML read/process/write failure
+
+   * `.zip.pgp` moved to `failed/<name>.xml_failed.zip.pgp`
+   * local `.zip` uploaded to `failed/<name>.xml_failed.zip`
+   * `processed/<name>.zip.pgp` removed from `processedCosKeys`
+
+Cleanup step now only touches **real remaining processed files**.
+
+
+
+20:06--
 
 Nice, that explains it perfectly 👌
 
