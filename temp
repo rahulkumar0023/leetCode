@@ -1,3 +1,145 @@
+Exactly 👍 — you now have **two separate failure paths**, and we just need to make sure the code clearly reflects that:
+
+1. **Decrypt / unzip fails** →
+   `.zip.pgp` and `.zip` go to `/failed/` (original names).
+2. **XML read / process / write fails** →
+   `.zip.pgp` and `.zip` go to `/failed/` **with `xml_failed` marker in the filename**
+   (e.g. `invoice_123.xml_failed.zip.pgp`, `invoice_123.xml_failed.zip`).
+
+Below is how both are implemented together, using your existing classes and conventions.
+
+---
+
+## 1️⃣ Decrypt / unzip failures → plain `/failed/` (no rename)
+
+In **`FetchDecryptUnzipTasklet`**, keep the error branch like this (inside the `for (File encrypted : encryptedFiles)` loop):
+
+```java
+try {
+    // normal decrypt + unzip + (for xml) registerBundle(...)
+    File decryptedZip;
+
+    if ("csv".equalsIgnoreCase(jobType) && encryptedName.contains("_csv")) {
+        // CSV flow ...
+    } else if ("xml".equalsIgnoreCase(jobType)
+            && encryptedName.toLowerCase().contains("_xml")) {
+        // XML flow ...
+    } else {
+        log.info("Job type and file type is NOT a match, skipping decrypt for {}", encryptedName);
+    }
+
+} catch (Exception bundleEx) {
+    log.error("Decrypt/unzip failed for {} - moving to COS/failed. Error={}",
+              encryptedName, bundleEx.getMessage());
+
+    // .zip.pgp: processed/<name>.zip.pgp  → failed/<name>.zip.pgp
+    try {
+        String processedPgpKey = "processed/" + encryptedName;
+        String failedPgpKey    = "failed/" + encryptedName;
+        cosStorageService.moveFile(processedPgpKey, failedPgpKey);
+    } catch (Exception e) {
+        log.warn("Failed to move encrypted file {} to failed: {}", encryptedName, e.getMessage());
+    }
+
+    // .zip: processed/<name>.zip → failed/<name>.zip  (if it exists)
+    try {
+        String baseName = encryptedName.replace(".pgp", "");          // e.g. invoice_123.zip
+        String processedZipKey = "processed/" + baseName;
+        String failedZipKey    = "failed/" + baseName;
+        cosStorageService.moveFile(processedZipKey, failedZipKey);
+    } catch (Exception e) {
+        log.warn("Failed to move decrypted zip for {} to failed: {}", encryptedName, e.getMessage());
+    }
+
+    // IMPORTANT: do NOT rethrow – continue with next file
+}
+```
+
+🔹 Result: “technical” failures during decrypt/unzip land in:
+
+```text
+failed/invoice_123.zip.pgp
+failed/invoice_123.zip
+```
+
+with **no rename**.
+
+---
+
+## 2️⃣ XML read / process / write failures → renamed `*.xml_failed.*` in `/failed/`
+
+In **`SkipLoggingListener`**, we already resolved the XML file name and located the `InvoiceBundle`.
+Now `moveBundleToFailed` just renames the files as you requested:
+
+```java
+private void moveBundleToFailed(InvoiceBundle bundle) {
+
+    String processedPgpKey = bundle.getProcessedPgpKey();  // processed/invoice_123.zip.pgp
+    String processedZipKey = bundle.getProcessedZipKey();  // processed/invoice_123.zip
+
+    // take just the file names
+    String pgpFileName = Paths.get(processedPgpKey).getFileName().toString();
+    String zipFileName = Paths.get(processedZipKey).getFileName().toString();
+
+    // rename:
+    //   invoice_123.zip.pgp -> invoice_123.xml_failed.zip.pgp
+    //   invoice_123.zip     -> invoice_123.xml_failed.zip
+    String failedPgpFileName = pgpFileName.replace(".zip.pgp", ".xml_failed.zip.pgp");
+    String failedZipFileName = zipFileName.replace(".zip", ".xml_failed.zip");
+
+    String failedPgpKey = "failed/" + failedPgpFileName;
+    String failedZipKey = "failed/" + failedZipFileName;
+
+    try {
+        cosStorageService.moveFile(processedPgpKey, failedPgpKey);
+        log.info("XML failure: moved {} -> {}", processedPgpKey, failedPgpKey);
+    } catch (Exception e) {
+        log.warn("XML failure: could not move {} to {}: {}",
+                 processedPgpKey, failedPgpKey, e.getMessage());
+    }
+
+    try {
+        cosStorageService.moveFile(processedZipKey, failedZipKey);
+        log.info("XML failure: moved {} -> {}", processedZipKey, failedZipKey);
+    } catch (Exception e) {
+        log.warn("XML failure: could not move {} to {}: {}",
+                 processedZipKey, failedZipKey, e.getMessage());
+    }
+
+    // We intentionally do NOT move the unzipped XML/PDF; temp cleanup will delete them.
+}
+```
+
+🔹 Result: XML content / mapping / read/write errors land in:
+
+```text
+failed/invoice_123.xml_failed.zip.pgp
+failed/invoice_123.xml_failed.zip
+```
+
+while the original XML/PDF stay in temp and are later cleaned by your cleanup tasklet.
+
+---
+
+### ✅ Summary of behaviour
+
+| Failure type                   | From (processed/)     | To (failed/)                            |
+| ------------------------------ | --------------------- | --------------------------------------- |
+| **Decrypt / unzip**            | `invoice_123.zip.pgp` | `failed/invoice_123.zip.pgp`            |
+|                                | `invoice_123.zip`     | `failed/invoice_123.zip`                |
+| **XML read / process / write** | `invoice_123.zip.pgp` | `failed/invoice_123.xml_failed.zip.pgp` |
+|                                | `invoice_123.zip`     | `failed/invoice_123.xml_failed.zip`     |
+
+So you get:
+
+* clear separation between **technical** failures and **XML** failures,
+* only `.zip` and `.zip.pgp` are moved,
+* existing reader/writer stay untouched,
+* and all of it is driven by the `InvoiceBundle` map + `SkipLoggingListener`.
+
+
+
+1607---------
 Gotcha – I see what you mean now:
 using `currentResourceBaseName` from the step `ExecutionContext` is fragile and can point to the **wrong XML** when multiple files are in play. Let’s switch fully to a **map keyed by XML filename**, and stop relying on that string in the context.
 
