@@ -1,3 +1,161 @@
+
+Absolutely — let’s add **diagnostic-level logging** so you can **see exactly:**
+
+1. **Which XML filename was detected**
+2. **Which InvoiceBundle was found**
+3. **Which COS keys we are trying to move**
+4. **Whether moveFile() was even called**
+5. **What the final failed key names are**
+6. **If moveFile() failed silently in COS**
+
+Below is the **instrumented** version of `moveBundleToFailed()` WITH MAXIMUM LOGGING.
+Drop this into your `SkipLoggingListener`.
+
+---
+
+# ✅ 🔍 SUPER-DEBUG VERSION of `moveBundleToFailed`
+
+```java
+private void moveBundleToFailed(InvoiceBundle bundle) {
+
+    log.error("========== XML FAILURE HANDLING TRIGGERED ==========");
+    log.error("Bundle received: xmlFileName={}, processedPgpKey={}, processedZipKey={}",
+            bundle.getXmlFileName(),
+            bundle.getProcessedPgpKey(),
+            bundle.getProcessedZipKey());
+    log.error("=====================================================");
+
+    String processedPgpKey = bundle.getProcessedPgpKey();  // e.g. processed/invoice_123.zip.pgp
+    String processedZipKey = bundle.getProcessedZipKey();  // e.g. processed/invoice_123.zip
+
+    log.warn("[1] ORIGINAL processedPgpKey  = {}", processedPgpKey);
+    log.warn("[1] ORIGINAL processedZipKey  = {}", processedZipKey);
+
+    // take file names
+    String pgpFileName = Paths.get(processedPgpKey).getFileName().toString();
+    String zipFileName = Paths.get(processedZipKey).getFileName().toString();
+
+    log.warn("[2] Extracted pgpFileName     = {}", pgpFileName);
+    log.warn("[2] Extracted zipFileName     = {}", zipFileName);
+
+    // rename
+    String failedPgpFileName = pgpFileName.replace(".zip.pgp", ".xml_failed.zip.pgp");
+    String failedZipFileName = zipFileName.replace(".zip", ".xml_failed.zip");
+
+    log.warn("[3] FAILED pgp filename       = {}", failedPgpFileName);
+    log.warn("[3] FAILED zip filename       = {}", failedZipFileName);
+
+    String failedPgpKey = "failed/" + failedPgpFileName;
+    String failedZipKey = "failed/" + failedZipFileName;
+
+    log.warn("[4] FAILED pgp key            = {}", failedPgpKey);
+    log.warn("[4] FAILED zip key            = {}", failedZipKey);
+    log.warn("=====================================================");
+
+    // ---- MOVE .zip.pgp ----
+    try {
+        log.error("[MOVE] Attempting moveFile({}, {})", processedPgpKey, failedPgpKey);
+        cosStorageService.moveFile(processedPgpKey, failedPgpKey);
+        log.error("[MOVE] SUCCESS: {} -> {}", processedPgpKey, failedPgpKey);
+    } catch (Exception e) {
+        log.error("[MOVE] FAILED MOVING {} -> {} :: {}",
+                processedPgpKey, failedPgpKey, e.getMessage(), e);
+    }
+
+    // ---- MOVE .zip ----
+    try {
+        log.error("[MOVE] Attempting moveFile({}, {})", processedZipKey, failedZipKey);
+        cosStorageService.moveFile(processedZipKey, failedZipKey);
+        log.error("[MOVE] SUCCESS: {} -> {}", processedZipKey, failedZipKey);
+    } catch (Exception e) {
+        log.error("[MOVE] FAILED MOVING {} -> {} :: {}",
+                processedZipKey, failedZipKey, e.getMessage(), e);
+    }
+
+    log.error("========== DONE XML FAILURE HANDLING FOR {} ==========",
+            bundle.getXmlFileName());
+}
+```
+
+---
+
+# 🔥 What this will reveal
+
+When the next XML read/write/process skip occurs, logs will show:
+
+---
+
+### ✔ 1. The exact **xml filename** used as key
+
+Example:
+
+```
+Bundle received: xmlFileName=29301025_09-00-25.xml
+```
+
+---
+
+### ✔ 2. The exact **processed keys** stored in InvoiceBundle
+
+Example:
+
+```
+processedPgpKey=processed/29301025_09-00-25.zip.pgp
+processedZipKey=processed/29301025_09-00-25.zip
+```
+
+If THESE values are wrong → we fix fetch tasklet or bundleMap registration.
+
+---
+
+### ✔ 3. The **renamed failed filenames**
+
+```
+FAILED pgp filename = 29301025_09-00-25.xml_failed.zip.pgp
+FAILED zip filename = 29301025_09-00-25.xml_failed.zip
+```
+
+---
+
+### ✔ 4. The **exact moveFile call** being made
+
+```
+[MOVE] Attempting moveFile(processed/29301025_09-00-25.zip.pgp, failed/29301025_09-00-25.xml_failed.zip.pgp)
+```
+
+If COS is rejecting:
+You will see an exception here.
+
+---
+
+### ✔ 5. Final confirmation
+
+```
+[MOVE] SUCCESS: processed/... -> failed/...
+```
+
+Or:
+
+```
+[MOVE] FAILED MOVING processed/... -> failed/... :: AccessDeniedException
+```
+
+---
+
+# 👉 After this, we will know precisely:
+
+* Does the listener receive the correct bundle?
+* Does the bundle contain correct processed keys?
+* Is COS moveFile being called?
+* Is moveFile failing silently?
+* Is the rename correct?
+* Is the processed key wrong due to extraction logic?
+
+Once you run with this logging and send me the **next log block**,
+I will pinpoint exactly why the files didn’t move.
+
+
+1639----
 Exactly 👍 — you now have **two separate failure paths**, and we just need to make sure the code clearly reflects that:
 
 1. **Decrypt / unzip fails** →
