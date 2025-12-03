@@ -1,3 +1,172 @@
+Yep, that explains it: we’re **removing the wrong key format.**
+Context stores **just the filename**, but we were trying to remove `"processed/..."`.
+
+Let’s fix it properly and keep it consistent.
+
+---
+
+## 1️⃣ Update `CosProcessedContextSupport` with `removeProcessedKey`
+
+Use the same style as your existing `addProcessedKey` / `getProcessedKeys`.
+Keys in the context are **plain filenames** like `invoice_123.zip.pgp`. 
+
+```java
+package com.yourcompany.batch.cos;
+
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.StepExecution;
+import org.springframework.batch.item.ExecutionContext;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.stream.Collectors;
+
+public interface CosProcessedContextSupport {
+
+    String PROCESSED_COS_KEYS = "processedCosKeys";
+
+    @SuppressWarnings("unchecked")
+    default void addProcessedKey(StepExecution stepExecution, String key) {
+        JobExecution jobExecution = stepExecution.getJobExecution();
+        ExecutionContext jobContext = jobExecution.getExecutionContext();
+
+        List<String> keys = (List<String>) jobContext.get(PROCESSED_COS_KEYS);
+        if (keys == null) {
+            keys = new ArrayList<>();
+        }
+        keys.add(key);
+        // mark context dirty
+        jobContext.put(PROCESSED_COS_KEYS, keys);
+    }
+
+    @SuppressWarnings("unchecked")
+    default List<String> getProcessedKeys(JobExecution jobExecution) {
+        ExecutionContext jobContext = jobExecution.getExecutionContext();
+        List<String> keys = (List<String>) jobContext.get(PROCESSED_COS_KEYS);
+        return keys == null ? Collections.emptyList() : keys;
+    }
+
+    // 🔹 NEW: remove a key (plain filename) from the list
+    @SuppressWarnings("unchecked")
+    default void removeProcessedKey(JobExecution jobExecution, String keyToRemove) {
+        ExecutionContext jobContext = jobExecution.getExecutionContext();
+        List<String> keys = (List<String>) jobContext.get(PROCESSED_COS_KEYS);
+        if (keys == null || keys.isEmpty()) {
+            return;
+        }
+
+        List<String> updated = keys.stream()
+                .filter(k -> !k.equals(keyToRemove))
+                .collect(Collectors.toList());
+
+        jobContext.put(PROCESSED_COS_KEYS, updated);
+    }
+
+    default void removeProcessedKey(StepExecution stepExecution, String keyToRemove) {
+        removeProcessedKey(stepExecution.getJobExecution(), keyToRemove);
+    }
+}
+```
+
+---
+
+## 2️⃣ Fix decrypt/unzip failure – remove the **filename**, not `"processed/..."`
+
+In `FetchDecryptUnzipTasklet` (the AC_2_Dec version where you already move `.zip.pgp` + `.zip` to `/failed` on decrypt/unzip error ), change the catch block like this:
+
+```java
+} catch (Exception bundleEx) {
+    log.error("Bundle failed for {} - moving to COS/failed. Error={}",
+              encryptedName, bundleEx.getMessage());
+
+    // keys in COS
+    String sourcePgpKey = "processed/" + encryptedName;
+    String baseName     = encryptedName.replace(".pgp", "");
+    String sourceZipKey = "processed/" + baseName;
+
+    // 1) move .zip.pgp to failed
+    try {
+        String failedPgpKey = "failed/" + encryptedName;
+        cosStorageService.moveFile(sourcePgpKey, failedPgpKey);
+    } catch (Exception ignored) {
+        log.warn("Failed to move encrypted file {} to failed", encryptedName);
+    }
+
+    // 2) move .zip to failed
+    try {
+        String failedZipKey = "failed/" + baseName;
+        cosStorageService.moveFile(sourceZipKey, failedZipKey);
+    } catch (Exception ignored) {
+        log.warn("Failed to move decrypted zip {} to failed", baseName);
+    }
+
+    // 3) 🔹 IMPORTANT: remove plain filename from processedCosKeys
+    //    We stored just `encryptedName` via addProcessedKey(stepExecution, encryptedName)
+    removeProcessedKey(stepExecution, encryptedName);
+
+    // continue with next file
+}
+```
+
+So `processedCosKeys` will no longer contain that filename for decrypt/unzip failures.
+
+---
+
+## 3️⃣ Fix XML failure removal in `SkipLoggingListener`
+
+Your `SkipLoggingListener` already:
+
+* implements `CosProcessedContextSupport`
+* has a `StepExecution` via `beforeStep`
+* has access to `bundle.getProcessedPgpKey()` (which is `"processed/<filename>.zip.pgp"`). 
+
+We just need to strip the filename and remove **that** from the context.
+
+At the end of `moveBundleToFailed(InvoiceBundle bundle)` (the version where you move `.zip.pgp` and upload `.zip` to failed and rename with `.xml_failed`), add:
+
+```java
+    // ... after moveFile + uploadFile logic
+
+    // 🔹 Remove from processedCosKeys (we store plain filenames there)
+    if (stepExecution != null) {
+        String processedPgpKey = bundle.getProcessedPgpKey(); // e.g. processed/invoice_123.zip.pgp
+        String fileName = java.nio.file.Paths.get(processedPgpKey).getFileName().toString(); // invoice_123.zip.pgp
+
+        log.info("Removing {} from processedCosKeys after XML failure", fileName);
+        removeProcessedKey(stepExecution, fileName);
+    }
+}
+```
+
+This lines up perfectly with how keys are stored in the context:
+
+* `addProcessedKey(stepExecution, encryptedName)` → `"invoice_123.zip.pgp"` in the list 
+* On **decrypt/unzip** failure: `removeProcessedKey(stepExecution, encryptedName)`
+* On **XML** failure: we derive the same filename from `processed/<filename>` and call `removeProcessedKey(stepExecution, fileName)`.
+
+---
+
+## 4️⃣ Quick mental check
+
+After these changes:
+
+* For any file that ends up in **`/failed`**, its **plain filename** is removed from `processedCosKeys`.
+* When `CosProcessedCleanupListener.afterJob(...)` runs on COMPLETED, `getProcessedKeys(jobExecution)` will only contain **true-success** items, and it will delete only those. 
+
+So you should now see **no “failed” file names left** in `processedCosKeys`.
+
+If you want, next run grab the log line:
+
+```text
+Removing invoice_123.zip.pgp from processedCosKeys after XML failure
+```
+
+and we can double-check the list contents, but structurally this fixes the mismatch that was keeping the names around.
+
+
+
+-------1611--
 Yep, that’s a really good clean-up to add 👍
 Right now:
 
