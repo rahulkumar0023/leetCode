@@ -1,3 +1,155 @@
+Right, that makes sense now — the missing `uploadFile` call in the **test** is almost certainly because of this line in your real code:
+
+```java
+if (localZipFile != null && localZipFile.exists()) {
+    cosStorageService.uploadFile(failedZipKey, localZipFile);
+}
+```
+
+In the test we wrote earlier, we did:
+
+```java
+File localZip = new File("/tmp/" + base + ".zip"); // or similar
+// but we never create it on disk
+```
+
+So `localZip.exists()` returns **false**, and the `uploadFile(...)` branch is **never executed** → Mockito sees no calls → `verify(uploadFile(...))` fails.
+
+Let’s fix the test so the file actually exists.
+
+---
+
+## ✅ Fix the test: create a real local zip file
+
+Here’s an updated version of the `SkipLoggingListener` test method that will *definitely* trigger `uploadFile(...)`:
+
+```java
+import org.junit.jupiter.api.io.TempDir;
+// ...
+
+class SkipLoggingListenerTest {
+
+    private CosStorageService cosStorageService;
+    private SkipLoggingListener listener;
+
+    private JobExecution jobExecution;
+    private StepExecution stepExecution;
+
+    @TempDir
+    File tempDir;   // JUnit will give you a real temp directory
+
+    @BeforeEach
+    void setUp() {
+        cosStorageService = mock(CosStorageService.class);
+        listener = new SkipLoggingListener(cosStorageService);
+
+        stepExecution = MetaDataInstanceFactory.createStepExecution();
+        jobExecution  = stepExecution.getJobExecution();
+    }
+
+    @Test
+    void onSkipInProcess_movesPgp_uploadsZip_removesKey() throws Exception {
+        // GIVEN ------------------------------------------------------
+        String xmlFile     = "invoice_123.xml";
+        String base        = "invoice_123";
+        String pgpKey      = "processed/" + base + ".zip.pgp";
+
+        // 🔹 Create a real local decrypted ZIP file so exists() returns true
+        File localZip = new File(tempDir, base + ".zip");
+        boolean created = localZip.createNewFile();
+        // optional: assertThat(created).isTrue();
+
+        InvoiceBundle bundle = new InvoiceBundle(
+                xmlFile,     // xml file name including .xml
+                pgpKey,      // processed/invoice_123.zip.pgp
+                localZip     // REAL local decrypted ZIP file
+        );
+
+        // bundleMap keyed by XML file name, if that's what your listener uses
+        Map<String, InvoiceBundle> bundleMap = new HashMap<>();
+        bundleMap.put(xmlFile, bundle);
+
+        jobExecution.getExecutionContext().put("invoiceBundles", bundleMap);
+
+        // processedCosKeys contains ONLY the filename (no processed/)
+        jobExecution.getExecutionContext().put(
+                CosProcessedContextSupport.PROCESSED_COS_KEYS,
+                List.of(base + ".zip.pgp")
+        );
+
+        // listener loads bundleMap and stepExecution here
+        listener.beforeStep(stepExecution);
+
+        // WHEN -------------------------------------------------------
+        File item = new File(tempDir, xmlFile); // or any File whose name is invoice_123.xml
+        listener.onSkipInProcess(item, new RuntimeException("Invalid XML"));
+
+        // THEN -------------------------------------------------------
+
+        // 1️⃣ moveFile( processed/<name>.zip.pgp , failed/<name>.xml_failed.zip.pgp )
+        verify(cosStorageService).moveFile(
+                eq("processed/" + base + ".zip.pgp"),
+                eq("failed/" + base + ".xml_failed.zip.pgp")
+        );
+
+        // 2️⃣ upload local zip to failed/<name>.xml_failed.zip
+        verify(cosStorageService).uploadFile(
+                eq("failed/" + base + ".xml_failed.zip"),
+                eq(localZip)
+        );
+
+        // 3️⃣ processedCosKeys entry must be removed
+        @SuppressWarnings("unchecked")
+        List<String> updatedKeys = (List<String>) jobExecution
+                .getExecutionContext()
+                .get(CosProcessedContextSupport.PROCESSED_COS_KEYS);
+
+        assertThat(updatedKeys)
+                .doesNotContain(base + ".zip.pgp");
+    }
+}
+```
+
+Key changes:
+
+* Added `@TempDir File tempDir;`
+* Actually **created** the local zip file:
+
+  ```java
+  File localZip = new File(tempDir, base + ".zip");
+  localZip.createNewFile();
+  ```
+
+That makes `localZip.exists()` true so your production code will call:
+
+```java
+cosStorageService.uploadFile("failed/" + base + ".xml_failed.zip", localZip);
+```
+
+and the `verify(...)` will pass.
+
+---
+
+### If you’d rather keep the test super-loose
+
+You can also relax the assertion to avoid being strict about the `File` instance:
+
+```java
+verify(cosStorageService).uploadFile(
+        eq("failed/" + base + ".xml_failed.zip"),
+        any(File.class)
+);
+```
+
+But I’d still keep the real file creation — it’s closer to reality and proves the `exists()` check behaves as expected.
+
+---
+
+If you paste your current `moveBundleToFailed(...)` from `SkipLoggingListener`, I can align the test **exactly** with your arguments, but in practice the missing `createNewFile()` is the reason `uploadFile` wasn’t called.
+-=-=-===-=
+
+
+
 Perfect — since your **InvoiceBundle** now looks like:
 
 ```java
