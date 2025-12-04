@@ -1,3 +1,483 @@
+Nice, glad it’s all working 🎉
+Let’s add JUnit tests to cover:
+
+1. `CosProcessedContextSupport` – especially `addProcessedKey` + `removeProcessedKey`
+2. `SkipLoggingListener` – XML failure path:
+
+   * moves `.zip.pgp` to `/failed/...xml_failed.zip.pgp`
+   * uploads local `.zip` to `/failed/...xml_failed.zip`
+   * removes the filename from `processedCosKeys`
+
+I’ll assume:
+
+* JUnit 5
+* Mockito
+* `spring-batch-test` (for `MetaDataInstanceFactory`)
+* `CosStorageService` has:
+
+  ```java
+  void moveFile(String sourceKey, String targetKey);
+  void uploadFile(String key, File file);
+  ```
+
+Adjust package names to match your project.
+
+---
+
+## 1️⃣ Test for `CosProcessedContextSupport`
+
+This verifies:
+
+* `addProcessedKey` stores the filename in the **job** context
+* `removeProcessedKey` actually removes it
+
+```java
+package com.bnpp.pf.einvoice.connect.batch.cos;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.StepExecution;
+import org.springframework.batch.test.MetaDataInstanceFactory;
+
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class CosProcessedContextSupportTest {
+
+    // Anonymous impl just to test the default methods
+    private final CosProcessedContextSupport support = new CosProcessedContextSupport() {};
+
+    @Test
+    void addProcessedKey_shouldAddFilenameToJobExecutionContext() {
+        JobExecution jobExecution = MetaDataInstanceFactory.createJobExecution();
+        StepExecution stepExecution = MetaDataInstanceFactory.createStepExecution(jobExecution, "step");
+
+        support.addProcessedKey(stepExecution, "invoice_123.zip.pgp");
+        support.addProcessedKey(stepExecution, "invoice_456.zip.pgp");
+
+        List<String> keys = support.getProcessedKeys(jobExecution);
+
+        assertThat(keys)
+                .containsExactly("invoice_123.zip.pgp", "invoice_456.zip.pgp");
+    }
+
+    @Test
+    void removeProcessedKey_shouldRemoveOnlyGivenFilename() {
+        JobExecution jobExecution = MetaDataInstanceFactory.createJobExecution();
+        StepExecution stepExecution = MetaDataInstanceFactory.createStepExecution(jobExecution, "step");
+
+        support.addProcessedKey(stepExecution, "invoice_123.zip.pgp");
+        support.addProcessedKey(stepExecution, "invoice_456.zip.pgp");
+        support.addProcessedKey(stepExecution, "invoice_789.zip.pgp");
+
+        // when
+        support.removeProcessedKey(stepExecution, "invoice_456.zip.pgp");
+
+        // then
+        var keys = support.getProcessedKeys(jobExecution);
+        assertThat(keys)
+                .containsExactly("invoice_123.zip.pgp", "invoice_789.zip.pgp")
+                .doesNotContain("invoice_456.zip.pgp");
+    }
+
+    @Test
+    void removeProcessedKey_onEmptyOrMissingListShouldNotFail() {
+        JobExecution jobExecution = MetaDataInstanceFactory.createJobExecution();
+
+        // no keys added at all, just call remove
+        support.removeProcessedKey(jobExecution, "anything.zip.pgp");
+
+        List<String> keys = support.getProcessedKeys(jobExecution);
+        assertThat(keys).isEmpty();
+    }
+}
+```
+
+---
+
+## 2️⃣ Test for `SkipLoggingListener` XML failure path
+
+This covers:
+
+* Resolving the XML filename
+* Finding the `InvoiceBundle`
+* Moving `.zip.pgp` to `failed/<base>.xml_failed.zip.pgp`
+* Uploading local `.zip` to `failed/<base>.xml_failed.zip`
+* Removing the filename from `processedCosKeys`
+
+```java
+package com.bnpp.pf.einvoice.connect.batch.listener;
+
+import com.bnpp.pf.einvoice.connect.batch.cos.CosProcessedContextSupport;
+import com.bnpp.pf.einvoice.connect.batch.model.InvoiceBundle;
+import com.bnpp.pf.einvoice.connect.storage.CosStorageService;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.StepExecution;
+import org.springframework.batch.test.MetaDataInstanceFactory;
+
+import java.io.File;
+import java.nio.file.Paths;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.*;
+
+/**
+ * This assumes SkipLoggingListener:
+ *   - implements SkipListener<Object,Object>, StepExecutionListener, CosProcessedContextSupport
+ *   - has constructor SkipLoggingListener(CosStorageService cosStorageService)
+ *   - uses JobExecutionContext key "invoiceBundles" for Map<String, InvoiceBundle>
+ */
+class SkipLoggingListenerTest {
+
+    private CosStorageService cosStorageService;
+    private SkipLoggingListener listener;
+
+    private JobExecution jobExecution;
+    private StepExecution stepExecution;
+
+    @BeforeEach
+    void setUp() {
+        cosStorageService = mock(CosStorageService.class);
+        listener = new SkipLoggingListener(cosStorageService);
+
+        jobExecution = MetaDataInstanceFactory.createJobExecution();
+        stepExecution = MetaDataInstanceFactory.createStepExecution(jobExecution, "xmlStep");
+    }
+
+    @Test
+    void onSkipInProcess_shouldMovePgpUploadZipAndRemoveProcessedKey() {
+        // given
+        // XML file that will fail
+        String xmlFileName = "invoice_123.xml";
+
+        // bundle mapping for that XML
+        File localZip = new File("/tmp/alphacredit/unzipped/xml/invoice_123.zip");
+        InvoiceBundle bundle = new InvoiceBundle(
+                xmlFileName,
+                "processed/invoice_123.zip.pgp",
+                localZip
+        );
+
+        Map<String, InvoiceBundle> bundleMap = new HashMap<>();
+        bundleMap.put(xmlFileName, bundle);
+
+        // put into JobExecutionContext so beforeStep can load it
+        jobExecution.getExecutionContext().put("invoiceBundles", bundleMap);
+
+        // processedCosKeys contains the plain filename
+        jobExecution.getExecutionContext().put(
+                CosProcessedContextSupport.PROCESSED_COS_KEYS,
+                List.of("invoice_123.zip.pgp")
+        );
+
+        // wire step into listener
+        listener.beforeStep(stepExecution);
+
+        // when: process skip happens for this XML file
+        File item = new File("/tmp/alphacredit/unzipped/xml/" + xmlFileName);
+        listener.onSkipInProcess(item, new RuntimeException("XSD validation failed for invoice_123.xml"));
+
+        // then: verify PGP moved to failed/<base>.xml_failed.zip.pgp
+        verify(cosStorageService).moveFile(
+                eq("processed/invoice_123.zip.pgp"),
+                eq("failed/invoice_123.xml_failed.zip.pgp")
+        );
+
+        // and local zip uploaded to failed/<base>.xml_failed.zip
+        verify(cosStorageService).uploadFile(
+                eq("failed/invoice_123.xml_failed.zip"),
+                eq(localZip)
+        );
+
+        // and processedCosKeys updated (filename removed)
+        @SuppressWarnings("unchecked")
+        List<String> remaining = (List<String>) jobExecution.getExecutionContext()
+                .get(CosProcessedContextSupport.PROCESSED_COS_KEYS);
+
+        assertThat(remaining)
+                .isNotNull()
+                .doesNotContain("invoice_123.zip.pgp");
+    }
+
+    @Test
+    void onSkipInProcess_shouldDoNothingIfBundleNotFound() {
+        // given: no bundle map in context, or missing key
+        jobExecution.getExecutionContext().put("invoiceBundles", new HashMap<String, InvoiceBundle>());
+        listener.beforeStep(stepExecution);
+
+        File item = new File("/tmp/alphacredit/unzipped/xml/unknown.xml");
+
+        // when
+        listener.onSkipInProcess(item, new RuntimeException("XSD error"));
+
+        // then: no COS operations
+        verifyNoInteractions(cosStorageService);
+    }
+}
+```
+
+> If your `SkipLoggingListener` is in a different package or uses a different context key than `"invoiceBundles"`, just adjust those strings.
+
+---
+
+If you also want, I can add a small test for the decrypt/unzip failure branch in `FetchDecryptUnzipTasklet` to assert that:
+
+* it calls `moveFile("processed/...zip.pgp", "failed/...zip.pgp")`
+* calls `moveFile("processed/...zip", "failed/...zip")`
+* and `removeProcessedKey(stepExecution, encryptedName)` actually removes that filename from `processedCosKeys`.
+
+
+
+Here are JUnit tests for **PackageAndUploadTasklet**, based on the latest version we’ve been using (same style as the October ones, but with the fixed `encrypt(InputStream, OutputStream)` mocking and full branch coverage).
+
+---
+
+### 1) `PackageAndUploadTaskletTest`
+
+Covers **`zipEncryptUploadFiles`** end-to-end (zip + encrypt + upload + move + notify).
+
+```java
+package com.bnpp.pf.einvoice.connect.batch.tasklet;
+
+import com.bnpp.pf.einvoice.connect.service.CFTApiClient;
+import com.bnpp.pf.einvoice.connect.service.CosStorageService;
+import com.bnpp.pf.einvoice.connect.service.PGPEncrypt;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.Spy;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
+
+import java.io.File;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Arrays;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class PackageAndUploadTaskletTest {
+
+    @Mock
+    private CosStorageService cosStorageService;
+
+    @Mock
+    private CFTApiClient cftApiClient;
+
+    @Mock
+    private PGPEncrypt pgpEncrypt;
+
+    @Spy
+    @InjectMocks
+    private PackageAndUploadTasklet tasklet;
+
+    @TempDir
+    Path tempDir;
+
+    @Test
+    void zipEncryptUploadFiles_createsZipAndEncryptedAndUploads() throws Exception {
+        // Arrange: create dummy “processed” folder with a couple of files
+        Path processedDir = Files.createDirectories(tempDir.resolve("processedDir"));
+        Files.writeString(processedDir.resolve("invoice1.xml"), "<xml>dummy</xml>");
+        Files.writeString(processedDir.resolve("invoice2.xml"), "<xml>dummy2</xml>");
+
+        // Point OUTPUT_DIR inside the tasklet to @TempDir
+        ReflectionTestUtils.setField(tasklet, "OUTPUT_DIR", tempDir);
+
+        // Mock encrypt() to just copy data from input to output (simulate encryption)
+        doAnswer(invocation -> {
+            try (InputStream in = invocation.getArgument(0);
+                 OutputStream out = invocation.getArgument(1)) {
+                in.transferTo(out);
+            }
+            return null;
+        }).when(pgpEncrypt).encrypt(any(InputStream.class), any(OutputStream.class));
+
+        // Mock COS upload/move + notify
+        doNothing().when(cosStorageService).uploadFile(anyString(), any(File.class));
+        doNothing().when(cosStorageService).moveFile(anyString(), anyString());
+        doNothing().when(cftApiClient).notifyUpload(anyString(), anyString());
+
+        // Act: invoke the private method via reflection
+        var method = PackageAndUploadTasklet.class
+                .getDeclaredMethod("zipEncryptUploadFiles", Path.class, String.class);
+        method.setAccessible(true);
+        method.invoke(tasklet, processedDir, "miles");
+
+        // Assert: verify .zip and .pgp files created in OUTPUT_DIR
+        File[] generated = tempDir.toFile().listFiles();
+        assertThat(generated).isNotNull();
+        assertThat(Arrays.stream(generated).anyMatch(f -> f.getName().endsWith(".zip"))).isTrue();
+        assertThat(Arrays.stream(generated).anyMatch(f -> f.getName().endsWith(".pgp"))).isTrue();
+
+        // And verify we uploaded and moved the encrypted file & notified CFT
+        verify(cosStorageService, times(1)).uploadFile(anyString(), any(File.class));
+        verify(cosStorageService, atLeastOnce()).moveFile(anyString(), anyString());
+        verify(cftApiClient, times(1)).notifyUpload(anyString(), anyString());
+    }
+}
+```
+
+---
+
+### 2) `PackageAndUploadTaskletExecuteTest`
+
+Covers **`execute()` + `findTargetAndPgpUpload()`** branches for XML/PDF and CSV jobs.
+
+```java
+package com.bnpp.pf.einvoice.connect.batch.tasklet;
+
+import com.bnpp.pf.einvoice.connect.service.CFTApiClient;
+import com.bnpp.pf.einvoice.connect.service.CosStorageService;
+import com.bnpp.pf.einvoice.connect.service.PGPEncrypt;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.Spy;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.StepContribution;
+import org.springframework.batch.core.StepExecution;
+import org.springframework.batch.core.scope.context.ChunkContext;
+import org.springframework.batch.core.scope.context.StepContext;
+import org.springframework.batch.item.ExecutionContext;
+import org.springframework.test.util.ReflectionTestUtils;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.Map;
+
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class PackageAndUploadTaskletExecuteTest {
+
+    @Mock
+    private CosStorageService cosStorageService;
+
+    @Mock
+    private CFTApiClient cftApiClient;
+
+    @Mock
+    private PGPEncrypt pgpEncrypt;
+
+    @Spy
+    @InjectMocks
+    private PackageAndUploadTasklet tasklet;
+
+    @TempDir
+    Path tempDir;
+
+    @Test
+    void execute_coversXmlAndPdfBranches_whenHasCsvFalse() throws Exception {
+        // Arrange: fake directory structure for XML, PDF, CSV
+        Path xmlMilesDir = Files.createDirectories(tempDir.resolve("xml/miles"));
+        Files.createFile(xmlMilesDir.resolve("file1.xml"));
+
+        Path pdfDir = Files.createDirectories(tempDir.resolve("pdf"));
+        Files.createFile(pdfDir.resolve("file1.pdf"));
+
+        Path csvRegularDir = Files.createDirectories(tempDir.resolve("csv/regular"));
+        Files.createFile(csvRegularDir.resolve("file1.csv"));
+
+        // Inject directories into private fields
+        ReflectionTestUtils.setField(tasklet, "XML_DIR", xmlMilesDir.getParent()); // xml/
+        ReflectionTestUtils.setField(tasklet, "PDF_DIR", pdfDir);
+        ReflectionTestUtils.setField(tasklet, "CSV_DIR", csvRegularDir.getParent()); // csv/
+        ReflectionTestUtils.setField(tasklet, "OUTPUT_DIR", tempDir);
+
+        // Spy behaviour: don’t actually zip/encrypt, just verify it's being called
+        doNothing().when(tasklet).zipEncryptUploadFiles(any(Path.class), anyString());
+        // Force isEmptyPath(...) to always return false so branches are executed
+        doReturn(false).when(tasklet).isEmptyPath(any(Path.class));
+
+        // Fake StepExecution / JobExecution with hasCsv = false
+        StepExecution stepExecution = mock(StepExecution.class);
+        JobExecution jobExecution = mock(JobExecution.class);
+        when(stepExecution.getJobExecution()).thenReturn(jobExecution);
+
+        StepContribution contribution = mock(StepContribution.class);
+        ChunkContext chunkContext = mock(ChunkContext.class);
+        StepContext stepContext = mock(StepContext.class);
+
+        when(chunkContext.getStepContext()).thenReturn(stepContext);
+        when(stepContext.getStepExecution()).thenReturn(stepExecution);
+
+        Map<String, Object> ctxMap = new HashMap<>();
+        ctxMap.put("hasCsv", Boolean.FALSE);
+        when(jobExecution.getExecutionContext()).thenReturn(new ExecutionContext(ctxMap));
+
+        // Act
+        tasklet.execute(contribution, chunkContext);
+
+        // Assert — verify at least one call to zipEncryptUploadFiles (xml/pdf branches)
+        verify(tasklet, atLeastOnce()).zipEncryptUploadFiles(any(Path.class), anyString());
+    }
+
+    @Test
+    void execute_coversCsvBranches_whenHasCsvTrue() throws Exception {
+        // Arrange: only CSV regular + SB directories
+        Path csvRegularDir = Files.createDirectories(tempDir.resolve("csv/regular"));
+        Files.createFile(csvRegularDir.resolve("file.csv"));
+
+        Path csvSbDir = Files.createDirectories(tempDir.resolve("csv/sb"));
+        Files.createFile(csvSbDir.resolve("sbfile.csv"));
+
+        ReflectionTestUtils.setField(tasklet, "CSV_DIR", csvRegularDir.getParent()); // csv/
+        ReflectionTestUtils.setField(tasklet, "OUTPUT_DIR", tempDir);
+
+        doNothing().when(tasklet).zipEncryptUploadFiles(any(Path.class), anyString());
+        doReturn(false).when(tasklet).isEmptyPath(any(Path.class));
+
+        StepExecution stepExecution = mock(StepExecution.class);
+        JobExecution jobExecution = mock(JobExecution.class);
+        when(stepExecution.getJobExecution()).thenReturn(jobExecution);
+
+        StepContribution contribution = mock(StepContribution.class);
+        ChunkContext chunkContext = mock(ChunkContext.class);
+        StepContext stepContext = mock(StepContext.class);
+
+        when(chunkContext.getStepContext()).thenReturn(stepContext);
+        when(stepContext.getStepExecution()).thenReturn(stepExecution);
+
+        Map<String, Object> ctxMap = new HashMap<>();
+        ctxMap.put("hasCsv", Boolean.TRUE);
+        when(jobExecution.getExecutionContext()).thenReturn(new ExecutionContext(ctxMap));
+
+        // Act
+        tasklet.execute(contribution, chunkContext);
+
+        // Assert — verify zipping was triggered for CSV branches
+        verify(tasklet, atLeastOnce()).zipEncryptUploadFiles(any(Path.class), anyString());
+    }
+}
+```
+
+If anything in your current `PackageAndUploadTasklet` differs (field names like `XML_DIR`, `CSV_DIR`, `OUTPUT_DIR`, or the `encrypt(...)` signature), paste that class and I’ll tweak these tests to match exactly.
+
+
+
+1218 0412---
+
 Yep, that explains it: we’re **removing the wrong key format.**
 Context stores **just the filename**, but we were trying to remove `"processed/..."`.
 
