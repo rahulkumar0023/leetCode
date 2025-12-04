@@ -1,3 +1,185 @@
+Nice, glad it’s all green functionally 🎉
+If SkipLoggingListener still isn’t 100% covered, it’s almost always because some **branches** haven’t been hit:
+
+* `onSkipInRead(...)` success path
+* `onSkipInRead(...)` where no XML filename is found
+* `onSkipInWrite(...)` path
+* maybe `afterStep(...)` (tiny, but JaCoCo counts it)
+
+You already have tests for:
+
+* `onSkipInProcess` → success (move PGP + upload ZIP + remove key)
+* `onSkipInProcess` → bundle not found (no COS calls)
+
+So let’s add **three more tests** to finish it off.
+
+Below methods assume your *current* listener:
+
+* Map key = **xmlFileName** (e.g. `"invoice_123.xml"`)
+* `InvoiceBundle(xmlFileName, processedPgpKey, localZipFile)`
+* `onSkipInRead(Throwable)` extracts xml from message and calls `handleSkipByXml(...)`
+* `onSkipInWrite(item, Throwable)` also uses `resolveXmlFileName(item)` and then `handleSkipByXml(...)`
+* `moveBundleToFailed` does:
+
+  * `moveFile(processed/<name>.zip.pgp → failed/<name>.xml_failed.zip.pgp)`
+  * `uploadFile(failed/<name>.xml_failed.zip, localZipFile)`
+  * `removeProcessedKey(stepExecution, "<name>.zip.pgp")`
+
+---
+
+## ✅ 1) `onSkipInRead` – happy path (XML in message)
+
+Add this to your existing `SkipLoggingListenerTest`:
+
+```java
+@Test
+void onSkipInRead_withXmlInMessage_movesPgp_uploadsZip_removesKey() throws Exception {
+    String xmlFile = "invoice_999.xml";
+    String base    = "invoice_999";
+    String pgpKey  = "processed/" + base + ".zip.pgp";
+
+    // real local zip so exists() is true
+    File localZip = new File(tempDir, base + ".zip");
+    localZip.createNewFile();
+
+    InvoiceBundle bundle = new InvoiceBundle(xmlFile, pgpKey, localZip);
+
+    Map<String, InvoiceBundle> bundleMap = new HashMap<>();
+    bundleMap.put(xmlFile, bundle);
+
+    jobExecution.getExecutionContext().put("invoiceBundles", bundleMap);
+    jobExecution.getExecutionContext().put(
+            CosProcessedContextSupport.PROCESSED_COS_KEYS,
+            List.of(base + ".zip.pgp")
+    );
+
+    listener.beforeStep(stepExecution);
+
+    // message contains "... invoice_999.xml ..."
+    listener.onSkipInRead(new RuntimeException("XSD validation failed for invoice_999.xml"));
+
+    verify(cosStorageService).moveFile(
+            eq("processed/" + base + ".zip.pgp"),
+            eq("failed/" + base + ".xml_failed.zip.pgp")
+    );
+    verify(cosStorageService).uploadFile(
+            eq("failed/" + base + ".xml_failed.zip"),
+            eq(localZip)
+    );
+
+    @SuppressWarnings("unchecked")
+    List<String> updatedKeys =
+            (List<String>) jobExecution.getExecutionContext()
+                    .get(CosProcessedContextSupport.PROCESSED_COS_KEYS);
+    assertThat(updatedKeys).doesNotContain(base + ".zip.pgp");
+}
+```
+
+This covers:
+
+* `onSkipInRead(...)` → `extractXmlFileName(...)` → success
+* `handleSkipByXml(...)` + `moveBundleToFailed(...)`
+* `removeProcessedKey(...)` called from read path as well
+
+---
+
+## ✅ 2) `onSkipInRead` – no XML in message (early return)
+
+This hits the “no filename found” branch inside `extractXmlFileName` / `onSkipInRead`:
+
+```java
+@Test
+void onSkipInRead_withoutXmlInMessage_doesNotCallCosService() {
+    // no bundleMap, or doesn’t matter – should exit before lookup
+    listener.beforeStep(stepExecution);
+
+    listener.onSkipInRead(new RuntimeException("Some generic error without xml name"));
+
+    verifyNoInteractions(cosStorageService);
+}
+```
+
+Now the **negative branch** of your filename extraction (no `.xml` in message) is covered.
+
+---
+
+## ✅ 3) `onSkipInWrite` – same as process, but different hook
+
+Finally, call `onSkipInWrite` with a `File` so `resolveXmlFileName(item)` returns the right xmlFileName:
+
+```java
+@Test
+void onSkipInWrite_movesPgp_uploadsZip() throws Exception {
+    String xmlFile = "invoice_777.xml";
+    String base    = "invoice_777";
+    String pgpKey  = "processed/" + base + ".zip.pgp";
+
+    File localZip = new File(tempDir, base + ".zip");
+    localZip.createNewFile();
+
+    InvoiceBundle bundle = new InvoiceBundle(xmlFile, pgpKey, localZip);
+
+    Map<String, InvoiceBundle> bundleMap = new HashMap<>();
+    bundleMap.put(xmlFile, bundle);
+
+    jobExecution.getExecutionContext().put("invoiceBundles", bundleMap);
+    jobExecution.getExecutionContext().put(
+            CosProcessedContextSupport.PROCESSED_COS_KEYS,
+            List.of(base + ".zip.pgp")
+    );
+
+    listener.beforeStep(stepExecution);
+
+    File item = new File(tempDir, xmlFile);
+    listener.onSkipInWrite(item, new RuntimeException("Write failed"));
+
+    verify(cosStorageService).moveFile(
+            eq("processed/" + base + ".zip.pgp"),
+            eq("failed/" + base + ".xml_failed.zip.pgp")
+    );
+    verify(cosStorageService).uploadFile(
+            eq("failed/" + base + ".xml_failed.zip"),
+            eq(localZip)
+    );
+}
+```
+
+This gives coverage for:
+
+* `onSkipInWrite(...)`
+* `resolveXmlFileName(item)` success path
+* `handleSkipByXml(...)` from write branch
+
+---
+
+## (Optional) 4) `afterStep` trivial coverage
+
+If JaCoCo still complains about one tiny method, just call it once:
+
+```java
+@Test
+void afterStep_returnsCompleted() {
+    assertThat(listener.afterStep(stepExecution).getExitCode())
+            .isEqualTo("COMPLETED");
+}
+```
+
+---
+
+With these additional tests on top of what you already have, `SkipLoggingListener` should be **effectively 100% covered**:
+
+* beforeStep / afterStep
+* onSkipInRead (success + no-xml)
+* onSkipInProcess (success + no-bundle)
+* onSkipInWrite (success)
+* extractXmlFileName / resolveXmlFileName branches
+* moveBundleToFailed (move + upload + removeProcessedKey paths)
+
+If you still see a small uncovered line after this, send me the coverage report snippet (which line), and I’ll nail that specific branch.
+
+
+
+-----------------------------
 Right, that makes sense now — the missing `uploadFile` call in the **test** is almost certainly because of this line in your real code:
 
 ```java
