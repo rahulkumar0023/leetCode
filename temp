@@ -1,3 +1,228 @@
+Nice, this is a good symptom to debug 👍
+If cosStorageService.moveFile(...) is not being invoked in your SkipLoggingListener test, it almost always means one of these is wrong:
+	1.	beforeStep(...) wasn’t called → bundleMap is still empty
+	2.	The map key you put in the context doesn’t match what the listener looks up
+	3.	The item filename in the test doesn’t resolve to that map key
+
+In your current AC_2_Dec version, the listener works with a base name, not the full XML filename. Let’s align the test with the real code.
+
+⸻
+
+1️⃣ What the real SkipLoggingListener does
+
+From AC_2_Dec, the relevant bits are:
+
+@Slf4j
+public class SkipLoggingListener implements SkipListener<Object, Object>, StepExecutionListener {
+
+    private final CosStorageService cosStorageService;
+    private Map<String, InvoiceBundle> bundleMap = Collections.emptyMap();
+    private StepExecution stepExecution;
+
+    public SkipLoggingListener(CosStorageService cosStorageService) {
+        this.cosStorageService = cosStorageService;
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public void beforeStep(StepExecution stepExecution) {
+        this.stepExecution = stepExecution;
+        ExecutionContext ctx =
+                stepExecution.getJobExecution().getExecutionContext();
+        Object mapObj = ctx.get("invoiceBundles");
+        if (mapObj instanceof Map) {
+            this.bundleMap = (Map<String, InvoiceBundle>) mapObj;
+        } else {
+            this.bundleMap = Collections.emptyMap();
+        }
+    }
+
+    @Override
+    public void onSkipInProcess(Object item, Throwable t) {
+        String base = resolveBaseName(item);
+        if (base != null) {
+            handleSkipByBase("process", base, t);
+        }
+    }
+
+    private String resolveBaseName(Object item) {
+        String name = null;
+        if (item instanceof File f)      name = f.getName();
+        else if (item instanceof Path p) name = p.getFileName().toString();
+        else if (item instanceof Resource r) name = r.getFilename();
+
+        if (name == null) return null;
+
+        name = name.toLowerCase();
+        if (name.endsWith(".xml")) {
+            return name.substring(0, name.length() - 4); // strip .xml
+        }
+        return name;
+    }
+
+    private void handleSkipByBase(String phase, String base, Throwable t) {
+        InvoiceBundle bundle = bundleMap.get(base);
+        if (bundle == null) {
+            log.warn("No bundle mapping found for base {}", base);
+            return;
+        }
+        moveBundleToFailed(bundle);
+    }
+
+    private void moveBundleToFailed(InvoiceBundle bundle) {
+        String processedPgpKey = bundle.getProcessedPgpKey();
+        String processedZipKey = bundle.getProcessedZipKey();
+
+        String failedPgpKey = processedPgpKey.replaceFirst("^processed/", "failed/");
+        String failedZipKey  = processedZipKey.replaceFirst("^processed/", "failed/");
+
+        cosStorageService.moveFile(processedPgpKey, failedPgpKey);
+        cosStorageService.moveFile(processedZipKey, failedZipKey);
+    }
+}
+
+And InvoiceBundle (base-name based) is:
+
+@Getter
+@AllArgsConstructor
+public class InvoiceBundle {
+    /** xml base name without ".xml" — same as currentResourceBaseName */
+    private final String baseName;
+    private final String processedPgpKey; // e.g. processed/in123.zip.pgp
+    private final String processedZipKey; // e.g. processed/in123.zip
+}
+
+Important details for the test:
+	•	bundleMap is keyed by base (no .xml, lowercased), e.g. "inv123".
+	•	resolveBaseName(new File("inv123.xml")) → "inv123".
+	•	beforeStep(...) must be called so bundleMap is loaded.
+	•	moveBundleToFailed always calls cosStorageService.moveFile twice.
+
+If in your test you did e.g.:
+
+bundleMap.put("inv123.xml", bundle);
+File item = new File("inv123.xml");
+
+then base == "inv123" and bundleMap.get("inv123") == null →
+no moveFile call → your verify fails.
+
+⸻
+
+2️⃣ Fixed JUnit test for SkipLoggingListener
+
+Here’s a test that matches the real behaviour and will make moveFile be invoked:
+
+package com.bnpp.pf.einvoice.connect.batch.listener;
+
+import com.bnpp.pf.einvoice.connect.batch.model.InvoiceBundle;
+import com.bnpp.pf.einvoice.connect.storage.CosStorageService;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.StepExecution;
+import org.springframework.batch.item.ExecutionContext;
+import org.springframework.batch.test.MetaDataInstanceFactory;
+
+import java.io.File;
+import java.util.HashMap;
+import java.util.Map;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.*;
+
+class SkipLoggingListenerTest {
+
+    private CosStorageService cosStorageService;
+    private SkipLoggingListener listener;
+
+    private JobExecution jobExecution;
+    private StepExecution stepExecution;
+
+    @BeforeEach
+    void setUp() {
+        cosStorageService = mock(CosStorageService.class);
+        listener = new SkipLoggingListener(cosStorageService);
+
+        stepExecution = MetaDataInstanceFactory.createStepExecution();
+        jobExecution = stepExecution.getJobExecution();
+    }
+
+    @Test
+    void onSkipInProcess_shouldMoveBundleFilesToFailed() {
+        // given
+        // base name used by listener & bundleMap
+        String base = "inv123";
+
+        // bundle with processed keys
+        InvoiceBundle bundle = new InvoiceBundle(
+                base,
+                "processed/" + base + ".zip.pgp",
+                "processed/" + base + ".zip"
+        );
+
+        // bundleMap keyed by BASE (without .xml), exactly what listener expects
+        Map<String, InvoiceBundle> bundleMap = new HashMap<>();
+        bundleMap.put(base, bundle);
+
+        // put into job execution context under "invoiceBundles"
+        ExecutionContext jobCtx = jobExecution.getExecutionContext();
+        jobCtx.put("invoiceBundles", bundleMap);
+
+        // initialize listener (loads bundleMap)
+        listener.beforeStep(stepExecution);
+
+        // when: skip happens for file "inv123.xml"
+        File item = new File("inv123.xml");
+        listener.onSkipInProcess(item, new RuntimeException("XSD validation failed"));
+
+        // then: both .zip.pgp and .zip are moved from processed -> failed
+        verify(cosStorageService).moveFile(
+                eq("processed/inv123.zip.pgp"),
+                eq("failed/inv123.zip.pgp")
+        );
+        verify(cosStorageService).moveFile(
+                eq("processed/inv123.zip"),
+                eq("failed/inv123.zip")
+        );
+    }
+}
+
+Why this will now pass
+	•	resolveBaseName(new File("inv123.xml")) → "inv123"
+	•	bundleMap is keyed with "inv123" → bundle is found
+	•	moveBundleToFailed(bundle) is called and invokes moveFile twice
+	•	Mockito verification sees those invocations 🎯
+
+⸻
+
+3️⃣ If you’re already on the xml_failed.zip.pgp + upload zip version
+
+If you’ve already applied the later change where:
+	•	you rename PGP to failed/<base>.xml_failed.zip.pgp, and
+	•	you upload the local .zip instead of moving a processed .zip in COS,
+
+then tweak the assertions in the test, like:
+
+verify(cosStorageService).moveFile(
+        eq("processed/inv123.zip.pgp"),
+        eq("failed/inv123.xml_failed.zip.pgp")
+);
+
+verify(cosStorageService).uploadFile(
+        eq("failed/inv123.xml_failed.zip"),
+        eq(localZipFile)
+);
+
+…and still make sure your map key is "inv123" and beforeStep(...) is called.
+
+⸻
+
+If you paste your current SkipLoggingListener (the exact version you have in the project now), I can adjust this test 1:1 to match your arguments (xml_failed naming, local zip, removal from processedCosKeys, etc.), but the core reason moveFile wasn’t invoked is definitely: bundle was never found → moveBundleToFailed never called.
+
+
+
 Nice, glad it’s all working 🎉
 Let’s add JUnit tests to cover:
 
