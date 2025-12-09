@@ -1,3 +1,173 @@
+Nice, this is a good place to add some “safety-net” tests 👍
+I’ll stick to your **existing `FetchDecryptUnzipTaskletTest` style** (with `@TempDir`, `BasePathConfigTest`, `taskLet`, `makeZip`, `encrypt`, `decryptAnswer`, etc.) and just give you **extra test methods** to paste into that class.
+
+No `eq(...)`, no regex, Sonar-friendly.
+
+---
+
+## 1️⃣ Tests for `registerBundle(...)`
+
+We’ll call the private method via reflection:
+
+```java
+// add with your other imports
+import com.bnpp.pf.einvoice.connect.batch.model.InvoiceBundle;
+import java.lang.reflect.Method;
+import java.nio.file.Files;
+import java.util.HashMap;
+import java.util.Map;
+```
+
+### a) Happy path – XML entry found and bundle registered
+
+```java
+@Test
+void registerBundle_registersFirstXmlEntry() throws Exception {
+    // given
+    Map<String, InvoiceBundle> bundleMap = new HashMap<>();
+
+    // create a zip that contains an XML file (using your helper)
+    Path zipPath = makeZip(
+            tmp.resolve("bundle_with_xml.zip"),
+            "subdir/invoice_123.xml",
+            "<root/>"
+    );
+
+    Method m = FetchDecryptUnzipTasklet.class.getDeclaredMethod(
+            "registerBundle", Map.class, File.class, String.class);
+    m.setAccessible(true);
+
+    // when
+    m.invoke(taskLet, bundleMap, zipPath.toFile(), "bundle_with_xml.zip.pgp");
+
+    // then
+    // key is the XML file name (without path): "invoice_123.xml"
+    assertThat(bundleMap).hasSize(1);
+    assertThat(bundleMap.containsKey("invoice_123.xml")).isTrue();
+
+    InvoiceBundle bundle = bundleMap.get("invoice_123.xml");
+    assertThat(bundle).isNotNull();
+    assertThat(bundle.getXmlFileName()).isEqualTo("invoice_123.xml");
+    assertThat(bundle.getProcessedPgpKey())
+            .isEqualTo("processed/" + "bundle_with_xml.zip.pgp");
+    assertThat(bundle.getLocalZipFile()).isEqualTo(zipPath.toFile());
+}
+```
+
+### b) No XML entry → nothing registered (hits `xmlEntryName == null` branch)
+
+```java
+@Test
+void registerBundle_whenNoXmlEntry_doesNotRegisterBundle() throws Exception {
+    // given
+    Map<String, InvoiceBundle> bundleMap = new HashMap<>();
+
+    // zip with only a non-XML entry
+    Path zipPath = makeZip(
+            tmp.resolve("bundle_no_xml.zip"),
+            "readme.txt",
+            "some text"
+    );
+
+    Method m = FetchDecryptUnzipTasklet.class.getDeclaredMethod(
+            "registerBundle", Map.class, File.class, String.class);
+    m.setAccessible(true);
+
+    // when (should not throw)
+    m.invoke(taskLet, bundleMap, zipPath.toFile(), "bundle_no_xml.zip.pgp");
+
+    // then
+    assertThat(bundleMap).isEmpty();  // Sonar-friendly emptiness check
+}
+```
+
+### c) Zip open throws (corrupt / non-zip file) → caught in `catch (Exception e)`
+
+```java
+@Test
+void registerBundle_whenZipOpenFails_doesNotRegisterBundle() throws Exception {
+    // given
+    Map<String, InvoiceBundle> bundleMap = new HashMap<>();
+
+    // create a plain text file, not a real ZIP
+    Path notZip = tmp.resolve("not_a_zip.bin");
+    Files.writeString(notZip, "this is not a zip");
+
+    Method m = FetchDecryptUnzipTasklet.class.getDeclaredMethod(
+            "registerBundle", Map.class, File.class, String.class);
+    m.setAccessible(true);
+
+    // when (ZipFile.builder().get() will throw, method must swallow and return)
+    m.invoke(taskLet, bundleMap, notZip.toFile(), "not_a_zip.bin.pgp");
+
+    // then
+    assertThat(bundleMap).isEmpty();
+}
+```
+
+Those three tests cover:
+
+* normal XML case
+* the `xmlEntryName == null` branch
+* the outer `catch (Exception e)` inside `registerBundle`
+
+---
+
+## 2️⃣ Test for the **outer `catch (Exception e)`** in `execute(...)`
+
+This is the block at the bottom of `execute` that logs *“FetchDecryptUnzipTasklet failed”* and wraps in `InvoiceProcessingException`.
+
+Add import:
+
+```java
+import com.bnpp.pf.einvoice.connect.exception.InvoiceProcessingException;
+import org.springframework.test.util.ReflectionTestUtils;
+```
+
+And the test:
+
+```java
+@Test
+void execute_whenFetchEncryptedFilesThrows_wrapsInInvoiceProcessingException() throws Exception {
+    // given
+    ReflectionTestUtils.setField(taskLet, "jobType", "xml");
+
+    when(cos.fetchEncryptedFiles("xml"))
+            .thenThrow(new RuntimeException("COS unavailable"));
+
+    // when / then
+    assertThatThrownBy(() -> taskLet.execute(c, ctx))
+            .isInstanceOf(InvoiceProcessingException.class)
+            .hasMessageContaining("Error occurred while fetching encrypted files");
+}
+```
+
+This hits the **outermost try/catch** around the whole `execute` body.
+
+---
+
+### What you’ll have covered after adding these:
+
+* `registerBundle`:
+
+  * normal flow (XML found, bundle added)
+  * no XML found → `xmlEntryName == null` path
+  * Zip failure → inner try’s `catch (Exception e)` path
+* `execute`:
+
+  * inner per-bundle catch (you already covered with your previous test)
+  * outer `catch (Exception e)` wrapping in `InvoiceProcessingException`
+
+All of this uses:
+
+* no `eq(...)`
+* explicit `isEmpty()` / `isNullOrEmpty()` / size checks
+* no regex
+
+So Sonar and JaCoCo should both be happy.
+
+
+-----------------
 Got it, thanks for the screenshot—that helps.
 
 Here’s a refactored version of **your current `registerBundle`** that:
