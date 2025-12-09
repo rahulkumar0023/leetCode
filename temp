@@ -1,3 +1,179 @@
+Nice, the screenshots help — I see exactly what’s going on now.
+
+* **XML writer**:
+
+  ```java
+  invoiceFileName = getInvoiceFileName(invoice, invoiceFileName);
+  createOutputxml(invoice, outputDir, invoiceFileName);
+  if (isJobTypeXml) {
+      String invoiceId = registry.lookup(invoice);   // original name from zip
+      pdfMover.movePDF(invoiceId, outputDir);
+  }
+  ```
+
+  So the **output XML name** = `invoiceFileName`,
+  but the **PDF you move** is looked up by `invoiceId` from the registry.
+
+* **SplitPDFMover** today:
+
+  ```java
+  public void movePDF(String fileId, Path targetDir) {
+      Path sourceDir = pathConfig.getUnzipped().getXml();
+      Path pdfFilePath = sourceDir.resolve(fileId + ".pdf");
+      Path found = findCaseInsensitive(pdfFilePath);
+      ...
+      Path dest = uniqueIfExists(targetDir.resolve(found.getFileName()));
+      Files.copy(found, dest);
+  }
+  ```
+
+  It **finds the PDF by `fileId`** (original name from the zip) and then
+  **copies it with the same name** into the target dir.
+
+That’s why you end up with:
+
+* Output XML: `NEW_NAME.xml`
+* Output PDF: `ORIGINAL_NAME.pdf`
+
+You want:
+
+> “Use the **same name for the output XML and the PDF** (same base).”
+
+---
+
+## ✅ Strategy
+
+* Keep using `invoiceId` (from registry) to **find** the correct PDF.
+* But when copying, **rename the PDF** so its base name matches `invoiceFileName`.
+
+So:
+
+1. Pass both values from the XML writer:
+
+   * `invoiceId` → to find the source PDF
+   * `invoiceFileName` → to decide the **output** PDF name
+2. Overload `movePDF` to keep backward compatibility.
+
+---
+
+## 1️⃣ Change the XML writer call
+
+In your XML writer, change:
+
+```java
+String invoiceId = registry.lookup(invoice);
+pdfMover.movePDF(invoiceId, outputDir);
+```
+
+to:
+
+```java
+String invoiceId = registry.lookup(invoice);        // name from input zip
+pdfMover.movePDF(invoiceId, invoiceFileName, outputDir);
+```
+
+Here:
+
+* `invoiceId` = how the **input** PDF is named.
+* `invoiceFileName` = how you named the **output XML** (e.g. `NEW_NAME.xml`).
+
+---
+
+## 2️⃣ Update `SplitPDFMover` to support output name
+
+Add an **overloaded** method (keep the existing one so other callers still work).
+
+```java
+public class SplitPDFMover {
+
+    private final PathConfig pathConfig;
+
+    public SplitPDFMover(PathConfig pathConfig) {
+        this.pathConfig = pathConfig;
+    }
+
+    // old behaviour (for existing callers)
+    public void movePDF(String fileId, Path targetDir) {
+        movePDF(fileId, fileId, targetDir); // use same name as source
+    }
+
+    // new method: source id + desired output base name
+    public void movePDF(String sourceFileId, String outputFileName, Path targetDir) {
+        log.debug("move PDF started");
+        try {
+            Path sourceDir = pathConfig.getUnzipped().getXml();
+
+            // 1) find the PDF in unzipped dir by the ORIGINAL id
+            Path expected = sourceDir.resolve(sourceFileId + ".pdf");
+            Path found = findCaseInsensitive(expected);
+            if (found == null || !Files.isRegularFile(found)) {
+                log.warn("No pdf file found with file id: {}, skipped move PDF", sourceFileId);
+                return;
+            }
+
+            // 2) derive SAFE target file name from the XML file name
+            //    - keep only last path segment
+            //    - strip .xml if present
+            String safeName = Paths.get(outputFileName).getFileName().toString();
+            int dot = safeName.lastIndexOf('.');
+            String base = (dot > 0) ? safeName.substring(0, dot) : safeName;
+            String targetPdfName = base + ".pdf";
+
+            Files.createDirectories(targetDir);
+
+            Path dest = uniqueIfExists(targetDir.resolve(targetPdfName));
+            Files.copy(found, dest);
+
+            log.info("Moving PDF file from {} to {}", found, dest);
+        } catch (IOException ex) {
+            log.error(ex.getMessage(), ex);
+        }
+        log.debug("move PDF completed");
+    }
+
+    // ... existing findCaseInsensitive(...) and uniqueIfExists(...) stay as-is
+}
+```
+
+### What this does
+
+* Uses `sourceFileId` to **locate** the PDF in `/unzipped/xml`.
+* Computes the **target PDF name** from the same value you used
+  to name the XML (`invoiceFileName`):
+
+  * Strips any directory part
+  * Strips `.xml` if present
+  * Appends `.pdf`
+* Copies the PDF into `targetDir` with that **new name**.
+
+So, if:
+
+* incoming zip contained: `12345.xml` + `12345.pdf`
+* your XML writer decides to name the output XML: `INV-2024-0001.xml`
+
+Then after these changes, output folder will contain:
+
+```text
+INV-2024-0001.xml
+INV-2024-0001.pdf
+```
+
+Both are aligned ✅
+
+---
+
+If you’d like, I can also:
+
+* Add a small JUnit test for `SplitPDFMover.movePDF(sourceId, outputFileName, targetDir)`
+  using `@TempDir` to verify that the PDF is renamed to match the XML name.
+
+
+
+
+
+
+
+==========
 Nice, this is a good place to add some “safety-net” tests 👍
 I’ll stick to your **existing `FetchDecryptUnzipTaskletTest` style** (with `@TempDir`, `BasePathConfigTest`, `taskLet`, `makeZip`, `encrypt`, `decryptAnswer`, etc.) and just give you **extra test methods** to paste into that class.
 
