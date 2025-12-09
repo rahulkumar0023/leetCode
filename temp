@@ -1,3 +1,64 @@
+Here’s a cleaner `registerBundle` that avoids `continue` inside the loop and has a single early return after the loop. It matches the latest design (bundle keyed by XML **base name**, with `processedPgpKey` and `processedZipKey`):
+
+```java
+private void registerBundle(Map<String, InvoiceBundle> bundleMap,
+                            File decryptedZip,
+                            String encryptedName) {
+    try (ZipFile zip = ZipFile.builder()
+            .setFile(decryptedZip)
+            .setCharset(StandardCharsets.UTF_8)
+            .get()) {
+
+        ZipArchiveEntry xmlEntry = null;
+        Enumeration<ZipArchiveEntry> entries = zip.getEntries();
+
+        while (entries.hasMoreElements() && xmlEntry == null) {
+            ZipArchiveEntry entry = entries.nextElement();
+
+            String entryName = entry.getName();
+            boolean isXmlFile = !entry.isDirectory()
+                    && entryName != null
+                    && entryName.toLowerCase(Locale.ROOT).endsWith(".xml");
+
+            if (isXmlFile) {
+                xmlEntry = entry;
+            }
+        }
+
+        if (xmlEntry == null) {
+            log.warn("No XML entry found in zip {} - bundle mapping not registered",
+                    decryptedZip.getName());
+            return;
+        }
+
+        String entryName = xmlEntry.getName();
+        String xmlFileName = Paths.get(entryName).getFileName().toString(); // e.g. inv123.xml
+        String base = xmlFileName.substring(0, xmlFileName.length() - 4);    // inv123
+
+        String processedPgpKey = "processed/" + encryptedName;                    // processed/foo.zip.pgp
+        String processedZipKey = "processed/" + encryptedName.replace(".pgp", ""); // processed/foo.zip
+
+        InvoiceBundle bundle = new InvoiceBundle(base, processedPgpKey, processedZipKey);
+        bundleMap.put(base, bundle);
+
+        log.info("Registered bundle: base={} pgpKey={} zipKey={}",
+                base, processedPgpKey, processedZipKey);
+
+    } catch (Exception e) {
+        log.warn("Failed to register bundle for {}: {}", encryptedName, e.getMessage());
+    }
+}
+```
+
+What changed vs. the previous version:
+
+* No `continue` in the loop.
+* No `return` from inside the loop.
+* Loop just finds the first valid XML entry (`xmlEntry`), then post-processes it.
+* Single early return only for the “no XML found” case, which keeps the method simple and Sonar-friendly.
+
+
+
 import com.bnpp.pf.einvoice.connect.batch.cos.CosProcessedContextSupport;
 import org.springframework.batch.repeat.RepeatStatus;
 import org.springframework.test.util.ReflectionTestUtils;
