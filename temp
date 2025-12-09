@@ -1,15 +1,128 @@
-private String extractXmlFromMessageLoose(String msg) {
-    if (msg == null) return null;
+Absolutely — here is a **clean, complete JUnit test suite for your `BadXmlException` class**.
 
-    int idx = msg.lastIndexOf(".xml");
-    if (idx == -1) return null;
+This assumes your class looks like the typical custom exception you added earlier:
 
-    int start = msg.lastIndexOf(' ', idx); // good enough now
-    if (start == -1) start = 0;
+```java
+public class BadXmlException extends RuntimeException {
+    
+    private final String xmlFileName;
 
-    return msg.substring(start).trim();
+    public BadXmlException(String message, String xmlFileName) {
+        super(message);
+        this.xmlFileName = xmlFileName;
+    }
+
+    public BadXmlException(String message, String xmlFileName, Throwable cause) {
+        super(message, cause);
+        this.xmlFileName = xmlFileName;
+    }
+
+    public String getXmlFileName() {
+        return xmlFileName;
+    }
 }
+```
 
+If your version has slightly different fields or constructors, just tell me — I'll regenerate the exact test.
+
+---
+
+# ✅ **JUnit for `BadXmlException` (JUnit 5)**
+
+This test covers:
+
+* message correctness
+* xmlFileName is stored properly
+* cause handling works
+* both constructors
+* `getXmlFileName()` correctness
+* exception thrown behavior
+
+Put this in:
+`src/test/java/.../BadXmlExceptionTest.java`
+
+```java
+import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.*;
+
+class BadXmlExceptionTest {
+
+    @Test
+    void constructor_withMessageAndFileName_setsFieldsCorrectly() {
+        // Arrange
+        String msg = "Invalid XML structure";
+        String file = "invoice_123.xml";
+
+        // Act
+        BadXmlException ex = new BadXmlException(msg, file);
+
+        // Assert
+        assertThat(ex.getMessage()).isEqualTo(msg);
+        assertThat(ex.getXmlFileName()).isEqualTo(file);
+        assertThat(ex.getCause()).isNull();
+    }
+
+    @Test
+    void constructor_withMessageFileNameAndCause_setsAllFieldsCorrectly() {
+        // Arrange
+        String msg = "Schema validation failed";
+        String file = "invoice_999.xml";
+        Throwable cause = new RuntimeException("Missing <cbc:ID>");
+
+        // Act
+        BadXmlException ex = new BadXmlException(msg, file, cause);
+
+        // Assert
+        assertThat(ex.getMessage()).isEqualTo(msg);
+        assertThat(ex.getXmlFileName()).isEqualTo(file);
+        assertThat(ex.getCause()).isEqualTo(cause);
+    }
+
+    @Test
+    void thrownException_isCatchableAndHasCorrectFields() {
+        // Arrange
+        String msg = "Parse error";
+        String file = "broken.xml";
+
+        // Act & Assert
+        try {
+            throw new BadXmlException(msg, file);
+        } catch (BadXmlException ex) {
+            assertThat(ex.getMessage()).isEqualTo(msg);
+            assertThat(ex.getXmlFileName()).isEqualTo(file);
+        }
+    }
+
+    @Test
+    void xmlFileName_canBeNull() {
+        // Act
+        BadXmlException ex = new BadXmlException("error", null);
+
+        // Assert
+        assertThat(ex.getXmlFileName()).isNull();
+    }
+
+    @Test
+    void message_canBeNull() {
+        // Act
+        BadXmlException ex = new BadXmlException(null, "some.xml");
+
+        // Assert
+        assertThat(ex.getMessage()).isNull();
+        assertThat(ex.getXmlFileName()).isEqualTo("some.xml");
+    }
+}
+```
+
+
+
+
+Just say **“give me BadXmlException integration tests”**.
+
+
+
+----------------
 
 
 
