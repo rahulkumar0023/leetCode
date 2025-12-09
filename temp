@@ -1,4 +1,80 @@
 import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.*;
+
+class BadXmlExceptionTest {
+
+    @Test
+    void constructor_withMessageAndFileName_setsFieldsCorrectly() {
+        // Arrange
+        String msg = "Invalid XML structure";
+        String file = "invoice_123.xml";
+
+        // Act
+        BadXmlException ex = new BadXmlException(msg, file);
+
+        // Assert
+        assertThat(ex.getMessage()).isEqualTo(msg);
+        assertThat(ex.getXmlFileName()).isEqualTo(file);
+        assertThat(ex.getCause()).isNull();
+    }
+
+    @Test
+    void constructor_withMessageFileNameAndCause_setsAllFieldsCorrectly() {
+        // Arrange
+        String msg = "Schema validation failed";
+        String file = "invoice_999.xml";
+        Throwable cause = new RuntimeException("Missing <cbc:ID>");
+
+        // Act
+        BadXmlException ex = new BadXmlException(msg, file, cause);
+
+        // Assert
+        assertThat(ex.getMessage()).isEqualTo(msg);
+        assertThat(ex.getXmlFileName()).isEqualTo(file);
+        assertThat(ex.getCause()).isEqualTo(cause);
+    }
+
+    @Test
+    void thrownException_isCatchableAndHasCorrectFields() {
+        // Arrange
+        String msg = "Parse error";
+        String file = "broken.xml";
+
+        // Act & Assert
+        try {
+            throw new BadXmlException(msg, file);
+        } catch (BadXmlException ex) {
+            assertThat(ex.getMessage()).isEqualTo(msg);
+            assertThat(ex.getXmlFileName()).isEqualTo(file);
+        }
+    }
+
+    @Test
+    void xmlFileName_canBeNull() {
+        // Act
+        BadXmlException ex = new BadXmlException("error", null);
+
+        // Assert
+        assertThat(ex.getXmlFileName()).isNull();
+    }
+
+    @Test
+    void message_canBeNull() {
+        // Act
+        BadXmlException ex = new BadXmlException(null, "some.xml");
+
+        // Assert
+        assertThat(ex.getMessage()).isNull();
+        assertThat(ex.getXmlFileName()).isEqualTo("some.xml");
+    }
+}
+
+
+
+---------------------------------
+
+import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.*;
 
 class BadXmlExceptionTest {
