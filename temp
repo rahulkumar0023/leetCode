@@ -1,29 +1,26 @@
-Absolutely — here is a **clean, complete JUnit test suite for your `BadXmlException` class**.
+import org.junit.jupiter.api.Test;
+import static org.assertj.core.api.Assertions.*;
 
-This assumes your class looks like the typical custom exception you added earlier:
+class BadXmlExceptionTest {
 
-```java
-public class BadXmlException extends RuntimeException {
-    
-    private final String xmlFileName;
+    @Test
+    void constructor_withMessage_setsMessage() {
+        BadXmlException ex = new BadXmlException("Invalid XML");
 
-    public BadXmlException(String message, String xmlFileName) {
-        super(message);
-        this.xmlFileName = xmlFileName;
+        assertThat(ex.getMessage()).isEqualTo("Invalid XML");
+        assertThat(ex.getCause()).isNull();
     }
 
-    public BadXmlException(String message, String xmlFileName, Throwable cause) {
-        super(message, cause);
-        this.xmlFileName = xmlFileName;
-    }
+    @Test
+    void constructor_withMessageAndCause_setsFields() {
+        Throwable cause = new RuntimeException("Missing field");
+        BadXmlException ex = new BadXmlException("Bad XML", cause);
 
-    public String getXmlFileName() {
-        return xmlFileName;
+        assertThat(ex.getMessage()).isEqualTo("Bad XML");
+        assertThat(ex.getCause()).isSameAs(cause);
     }
 }
-```
 
-If your version has slightly different fields or constructors, just tell me — I'll regenerate the exact test.
 
 ---
 
