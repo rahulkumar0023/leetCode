@@ -1,3 +1,77 @@
+Got it, thanks for the screenshot—that helps.
+
+Here’s a refactored version of **your current `registerBundle`** that:
+
+* Removes all `continue`
+* Removes the `return` from inside the `while`
+* Keeps exactly the same behavior (first XML entry wins, one XML per zip)
+* Is Sonar-friendly (`toLowerCase(Locale.ROOT)` etc.)
+
+```java
+private void registerBundle(Map<String, InvoiceBundle> bundleMap,
+                            File decryptedZip,
+                            String encryptedName) {
+    try (ZipFile zip = ZipFile.builder()
+            .setFile(decryptedZip)
+            .setCharset(StandardCharsets.UTF_8)
+            .get()) {
+
+        String xmlEntryName = null;
+        Enumeration<ZipArchiveEntry> entries = zip.getEntries();
+
+        // find first non-directory XML entry
+        while (entries.hasMoreElements() && xmlEntryName == null) {
+            ZipArchiveEntry entry = entries.nextElement();
+            if (entry.isDirectory()) {
+                continue;
+            }
+
+            String entryName = entry.getName();
+            if (entryName != null
+                    && entryName.toLowerCase(Locale.ROOT).endsWith(".xml")) { // adjust suffix if needed
+                xmlEntryName = entryName;
+            }
+        }
+
+        if (xmlEntryName == null) {
+            log.warn("No XML entry found in zip {} - bundle mapping not registered",
+                    decryptedZip.getName());
+            return;
+        }
+
+        // XML file name with extension (key in the map)
+        String xmlFileName = Paths.get(xmlEntryName).getFileName().toString();
+
+        // PGP in COS: processed/<encryptedName>
+        String processedPgpKey = PROCESSED + encryptedName;
+
+        InvoiceBundle bundle = new InvoiceBundle(xmlFileName, processedPgpKey, decryptedZip);
+        bundleMap.put(xmlFileName, bundle);
+
+        log.info("Registered bundle mapping: xml={} pgpKey={} localZip={}",
+                xmlFileName, processedPgpKey, decryptedZip.getAbsolutePath());
+
+    } catch (Exception e) {
+        log.warn("Failed to register bundle for {}: {}", encryptedName, e.getMessage());
+    }
+}
+```
+
+If you’d like to completely avoid even that final `return`, you can invert the `if`:
+
+```java
+if (xmlEntryName != null) {
+    // create bundle...
+} else {
+    log.warn(...);
+}
+```
+
+but functionally it’s the same—no more `continue` and no `return` inside the loop.
+
+
+--------
+
 Here’s a cleaner `registerBundle` that avoids `continue` inside the loop and has a single early return after the loop. It matches the latest design (bundle keyed by XML **base name**, with `processedPgpKey` and `processedZipKey`):
 
 ```java
