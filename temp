@@ -1,3 +1,58 @@
+import com.bnpp.pf.einvoice.connect.batch.cos.CosProcessedContextSupport;
+import org.springframework.batch.repeat.RepeatStatus;
+import org.springframework.test.util.ReflectionTestUtils;
+// other imports you already have...
+
+// ...
+
+@Test
+void execute_whenDecryptFails_movesFilesToFailedAndRemovesProcessedKey() throws Exception {
+    // jobType so that file matches the branch
+    ReflectionTestUtils.setField(taskLet, "jobType", "csv");
+
+    // 1) create a real zip + .pgp so decryptFile() runs, then fails inside decrypt
+    Path zip = makeZip("invoice_123_csv.zip", "doc.csv", "data");
+    Path pgp = encrypt(zip); // creates "invoice_123_csv.zip.pgp" next to zip
+
+    // cos.fetchEncryptedFiles("csv") returns our pgp file
+    when(cos.fetchEncryptedFiles("csv")).thenReturn(List.of(pgp.toFile()));
+
+    // 2) override default decrypt behaviour: now it ALWAYS throws
+    // (this is after decryptAnswer() from @BeforeEach, last stubbing wins)
+    doThrow(new RuntimeException("decrypt boom"))
+            .when(pgpDecrypt)
+            .decrypt(any(InputStream.class), any(OutputStream.class));
+
+    // 3) stub cos.moveFile so both calls happen, even if they throw
+    //    (inner catch blocks will swallow these)
+    doThrow(new RuntimeException("move failed"))
+            .when(cos)
+            .moveFile(anyString(), anyString());
+
+    // 4) execute
+    RepeatStatus status = taskLet.execute(c, ctx);
+    assertThat(status).isEqualTo(RepeatStatus.FINISHED);
+
+    // 5) verify both moveFile calls were attempted with the right keys
+    String encryptedName = pgp.getFileName().toString();         // invoice_123_csv.zip.pgp
+    String baseName      = encryptedName.replace(".pgp", "");    // invoice_123_csv.zip
+
+    verify(cos).moveFile("processed/" + encryptedName, "failed/" + encryptedName);
+    verify(cos).moveFile("processed/" + baseName,      "failed/" + baseName);
+
+    // 6) processedCosKeys list must be cleaned up (removeProcessedKey called)
+    @SuppressWarnings("unchecked")
+    List<String> keysAfter =
+            (List<String>) se.getJobExecution()
+                    .getExecutionContext()
+                    .get(CosProcessedContextSupport.PROCESSED_COS_KEYS);
+
+    // Sonar-friendly emptiness assertion
+    assertThat(keysAfter).isNullOrEmpty();
+}
+
+----
+
 Perfect — now that I can SEE your exact **inner catch block**, I can give you a **precise JUnit test** that hits **every single line**, giving you **100% coverage** of:
 
 ### ✔ LOG statement
