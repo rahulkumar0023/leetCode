@@ -1,3 +1,18 @@
+private String extractXmlFromMessageLoose(String msg) {
+    if (msg == null) return null;
+
+    int idx = msg.lastIndexOf(".xml");
+    if (idx == -1) return null;
+
+    int start = msg.lastIndexOf(' ', idx); // good enough now
+    if (start == -1) start = 0;
+
+    return msg.substring(start).trim();
+}
+
+
+
+
 Nice, glad it’s all green functionally 🎉
 If SkipLoggingListener still isn’t 100% covered, it’s almost always because some **branches** haven’t been hit:
 
