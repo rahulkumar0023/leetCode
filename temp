@@ -1,3 +1,134 @@
+Here’s a focused JUnit 5 test class for `getSupplierName(..)` that checks:
+
+1. `null` supplier → `""`
+2. Supplier with **no** party name list → `""`
+3. Supplier with **empty** party name list → `""`
+4. Supplier with first `PartyNameType.getName()` = `null` → `""`
+5. Happy path with proper `NameType.value` → supplier name string
+
+Adjust the package + imports for your generated UBL classes.
+
+```{"id":"83421","variant":"document","title":"InvoiceBucketResolver getSupplierName tests"}
+package com.bnpp.pf.einvoice.connect.supplier;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+// Adjust these imports to your actual UBL package:
+import network.oxalis.peppol.ubl2.jaxb.cac.SupplierPartyType;
+import network.oxalis.peppol.ubl2.jaxb.cac.PartyType;
+import network.oxalis.peppol.ubl2.jaxb.cac.PartyNameType;
+import network.oxalis.peppol.ubl2.jaxb.cbc.NameType;
+
+class InvoiceBucketResolverGetSupplierNameTest {
+
+    private InvoiceBucketResolver resolver;
+
+    @BeforeEach
+    void setUp() {
+        // use your real constructor here if it has dependencies
+        resolver = new InvoiceBucketResolver();
+    }
+
+    @Test
+    void getSupplierName_returnsEmptyString_whenSupplierIsNull() {
+        String result = resolver.getSupplierName(null);
+
+        assertEquals("", result);
+    }
+
+    @Test
+    void getSupplierName_returnsEmptyString_whenPartyNameListIsNull() {
+        SupplierPartyType supplier = new SupplierPartyType();
+        PartyType party = new PartyType();
+        // partyName list left as null
+        supplier.setParty(party);
+
+        String result = resolver.getSupplierName(supplier);
+
+        assertEquals("", result);
+    }
+
+    @Test
+    void getSupplierName_returnsEmptyString_whenPartyNameListIsEmpty() {
+        SupplierPartyType supplier = new SupplierPartyType();
+        PartyType party = new PartyType();
+        party.setPartyName(new ArrayList<>()); // empty list
+        supplier.setParty(party);
+
+        String result = resolver.getSupplierName(supplier);
+
+        assertEquals("", result);
+    }
+
+    @Test
+    void getSupplierName_returnsEmptyString_whenFirstNameIsNull() {
+        SupplierPartyType supplier = new SupplierPartyType();
+        PartyType party = new PartyType();
+
+        PartyNameType partyName = new PartyNameType();
+        partyName.setName(null); // explicitly null NameType
+
+        List<PartyNameType> names = new ArrayList<>();
+        names.add(partyName);
+
+        party.setPartyName(names);
+        supplier.setParty(party);
+
+        String result = resolver.getSupplierName(supplier);
+
+        assertEquals("", result);
+    }
+
+    @Test
+    void getSupplierName_returnsFirstPartyNameValue_whenPresent() {
+        SupplierPartyType supplier = new SupplierPartyType();
+        PartyType party = new PartyType();
+
+        NameType nameType = new NameType();
+        nameType.setValue("ACME SUPPLIER");
+
+        PartyNameType partyName = new PartyNameType();
+        partyName.setName(nameType);
+
+        List<PartyNameType> names = new ArrayList<>();
+        names.add(partyName);
+
+        party.setPartyName(names);
+        supplier.setParty(party);
+
+        String result = resolver.getSupplierName(supplier);
+
+        assertEquals("ACME SUPPLIER", result);
+    }
+}
+```
+
+These tests match your implementation:
+
+```java
+public String getSupplierName(SupplierPartyType accountingSupplierParty) {
+    log.info("Finding supplier name for finance invoice ..");
+    return Optional.ofNullable(accountingSupplierParty)
+        .map(SupplierPartyType::getParty)
+        .map(PartyType::getPartyName)
+        .filter(list -> !list.isEmpty())
+        .map(list -> list.get(0).getName())
+        .filter(Objects::nonNull)
+        .map(NameType::getValue)
+        .orElse("");
+}
+```
+
+If your `InvoiceBucketResolver` requires constructor args, just adjust `setUp()` to build it with the real dependencies (or mocks, if they aren’t used by `getSupplierName`).
+
+
+================
 Perfect — I can see **exactly** why your `SplitPDFMoverTest` is failing now.
 
 Your updated `movePDF` signature is:
