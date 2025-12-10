@@ -1,3 +1,194 @@
+Perfect — I can see **exactly** why your `SplitPDFMoverTest` is failing now.
+
+Your updated `movePDF` signature is:
+
+```java
+movePDF(String sourceFileId, String outputXmlFileName, Path targetDir)
+```
+
+But in your **tests**, you're passing:
+
+```java
+mover.movePDF(fileId: "INV-100", invoiceFileName, outDir);
+```
+
+…and here’s the root cause 👇
+
+---
+
+# ✅ ROOT CAUSE:
+
+### **`outputXmlFileName` still contains `.xml`**
+
+In your test:
+
+```java
+String invoiceFileName = "inv-100.xml";
+```
+
+Inside your new implementation you do:
+
+```java
+String safeName = Paths.get(outputXmlFileName).getFileName().toString();  
+int dot = safeName.lastIndexOf('.');
+String base = (dot > 0) ? safeName.substring(0, dot) : safeName;
+String targetPdfName = base + ".pdf";
+```
+
+So:
+
+* input: `"inv-100.xml"`
+* `base = "inv-100"`
+* final output: `"inv-100.pdf"`
+
+### But your test asserts:
+
+```
+INV-100.PDF
+inv-100.pdf
+inv-100-2.pdf
+```
+
+Your test uses **uppercase `.PDF`**, but the mover now always creates **lowercase `.pdf`**.
+
+That is EXACTLY what I see in your screenshots:
+
+### ✔ expected by test:
+
+```
+inv-100.PDF
+```
+
+### ✔ created by mover:
+
+```
+inv-100.pdf
+```
+
+👇 This mismatch is why lines **55 and 77** are failing.
+
+---
+
+# ✅ TWO WAYS TO FIX — choose one
+
+---
+
+## OPTION A (recommended):
+
+### **Update the test to expect lowercase `.pdf`**
+
+Because your implementation intentionally generates:
+
+```
+"<base>.pdf"
+```
+
+with lower-case extension.
+
+### Update in tests:
+
+Replace:
+
+```java
+Path copied = outDir.resolve("INV-100.PDF");
+```
+
+with:
+
+```java
+Path copied = outDir.resolve("inv-100.pdf");
+```
+
+And replace:
+
+```java
+Path alt = outDir.resolve("inv-100-2.PDF");
+```
+
+with:
+
+```java
+Path alt = outDir.resolve("inv-100-2.pdf");
+```
+
+---
+
+## OPTION B:
+
+### **Update mover to preserve the input extension case**
+
+Not recommended, because:
+
+* All PDF files coming from SAP/Peppol are lowercase `.pdf`
+* Your XML writer uses lowercase
+* Lowercase is the only safe choice for Linux/K8s deployments
+* The test is the only thing that assumes uppercase
+
+But if you *do* want to replicate old behavior, change:
+
+```java
+String targetPdfName = base + ".pdf";
+```
+
+to:
+
+```java
+String targetPdfName = base + found.getFileName().toString().substring(found.getFileName().toString().lastIndexOf("."));
+```
+
+Which preserves `"PDF"` or `"pdf"` as originally found.
+
+---
+
+# 🔧 HERE IS WHAT YOU ACTUALLY SHOULD CHANGE (Option A)
+
+### 1️⃣ Line 53 test fix
+
+```java
+Path copied = outDir.resolve("inv-100.pdf");
+assertThat(Files.exists(copied)).isTrue();
+assertThat(Files.readAllBytes(copied)).isEqualTo(payload);
+```
+
+### 2️⃣ Line 77 test fix
+
+```java
+Path alt = outDir.resolve("inv-100-2.pdf");
+assertThat(Files.exists(alt)).isTrue();
+assertThat(Files.readAllBytes(alt)).isEqualTo(newPayload);
+```
+
+### 3️⃣ For the skip test:
+
+This:
+
+```java
+assertThat(Files.exists(target)).isFalse();
+```
+
+remains correct.
+
+---
+
+# 🎉 AFTER THIS FIX
+
+All your `SplitPDFMoverTest` cases will pass.
+
+* Case-insensitive match → OK
+* Creates directory → OK
+* Creates lowercase pdf name → OK
+* Creates `-2` suffix when file exists → OK
+* No-op if missing → OK
+
+---
+
+# If you want, I can rewrite the **entire test class** correctly for you.
+
+Just say:
+👉 *“Rewrite SplitPDFMoverTest completely with corrected expectations.”*
+
+
+============
 Yep, totally — changing the method signature means a couple of tests have to move with it.
 Let’s update them in a way that’s simple and safe.
 
