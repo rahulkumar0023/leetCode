@@ -1,3 +1,163 @@
+Yep, totally — changing the method signature means a couple of tests have to move with it.
+Let’s update them in a way that’s simple and safe.
+
+---
+
+## 1️⃣ XML writer test: update the Mockito verification
+
+Before, the writer probably did:
+
+```java
+// production
+String invoiceId = registry.lookup(invoice);
+pdfMover.movePDF(invoiceId, outputDir);
+```
+
+and your test had something like:
+
+```java
+verify(pdfMover).movePDF(invoiceId, outputDir);
+```
+
+Now production is:
+
+```java
+String invoiceId = registry.lookup(invoice);        // from registry
+pdfMover.movePDF(invoiceId, invoiceFileName, outputDir);
+```
+
+So in the test, just update the verification to include the extra argument:
+
+```java
+// given
+String invoiceId = "12345";
+String invoiceFileName = "INV-2024-0001.xml";
+// ... set up registry mock etc.
+
+// when
+writer.write(List.of(invoice));
+
+// then
+verify(pdfMover).movePDF(invoiceId, invoiceFileName, outputDir);
+```
+
+If you want to avoid `eq(...)` entirely, you can also use an `ArgumentCaptor`:
+
+```java
+ArgumentCaptor<String> sourceIdCaptor = ArgumentCaptor.forClass(String.class);
+ArgumentCaptor<String> outputNameCaptor = ArgumentCaptor.forClass(String.class);
+ArgumentCaptor<Path> targetDirCaptor = ArgumentCaptor.forClass(Path.class);
+
+verify(pdfMover).movePDF(
+        sourceIdCaptor.capture(),
+        outputNameCaptor.capture(),
+        targetDirCaptor.capture()
+);
+
+assertThat(sourceIdCaptor.getValue()).isEqualTo(invoiceId);
+assertThat(outputNameCaptor.getValue()).isEqualTo(invoiceFileName);
+assertThat(targetDirCaptor.getValue()).isEqualTo(outputDir);
+```
+
+That should be the only change needed in the writer tests.
+
+---
+
+## 2️⃣ SplitPDFMover test: add/adjust tests for the new overload
+
+If you already have a `SplitPDFMoverTest`, you can keep the old test for the 2-arg method (it still works via delegation) and add one for the new method.
+
+### a) Happy path – PDF renamed to match XML name
+
+```java
+@ExtendWith(MockitoExtension.class)
+class SplitPDFMoverTest {
+
+    @TempDir
+    Path tempDir;
+
+    private SplitPDFMover pdfMover;
+
+    @BeforeEach
+    void setUp() {
+        PathConfig pathConfig = mock(PathConfig.class);
+        PathConfig.UnzippedDir unzipped = mock(PathConfig.UnzippedDir.class);
+
+        Path unzippedXmlDir = tempDir.resolve("unzipped/xml");
+        Files.createDirectories(unzippedXmlDir);
+
+        when(pathConfig.getUnzipped()).thenReturn(unzipped);
+        when(unzipped.getXml()).thenReturn(unzippedXmlDir);
+
+        pdfMover = new SplitPDFMover(pathConfig);
+    }
+
+    @Test
+    void movePDF_shouldUseXmlBaseNameForTargetPdf() throws Exception {
+        // given
+        String sourceFileId = "12345";
+        String outputXmlName = "INV-2024-0001.xml";
+
+        Path sourcePdf = tempDir.resolve("unzipped/xml").resolve(sourceFileId + ".pdf");
+        Files.createDirectories(sourcePdf.getParent());
+        Files.writeString(sourcePdf, "pdf-content");
+
+        Path targetDir = tempDir.resolve("out");
+
+        // when
+        pdfMover.movePDF(sourceFileId, outputXmlName, targetDir);
+
+        // then
+        Path expectedTarget = targetDir.resolve("INV-2024-0001.pdf");
+        assertThat(Files.exists(expectedTarget)).isTrue();
+        assertThat(Files.readString(expectedTarget)).isEqualTo("pdf-content");
+
+        // original remains
+        assertThat(Files.exists(sourcePdf)).isTrue();
+    }
+}
+```
+
+### b) “Old” 2-arg method still behaves as before
+
+```java
+@Test
+void movePDF_twoArgOverloadShouldKeepOriginalName() throws Exception {
+    String sourceFileId = "555";
+    Path sourcePdf = tempDir.resolve("unzipped/xml").resolve(sourceFileId + ".pdf");
+    Files.createDirectories(sourcePdf.getParent());
+    Files.writeString(sourcePdf, "pdf-content");
+
+    Path targetDir = tempDir.resolve("out");
+
+    pdfMover.movePDF(sourceFileId, targetDir);
+
+    Path expectedTarget = targetDir.resolve(sourceFileId + ".pdf");
+    assertThat(Files.exists(expectedTarget)).isTrue();
+}
+```
+
+### c) No PDF found → nothing created
+
+```java
+@Test
+void movePDF_shouldDoNothingWhenSourcePdfMissing() throws Exception {
+    Path targetDir = tempDir.resolve("out");
+
+    pdfMover.movePDF("does-not-exist", "INV-2024-0001.xml", targetDir);
+
+    assertThat(Files.exists(targetDir)).isFalse(); // no target dir created, no pdf
+}
+```
+
+---
+
+If you paste your existing `SplitPDFMoverTest` class, I can rewrite it line-by-line with these changes baked in so you can just drop it in.
+
+
+
+-------------------------------
+
 Nice, the screenshots help — I see exactly what’s going on now.
 
 * **XML writer**:
