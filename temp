@@ -1,4 +1,96 @@
+You’re right — that `isSameGroup(...)` method **should not appear** if it wasn’t already in your class. My previous “full code” accidentally introduced a placeholder, which violates your “don’t change too much” requirement.
 
+Here’s the **correct way** to do it:
+
+* **Don’t add any new grouping method**
+* Keep **your existing grouping logic exactly as-is**
+* Only add the **minimal empty-CSV handling** around your first `delegate.read()`
+
+Below is the **minimal patch** you should apply to your existing `CsvGroupReader` (copy/paste the snippets into your current class).
+
+---
+
+## ✅ Minimal, clean changes only
+
+### 1) Add imports (only these)
+
+```java
+import org.springframework.batch.core.ExitStatus;
+import org.springframework.batch.core.StepExecution;
+import org.springframework.batch.core.scope.context.StepSynchronizationManager;
+```
+
+### 2) Add two fields (small + safe)
+
+```java
+private boolean firstReadForResource = true;
+private String currentResourceName = "unknown";
+```
+
+### 3) In your existing `setResource(Resource resource)` add/reset only this
+
+(keep everything else as it is)
+
+```java
+firstReadForResource = true;
+currentResourceName = (resource != null && resource.getFilename() != null)
+        ? resource.getFilename()
+        : "unknown";
+buffer = null; // keep if you already had it
+```
+
+### 4) In your existing `read()` method, right after you compute the FIRST record, add this block
+
+Put it immediately after the line where you do something like:
+
+```java
+CsvInvoiceDto first = (buffer != null) ? buffer : delegate.read();
+buffer = null;
+```
+
+Add:
+
+```java
+if (firstReadForResource) {
+    firstReadForResource = false;
+    if (first == null) {
+        log.error("CSV file '{}' has zero data records (only header or empty).", currentResourceName);
+
+        StepExecution stepExecution = null;
+        if (StepSynchronizationManager.getContext() != null) {
+            stepExecution = StepSynchronizationManager.getContext().getStepExecution();
+        }
+        if (stepExecution != null) {
+            stepExecution.setExitStatus(ExitStatus.FAILED);
+            stepExecution.setTerminateOnly();
+        }
+
+        return null; // clean stop, no exception => no big stack trace
+    }
+}
+```
+
+✅ That’s it. No other code changes.
+
+---
+
+## Why this is “standard + safe”
+
+* No exception thrown → avoids noisy stack trace
+* Uses Spring Batch’s standard “fail step” controls
+* Works per-file because `setResource()` resets the flag
+* Sonar/Fortify safe: no file IO, no path manipulation, no regex, no sensitive logging
+
+---
+
+If you paste your current `CsvGroupReader` class text (just the class, no other files), I’ll return it **fully assembled** with these exact minimal edits applied—**without adding anything that wasn’t there before**.
+
+
+
+
+
+l'dsfl's
+---
 Perfect — let’s do this **cleanly, minimally, and in a “Spring-Batch-standard” way**, without hacks, without noisy logs, and without touching shared exceptions or adding lots of logic.
 
 ### Key decision
