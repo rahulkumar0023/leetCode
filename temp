@@ -1,3 +1,128 @@
+Yes — with your **current reader setup**, the cleanest place to enforce **“CSV must have at least 1 data row”** (without adding any new class) is **inside `CsvInvoiceReader`** itself.
+
+### Why `CsvInvoiceReader` is the right place
+
+* It’s already `@StepScope` + `ResourceAware…` and gets called **per file**.
+* `MultiResourceItemReader` (or your `CsvGroupReader` via delegate) will call `setResource()` for each CSV → perfect place to reset state.
+* If the file has only a header, `FlatFileItemReader.read()` returns `null` on the first data read. That’s exactly where we can throw.
+
+---
+
+## ✅ Minimal change: override `read()` and reset a flag in `setResource()`
+
+### Update your existing `CsvInvoiceReader` like this:
+
+```java
+@Slf4j
+@Component
+@StepScope
+public class CsvInvoiceReader extends FlatFileItemReader<CsvInvoiceDto>
+        implements ResourceAwareItemReaderItemStream<CsvInvoiceDto> {
+
+    private boolean firstDataReadChecked = false;
+    private String currentResourceName = "unknown";
+
+    @Override
+    public void setResource(Resource resource) {
+        log.info("CsvInvoiceReader started");
+        super.setResource(resource);
+
+        // reset per resource/file
+        this.firstDataReadChecked = false;
+        this.currentResourceName = (resource != null && resource.getFilename() != null)
+                ? resource.getFilename()
+                : "unknown";
+
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(resource.getInputStream(), StandardCharsets.UTF_8))) {
+
+            String headerLine = reader.readLine();
+            if (headerLine == null) {
+                throw new InvoiceProcessingException("CSV file has no header line: " + currentResourceName);
+            }
+
+            String[] headerFields = headerLine.split(",");
+            setLinesToSkip(1);
+            setName("csvInvoiceReader");
+
+            DelimitedLineTokenizer tokenizer = new DelimitedLineTokenizer(",");
+            tokenizer.setQuoteCharacter(DelimitedLineTokenizer.DEFAULT_QUOTE_CHARACTER);
+            tokenizer.setNames(headerFields);
+            tokenizer.setStrict(false);
+
+            DefaultLineMapper<CsvInvoiceDto> lineMapper = new DefaultLineMapper<>();
+            lineMapper.setLineTokenizer(tokenizer);
+            lineMapper.setFieldSetMapper(new SmartCsvInvoiceFieldSetMapper());
+
+            setLineMapper(lineMapper);
+
+            log.info("CsvInvoiceReader completed");
+
+        } catch (Exception e) {
+            throw new InvoiceProcessingException("Failed to initialize CsvInvoiceReader for " + currentResourceName, e);
+        }
+    }
+
+    @Override
+    public CsvInvoiceDto read() throws Exception {
+        CsvInvoiceDto item = super.read();
+
+        // Enforce: header-only (0 records) is an error
+        if (!firstDataReadChecked) {
+            firstDataReadChecked = true;
+            if (item == null) {
+                throw new InvoiceProcessingException("CSV file has zero data records: " + currentResourceName);
+            }
+        }
+
+        return item;
+    }
+}
+```
+
+### What this does
+
+* For each CSV file:
+
+  * Header is read/configured exactly like you already do.
+  * First attempt to read a **data** row:
+
+    * If it’s `null` → **throw** (job fails, visible error)
+    * Else → normal processing continues
+
+---
+
+## ✅ Works with your `CsvGroupReader` too
+
+Your `CsvGroupReader` does:
+
+```java
+CsvInvoiceDto first = (buffer != null) ? buffer : delegate.read();
+if (first == null) return null;
+```
+
+Now, if the file has 0 records:
+
+* `delegate.read()` throws `InvoiceProcessingException`
+* `CsvGroupReader` never returns `null`
+* Step fails as you wanted.
+
+No changes needed in `CsvGroupReader`.
+
+---
+
+## One tiny note (optional improvement)
+
+Your `headerLine.split(",")` is fine (no regex risk), but if headers can contain commas inside quotes, you’d want a CSV parser. If your input is simple (and it looks like it is), your current approach is OK.
+
+---
+
+If you want, paste your `CsvGroupReader` bean wiring / step config and I’ll confirm this flows correctly through the exact step you’re running.
+
+
+
+--------
+
 Yes, you *can* enforce this directly in the CSV reader without adding a new separate class file. We’ll tweak your existing `flatFileItemReader` bean so that:
 
 * If a CSV file has **no data rows** (only header or totally empty),
