@@ -1,3 +1,160 @@
+Yes, you *can* enforce this directly in the CSV reader without adding a new separate class file. We’ll tweak your existing `flatFileItemReader` bean so that:
+
+* If a CSV file has **no data rows** (only header or totally empty),
+* The **first read** returns `null`,
+* And instead of silently finishing, the reader **throws an exception** → step fails.
+
+And we’ll make it work **per file** (important with `MultiResourceItemReader`).
+
+You already have something like this in `CsvInvoiceReader` :
+
+```java
+@Bean
+@StepScope
+public FlatFileItemReader<CsvInvoiceDto> flatFileItemReader(SmartCsvInvoiceFieldSetMapper mapper) {
+    FlatFileItemReader<CsvInvoiceDto> reader = new FlatFileItemReader<>();
+    reader.setLinesToSkip(1); // skip header
+    DefaultLineMapper<CsvInvoiceDto> lineMapper = new DefaultLineMapper<>();
+    DelimitedLineTokenizer tokenizer = new DelimitedLineTokenizer();
+    tokenizer.setDelimiter(",");
+    tokenizer.setQuoteCharacter('"');
+    lineMapper.setLineTokenizer(tokenizer);
+    lineMapper.setFieldSetMapper(mapper);
+    reader.setLineMapper(lineMapper);
+    return reader;
+}
+```
+
+We’ll turn this into an **anonymous subclass** that:
+
+* Tracks whether it’s the **first read for the current file**
+* If the first `super.read()` returns `null` → throws an exception
+* Resets its state when a new resource (CSV file) is set
+
+---
+
+## 🔧 Updated `flatFileItemReader` bean (no new class file)
+
+Replace your bean with this:
+
+```java
+@Bean
+@StepScope
+public FlatFileItemReader<CsvInvoiceDto> flatFileItemReader(SmartCsvInvoiceFieldSetMapper mapper) {
+    return new FlatFileItemReader<CsvInvoiceDto>() {
+
+        private boolean firstReadForFile = true;
+
+        {
+            // init block = your old setup
+            setLinesToSkip(1); // skip header
+            DefaultLineMapper<CsvInvoiceDto> lineMapper = new DefaultLineMapper<>();
+            DelimitedLineTokenizer tokenizer = new DelimitedLineTokenizer();
+            tokenizer.setDelimiter(",");
+            tokenizer.setQuoteCharacter('"');
+            lineMapper.setLineTokenizer(tokenizer);
+            lineMapper.setFieldSetMapper(mapper);
+            setLineMapper(lineMapper);
+        }
+
+        @Override
+        public CsvInvoiceDto read() throws Exception {
+            CsvInvoiceDto item = super.read();
+
+            if (firstReadForFile) {
+                firstReadForFile = false;
+                // First attempt to read after header:
+                // if it's null, this CSV has *no data rows*
+                if (item == null) {
+                    throw new IllegalStateException("CSV file contains no data rows (only header or empty).");
+                }
+            }
+
+            return item;
+        }
+
+        @Override
+        public void setResource(org.springframework.core.io.Resource resource) {
+            super.setResource(resource);
+            // Every new CSV file -> reset the flag
+            this.firstReadForFile = true;
+        }
+    };
+}
+```
+
+### What this does
+
+* For **each CSV file** handled by your `MultiResourceItemReader`:
+
+  * Header is skipped (`setLinesToSkip(1)` as before)
+  * The **first call** to `read()` after that:
+
+    * If it returns an item → fine, normal flow
+    * If it returns `null` → *this file has 0 records* → we throw an exception
+* That exception will:
+
+  * Fail the step
+  * Fail the job (unless you mark it skippable)
+  * Make it very clear *why* no XML was produced
+
+---
+
+## ✅ Behaviour in different scenarios
+
+1. **File with records**
+
+   * Header line
+   * 10 rows
+
+   → First `read()` returns row #1 → no exception
+   → Step processes all records like today.
+
+2. **Empty CSV (only header)**
+
+   * Header line
+   * 0 rows
+
+   → First `read()` after header = `null`
+   → Reader throws `IllegalStateException("CSV file contains no data rows…")`
+   → Step/job **FAILS** (exactly what you want).
+
+3. **Completely empty CSV (no header, no rows)**
+
+   * First `read()` returns `null` immediately
+   * This still triggers the `firstReadForFile` logic
+     → Exception thrown → job fails.
+
+4. **Multiple CSVs via `MultiResourceItemReader`**
+
+   * Each new resource triggers `setResource(...)`
+   * `firstReadForFile` is reset to `true`
+   * **Each file is checked independently**:
+
+     * If any file is empty → exception → job fails
+     * If you later decide you only want to fail when *all* are empty, we can adjust.
+
+---
+
+## 🧠 Why this fits your constraints
+
+* **No new top-level class**: it’s just an anonymous subclass inside your existing config.
+* **Logic lives in the CSV reader**, like you asked.
+* **Sonar/Fortify friendly**:
+
+  * No static state
+  * Simple control flow
+  * No risky IO or path handling
+* It cleanly encodes your business rule:
+  **“A CSV file with 0 data rows is an error.”**
+
+If you’d like, next step I can:
+
+* Show how to **unit test this behaviour** with `FlatFileItemReader` + temp CSV files.
+
+
+
+-------------------------------
 Yes, you can enforce this directly in the CSV reader without adding a new separate class file. We’ll tweak your existing flatFileItemReader bean so that:
 	•	If a CSV file has no data rows (only header or totally empty),
 	•	The first read returns null,
