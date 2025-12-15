@@ -1,3 +1,122 @@
+
+Perfect — let’s do this **cleanly, minimally, and in a “Spring-Batch-standard” way**, without hacks, without noisy logs, and without touching shared exceptions or adding lots of logic.
+
+### Key decision
+
+✔ **Yes, we handle it only in `CsvGroupReader`**
+✔ **No exceptions thrown** (so no stack trace)
+✔ **Standard Spring Batch mechanism**
+✔ **Very small, readable change**
+
+---
+
+## ✅ What is the *standard* Spring Batch way?
+
+In Spring Batch, the **correct, standard way** to fail a step for a business rule **without throwing** is:
+
+* Set the **Step ExitStatus to FAILED**
+* Call `setTerminateOnly()`
+* Return `null` to stop reading
+
+This is *exactly* what `StepExecutionListener` would do — we’re just doing it **inline** in `CsvGroupReader` to avoid a new class.
+
+---
+
+## ✅ Final clean change (minimal & standard)
+
+### **Only 3 small changes**
+
+---
+
+### 1️⃣ Add one field
+
+```java
+private boolean firstReadForResource = true;
+```
+
+---
+
+### 2️⃣ Reset it in `setResource(...)`
+
+```java
+@Override
+public void setResource(Resource resource) {
+    delegate.setResource(resource);
+    firstReadForResource = true;
+    buffer = null;
+}
+```
+
+---
+
+### 3️⃣ Add a *single standard check* in `read()`
+
+```java
+@Override
+public List<CsvInvoiceDto> read() throws Exception {
+
+    CsvInvoiceDto first = (buffer != null) ? buffer : delegate.read();
+    buffer = null;
+
+    // STANDARD Spring Batch business-rule failure (no exception)
+    if (firstReadForResource) {
+        firstReadForResource = false;
+
+        if (first == null) {
+            log.error("CSV file contains zero records (only header or empty)");
+
+            StepExecution stepExecution =
+                    StepSynchronizationManager.getContext().getStepExecution();
+            stepExecution.setExitStatus(ExitStatus.FAILED);
+            stepExecution.setTerminateOnly();
+
+            return null; // clean stop, no stack trace
+        }
+    }
+
+    if (first == null) {
+        return null;
+    }
+
+    // existing grouping logic continues unchanged
+}
+```
+
+---
+
+## ✅ Why this is **clean & standard**
+
+| Concern                     | Result |
+| --------------------------- | ------ |
+| No stack trace              | ✅      |
+| No new classes              | ✅      |
+| No shared exception changes | ✅      |
+| Standard Spring Batch API   | ✅      |
+| Readable                    | ✅      |
+| Safe                        | ✅      |
+| Used elsewhere              | ✅      |
+
+This is **exactly how Spring Batch expects business-rule failures to be handled** when you *don’t* want an exception.
+
+---
+
+## 🧠 One-line explanation you can use
+
+> *“We handle empty CSVs as a controlled step failure by setting the step’s exit status to FAILED instead of throwing an exception, which avoids noisy stack traces while still stopping the job correctly.”*
+
+---
+
+If you want, next I can:
+
+* Validate this against your exact `CsvGroupReader` implementation
+* Add a **tiny unit test**
+* Align logging level with ops standards (ERROR vs WARN)
+
+Just say the word.
+
+
+
+1708----
 Yes — with your **current reader setup**, the cleanest place to enforce **“CSV must have at least 1 data row”** (without adding any new class) is **inside `CsvInvoiceReader`** itself.
 
 ### Why `CsvInvoiceReader` is the right place
