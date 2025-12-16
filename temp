@@ -1,3 +1,97 @@
+Exactly — if you **stopped setting `ExitStatus.FAILED` and stopped calling `setTerminateOnly()`**, then:
+
+✅ seeing **`ExitStatus.EXECUTING`** in your unit test is **normal**.
+
+`StepExecution` starts in `EXECUTING` and Spring Batch only flips it to `COMPLETED`/`FAILED` **when the step ends** (framework lifecycle). In a plain unit test where you just call `reader.read()`, the step never “finishes”, so the status often stays `EXECUTING`.
+
+So your test should **not assert ExitStatus anymore**.
+It should assert the **ExecutionContext was updated** and that `read()` returns `null`.
+
+---
+
+## ✅ Updated JUnit for the “empty csv is recorded in context” behavior
+
+This is the clean, minimal test you want now:
+
+```java
+import org.junit.jupiter.api.Test;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.StepExecution;
+import org.springframework.batch.core.scope.context.StepContext;
+import org.springframework.batch.core.scope.context.StepSynchronizationManager;
+import org.springframework.batch.item.ExecutionContext;
+import org.springframework.core.io.ByteArrayResource;
+
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+@Test
+void emptyCsv_shouldRecordFileInExecutionContext_andReturnNull() throws Exception {
+
+    reader.setResource(new ByteArrayResource("header1,header2\n".getBytes()) {
+        @Override
+        public String getFilename() {
+            return "empty.csv";
+        }
+    });
+
+    when(delegate.read()).thenReturn(null);
+
+    StepExecution stepExecution = startStepContext("csvToXmlStep");
+    try {
+        CsvInvoiceGroup result = reader.read();
+
+        assertNull(result);
+
+        ExecutionContext ctx = stepExecution.getExecutionContext();
+
+        @SuppressWarnings("unchecked")
+        List<String> emptyFiles = (List<String>) ctx.get("emptyCsvFiles");
+
+        assertNotNull(emptyFiles);
+        assertTrue(emptyFiles.contains("empty.csv"));
+
+        // since you’re NOT failing or terminating anymore
+        assertFalse(stepExecution.isTerminateOnly());
+
+    } finally {
+        StepSynchronizationManager.close();
+    }
+}
+
+private StepExecution startStepContext(String stepName) {
+    JobExecution jobExecution = new JobExecution(1L);
+    StepExecution stepExecution = new StepExecution(stepName, jobExecution);
+    StepSynchronizationManager.register(new StepContext(stepExecution));
+    return stepExecution;
+}
+```
+
+### What this test checks now
+
+* `reader.read()` returns `null` (empty file ends cleanly)
+* `"empty.csv"` is added to `ExecutionContext["emptyCsvFiles"]`
+* step is **not** terminated
+* no ExitStatus assertion (because framework sets that at step end)
+
+---
+
+## Why your old test fails now
+
+Because it was still asserting:
+
+* `ExitStatus.COMPLETED` or `FAILED`
+  …but you no longer set it in reader, and Spring Batch won’t set it during a simple unit call.
+
+---
+
+If you show me your **current empty-file branch** in `CsvGroupReader` (just that `if (first == null)` part), I can match the context key (`emptyCsvFiles`) and make sure the test uses the exact same key/name.
+
+
+
+---------------
 Yep — the reason is **your current “empty CSV” handling is terminating the *step***:
 
 ```java
