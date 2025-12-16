@@ -1,4 +1,141 @@
+Yep — the reason is **your current “empty CSV” handling is terminating the *step***:
 
+```java
+stepExecution.setExitStatus(ExitStatus.FAILED);
+stepExecution.setTerminateOnly();
+return null;
+```
+
+When you upload **2 CSVs**, Spring Batch uses **one step** to process them (via `MultiResourceItemReader`).
+So as soon as you call `setTerminateOnly()`, Spring Batch stops the step and **never reaches the second CSV**, even if it’s good.
+
+### What you want instead
+
+* **Bad record** → skip and continue
+* **Bad/empty CSV file** → mark that file as failed/empty, but **continue to the next CSV**
+* Job should finish **without failing the whole batch**, but still report what went wrong.
+
+---
+
+## ✅ Clean standard fix (minimal changes)
+
+### 1) Change `CsvGroupReader`: **DON’T terminate the step**
+
+Instead, **record the bad/empty file in ExecutionContext** and return `null` (so `MultiResourceItemReader` moves to the next file).
+
+Add imports:
+
+```java
+import org.springframework.batch.core.scope.context.StepSynchronizationManager;
+import org.springframework.batch.item.ExecutionContext;
+import java.util.ArrayList;
+import java.util.List;
+```
+
+Replace your current empty-file block with this:
+
+```java
+if (firstReadForResource) {
+    firstReadForResource = false;
+
+    if (first == null) {
+        log.error("CSV file '{}' has zero data records (only header or empty). Skipping file.", currentResourceName);
+
+        ExecutionContext ctx = null;
+        if (StepSynchronizationManager.getContext() != null) {
+            ctx = StepSynchronizationManager.getContext().getStepExecution().getExecutionContext();
+        }
+
+        if (ctx != null) {
+            @SuppressWarnings("unchecked")
+            List<String> emptyFiles = (List<String>) ctx.get("emptyCsvFiles");
+            if (emptyFiles == null) {
+                emptyFiles = new ArrayList<>();
+            }
+            emptyFiles.add(currentResourceName);
+            ctx.put("emptyCsvFiles", emptyFiles);
+        }
+
+        return null; // ✅ cleanly ends THIS resource; MultiResourceItemReader continues with next file
+    }
+}
+```
+
+✅ Keep your existing `if (first == null) return null;` guard too (the one we fixed earlier).
+
+**Result:** empty CSV does not kill the step.
+
+---
+
+### 2) Configure “bad record should not fail” in the Step (standard Spring Batch)
+
+This part is done in your **Step configuration** (BatchConfig). You skip exceptions thrown by processor/mapper/validator for a bad record/group.
+
+```java
+.stepBuilderFactory.get("csvToXmlStep")
+.<CsvInvoiceGroup, InvoiceType>chunk(10)
+.reader(reader)
+.processor(processor)
+.writer(writer)
+.faultTolerant()
+.skipLimit(1000)
+.skip(InvoiceProcessingException.class)
+.build();
+```
+
+This ensures one bad record/group doesn’t stop everything.
+
+---
+
+### 3) (Optional but recommended) Make the job output “COMPLETED with warnings”
+
+Add an inline `StepExecutionListener` (no new class file) to log the empty files at the end:
+
+```java
+.listener(new StepExecutionListener() {
+    @Override
+    public ExitStatus afterStep(StepExecution stepExecution) {
+        ExecutionContext ctx = stepExecution.getExecutionContext();
+
+        @SuppressWarnings("unchecked")
+        List<String> emptyFiles = (List<String>) ctx.get("emptyCsvFiles");
+
+        if (emptyFiles != null && !emptyFiles.isEmpty()) {
+            log.error("Empty CSV files skipped: {}", emptyFiles);
+            return stepExecution.getExitStatus()
+                    .addExitDescription("Empty CSV files skipped: " + emptyFiles);
+        }
+        return stepExecution.getExitStatus();
+    }
+})
+```
+
+Job stays successful but tells you what happened.
+
+---
+
+## Why this solves your “2 CSVs” problem
+
+* Empty/invalid CSV no longer terminates the step
+* MultiResource continues to the next file
+* Good CSV still produces output XMLs
+* You still get a recorded list of “bad/empty files” in ExecutionContext/logs
+
+---
+
+If you want, I can also update your **JUnit** so it asserts:
+
+* empty CSV is recorded in `ExecutionContext`
+* step continues for the next file (using 2 resources in test)
+
+Just tell me whether you want the batch to end as:
+
+* **COMPLETED** (with warning description), or
+* **COMPLETED WITH SKIPS** (custom exit description), or
+* **FAILED only if ALL files are empty**.
+
+
+----
 
 Yep — your JUnit is failing because **your new `CsvGroupReader` behavior relies on `StepSynchronizationManager`**, but your tests are calling the reader **outside a real Spring Batch step**, so:
 
