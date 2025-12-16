@@ -1,3 +1,148 @@
+
+
+Yep — your JUnit is failing because **your new `CsvGroupReader` behavior relies on `StepSynchronizationManager`**, but your tests are calling the reader **outside a real Spring Batch step**, so:
+
+* `StepSynchronizationManager.getContext()` is **null**
+* and your “fail step cleanly + terminate” logic can’t attach to a `StepExecution`
+
+Also: if any test calls `read()` again **after you setTerminateOnly()**, you can get weird behavior/NPEs.
+
+Below are **clean, minimal updates** that fix both issues, without changing your production code more.
+
+---
+
+# 1) Fix `CsvGroupReaderTest` (add 1 new test)
+
+### ✅ Keep your existing `groupsRowsByInvoiceId()` as-is
+
+It should still pass.
+
+### ✅ Add this NEW test (for the “empty csv” behavior)
+
+```java
+import org.springframework.batch.core.ExitStatus;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.StepExecution;
+import org.springframework.batch.core.scope.context.StepContext;
+import org.springframework.batch.core.scope.context.StepSynchronizationManager;
+import org.springframework.core.io.ByteArrayResource;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+@Test
+void emptyCsv_shouldFailStepAndReturnNull() throws Exception {
+    // Register a StepExecution so CsvGroupReader can mark FAILED without throwing
+    StepExecution stepExecution = registerStep("csvToXmlStep");
+
+    // Ensure setResource() is called so firstReadForResource is reset
+    reader.setResource(new ByteArrayResource("h1,h2\n".getBytes()) {
+        @Override
+        public String getFilename() {
+            return "empty.csv";
+        }
+    });
+
+    when(delegate.read()).thenReturn(null); // header-only -> no data rows
+
+    CsvInvoiceGroup group = reader.read();
+
+    assertNull(group);
+    assertEquals(ExitStatus.FAILED.getExitCode(), stepExecution.getExitStatus().getExitCode());
+    assertTrue(stepExecution.isTerminateOnly());
+
+    StepSynchronizationManager.close();
+}
+
+private StepExecution registerStep(String stepName) {
+    JobExecution jobExecution = new JobExecution(1L);
+    StepExecution stepExecution = new StepExecution(stepName, jobExecution);
+    StepContext stepContext = new StepContext(stepExecution);
+    StepSynchronizationManager.register(stepContext);
+    return stepExecution;
+}
+```
+
+✅ This is the smallest “standard” test fix:
+
+* No `eq()`
+* No extra mocking
+* Uses Spring Batch’s intended thread-local context
+
+---
+
+# 2) Fix `CsvToXmlBatchTest` (wrap your loop with StepSynchronizationManager)
+
+Your screenshot shows this pattern:
+
+```java
+while ((dto = reader.read()) != null) {
+   ...
+}
+```
+
+If your CSV is empty, the delegate read returns `null` and the group reader will try to fail the step.
+So give it a StepExecution context in the test too.
+
+### ✅ Minimal change: add register/close around your reads
+
+```java
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.StepExecution;
+import org.springframework.batch.core.scope.context.StepContext;
+import org.springframework.batch.core.scope.context.StepSynchronizationManager;
+
+@Test
+void shouldConvertCsvRowsToXmlInvoiceFiles() throws Exception {
+
+    StepExecution stepExecution = registerStep("csvToXmlStep");
+    try {
+        // ... your existing setup unchanged ...
+
+        CsvInvoiceGroup dto;
+        while ((dto = reader.read()) != null) {
+            // ... your existing loop unchanged ...
+        }
+
+        // Optional: if this test uses a non-empty CSV, assert it did NOT fail
+        // assertNotEquals(ExitStatus.FAILED.getExitCode(), stepExecution.getExitStatus().getExitCode());
+
+    } finally {
+        StepSynchronizationManager.close();
+    }
+}
+
+private StepExecution registerStep(String stepName) {
+    JobExecution jobExecution = new JobExecution(1L);
+    StepExecution stepExecution = new StepExecution(stepName, jobExecution);
+    StepSynchronizationManager.register(new StepContext(stepExecution));
+    return stepExecution;
+}
+```
+
+That’s it.
+
+---
+
+# One extra rule for your tests
+
+After your new logic triggers:
+
+```java
+stepExecution.setTerminateOnly();
+```
+
+✅ Spring Batch will stop calling `read()`
+❌ Your tests should not keep calling `read()` again “to check it ends”.
+
+So in any test where you simulate empty CSV, don’t do extra `reader.read()` calls after the first `null`.
+
+---
+
+If you paste your current `CsvGroupReader.read()` (as text), I can also confirm the **null-check is in the right place** (before `first.getInvoiceNumber()`), because that’s the only other reason you’d still see that NPE.
+
+
+--------------16dec1225
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
