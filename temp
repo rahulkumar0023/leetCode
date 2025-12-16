@@ -1,3 +1,105 @@
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.batch.core.ExitStatus;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.StepExecution;
+import org.springframework.batch.core.scope.context.StepSynchronizationManager;
+import org.springframework.batch.core.scope.context.StepContext;
+import org.springframework.batch.item.ExecutionContext;
+import org.springframework.core.io.ByteArrayResource;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class CsvGroupReaderTest {
+
+    @Mock
+    CsvInvoiceReader delegate;
+
+    CsvGroupReader reader;
+
+    @Mock
+    private ExecutionContext executionContext;
+
+    @BeforeEach
+    void init() {
+        reader = new CsvGroupReader(delegate);
+    }
+
+    @Test
+    void groupsRowsByInvoiceId() throws Exception {
+        CsvInvoiceDto r1 = new CsvInvoiceDto();
+        r1.setInvoiceNumber("INV-1");
+        CsvInvoiceDto r2 = new CsvInvoiceDto();
+        r2.setInvoiceNumber("INV-1");
+        CsvInvoiceDto r3 = new CsvInvoiceDto();
+        r3.setInvoiceNumber("INV-2");
+
+        when(delegate.read())
+                .thenReturn(r1)
+                .thenReturn(r2)
+                .thenReturn(r3)
+                .thenReturn(null);
+
+        CsvInvoiceGroup g1 = reader.read();
+        assertEquals("INV-1", g1.getInvoiceId());
+        assertEquals(2, g1.getRows().size());
+
+        CsvInvoiceGroup g2 = reader.read();
+        assertEquals("INV-2", g2.getInvoiceId());
+        assertEquals(1, g2.getRows().size());
+
+        assertNull(reader.read()); // end
+    }
+
+    @Test
+    void testUpdate() throws Exception {
+        reader.update(executionContext);
+        verify(delegate, times(1)).update(executionContext);
+    }
+
+    // ✅ NEW TEST: empty CSV should fail step cleanly (no exception)
+    @Test
+    void emptyCsv_shouldFailStepAndReturnNull() throws Exception {
+        // attach a Resource so setResource() resets firstReadForResource
+        reader.setResource(new ByteArrayResource("header1,header2\n".getBytes()) {
+            @Override
+            public String getFilename() {
+                return "empty.csv";
+            }
+        });
+
+        // delegate returns null immediately => 0 data rows
+        when(delegate.read()).thenReturn(null);
+
+        StepExecution stepExecution = startStepContext("csvToXmlStep");
+
+        CsvInvoiceGroup result = reader.read();
+
+        assertNull(result);
+        assertEquals(ExitStatus.FAILED.getExitCode(), stepExecution.getExitStatus().getExitCode());
+        assertTrue(stepExecution.isTerminateOnly());
+
+        // clean up thread-local context
+        StepSynchronizationManager.close();
+    }
+
+    private StepExecution startStepContext(String stepName) {
+        JobExecution jobExecution = new JobExecution(1L);
+        StepExecution stepExecution = new StepExecution(stepName, jobExecution);
+
+        StepContext stepContext = new StepContext(stepExecution);
+        StepSynchronizationManager.register(stepContext);
+
+        return stepExecution;
+    }
+}
+
+---
 You’re right — that `isSameGroup(...)` method **should not appear** if it wasn’t already in your class. My previous “full code” accidentally introduced a placeholder, which violates your “don’t change too much” requirement.
 
 Here’s the **correct way** to do it:
