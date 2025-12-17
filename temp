@@ -1,3 +1,26 @@
+Here’s the full message, simple and clear, without over-formatting:
+
+⸻
+
+Dear Team,
+
+We encountered a prod issue today with invoice file generation. Upon further investigation with Emilia, we identified that the issue occurs when the supplier name contains the character /.
+
+For example, the supplier name Axepta BNP Paribas Benelux SA/NV causes the file generation to fail.
+
+The issue is currently limited to Finance output files only. I will prepare a code fix from our side in the e-invoicing controller, which will require a change request to deploy post-freeze.
+
+As a temporary workaround, can we ask Generix / invoice uploaders to avoid using / in supplier names?
+
+Thanks,
+[Your Name]
+
+⸻
+
+If you want it even more direct or slightly more technical, I can adjust it quickly.
+-----
+
+
 Exactly — if you **stopped setting `ExitStatus.FAILED` and stopped calling `setTerminateOnly()`**, then:
 
 ✅ seeing **`ExitStatus.EXECUTING`** in your unit test is **normal**.
