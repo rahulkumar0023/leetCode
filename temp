@@ -1,3 +1,113 @@
+Perfect — since you’ve **moved it to a util class and made it `static`**, here is a **clean, minimal, Sonar/Fortify-safe JUnit 5 test** you can drop straight in.
+
+I’ll assume:
+
+* Class name: `InvoiceBatchUtil`
+* Method signature:
+
+```java
+public static String sanitizeForFileName(String value)
+```
+
+---
+
+## ✅ JUnit 5 – `InvoiceBatchUtilTest`
+
+```java
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+class InvoiceBatchUtilTest {
+
+    @Test
+    void shouldReturnUnknownWhenValueIsNull() {
+        String result = InvoiceBatchUtil.sanitizeForFileName(null);
+        assertEquals("unknown", result);
+    }
+
+    @Test
+    void shouldReturnUnknownWhenValueIsBlank() {
+        String result = InvoiceBatchUtil.sanitizeForFileName("   ");
+        assertEquals("unknown", result);
+    }
+
+    @Test
+    void shouldTrimAndReplaceWhitespaceWithUnderscore() {
+        String result = InvoiceBatchUtil.sanitizeForFileName("  Big   Supplier  Name ");
+        assertEquals("Big_Supplier_Name", result);
+    }
+
+    @Test
+    void shouldReplaceForwardSlash() {
+        String result = InvoiceBatchUtil.sanitizeForFileName("ABC/DEF");
+        assertEquals("ABC_DEF", result);
+    }
+
+    @Test
+    void shouldReplaceMultipleUnsafeCharactersWithSingleUnderscore() {
+        String result = InvoiceBatchUtil.sanitizeForFileName("ACME / Finance : GmbH");
+        assertEquals("ACME_Finance_GmbH", result);
+    }
+
+    @Test
+    void shouldReplaceAllFileSystemUnsafeCharacters() {
+        String result = InvoiceBatchUtil.sanitizeForFileName("A\\B:C*D?E\"F<G>H|I");
+        assertEquals("A_B_C_D_E_F_G_H_I", result);
+    }
+
+    @Test
+    void shouldLeaveSafeCharactersUntouched() {
+        String result = InvoiceBatchUtil.sanitizeForFileName("Supplier-123_OK");
+        assertEquals("Supplier-123_OK", result);
+    }
+
+    @Test
+    void shouldHandleSingleCharacterInput() {
+        String result = InvoiceBatchUtil.sanitizeForFileName("/");
+        assertEquals("_", result);
+    }
+}
+```
+
+---
+
+## 🔐 Why this test is **exactly right**
+
+* ✅ No Mockito (pure utility)
+* ✅ Covers **null**, **blank**, **whitespace**, **slashes**, **Windows chars**
+* ✅ Verifies collapsing to **single `_`**
+* ✅ Sonar clean (no unused vars, no magic)
+* ✅ Fortify-friendly (explicit untrusted input handling)
+
+---
+
+## 🧠 Mapping tests → production risks
+
+| Test               | Real-world failure it prevents |
+| ------------------ | ------------------------------ |
+| Null / blank       | NPEs in batch                  |
+| Whitespace         | Broken COS keys                |
+| `/`                | Accidental directories         |
+| Windows chars      | Prod crash on Windows          |
+| Multiple bad chars | Ugly / unstable filenames      |
+
+---
+
+## 📌 Optional (but nice)
+
+If you want **100% defensive**, you can add a length test later (e.g. truncate to 100 chars). But **do not add it unless required** — your current logic is already production-grade.
+
+If you want, next I can:
+
+* wire this util into **both XML & PDF writers**
+* add a **single parameterized test** instead of multiple ones
+* check Sonar rule IDs this satisfies
+
+Just say 👍
+
+
+=======
 Yep — I can see exactly where the issue comes from in your `updateInvoiceName(...)`:
 
 ```java
