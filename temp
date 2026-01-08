@@ -1,146 +1,53 @@
-default TaxSubtotalType buildTaxSubtotalForVat(
-        CsvInvoiceGroup group,
-        BigDecimal vatPercentage) {
+You’re right to suspect “something is missing” — the missing piece is **wiring**: you must (1) stop MapStruct from producing `taxTotal` from the *single* DTO, and (2) set `taxTotal` **once per group** after lines are built. That’s what guarantees **exactly one VAT-21 subtotal and one VAT-0 subtotal**.
 
-    BigDecimal taxableSum = BigDecimal.ZERO;
-    BigDecimal vatSum = BigDecimal.ZERO;
-    boolean found = false;
-
-    for (CsvInvoiceDto row : group.getRows()) {
-
-        BigDecimal rowVat = toAmount(row.getInvoiceLineCbcVATPercentage());
-        if (rowVat != null && rowVat.compareTo(vatPercentage) == 0) {
-            found = true;
-
-            taxableSum = taxableSum.add(
-                    safeAmount(row.getAdditionalItemPropertyCbcSubTotalExclVatValue())
-            );
-
-            vatSum = vatSum.add(
-                    safeAmount(row.getAdditionalItemPropertyCbcSubTotalVatAmountValue())
-            );
-        }
-    }
-
-    if (!found) {
-        return null;
-    }
-
-    TaxSubtotalType taxSubtotal = new TaxSubtotalType();
-
-    TaxableAmountType taxableAmount = new TaxableAmountType();
-    taxableAmount.setCurrencyID("EUR");
-    taxableAmount.setValue(taxableSum);
-    taxSubtotal.setTaxableAmount(taxableAmount);
-
-    TaxAmountType taxAmount = new TaxAmountType();
-    taxAmount.setCurrencyID("EUR");
-    taxAmount.setValue(vatSum);
-    taxSubtotal.setTaxAmount(taxAmount);
-
-    TaxCategoryType category =
-            getTaxCategory(vatPercentage, false, group.getRows().get(0).getItemCbcName());
-
-    taxSubtotal.setTaxCategory(category);
-
-    return taxSubtotal;
-}
-
-
---------------------------------------------
-Yes — and here are **all steps, end-to-end**, in the exact order you need to implement so:
-
-✅ VAT 0 “exempt” subtotal is printed **once**
-✅ Its **TaxableAmount = SUM(InvoiceLine_cbc_LineExtensionAmount)** only for VAT 0 rows
-✅ VAT 21 subtotal is also printed **once** (your existing logic or same pattern)
-✅ No duplicates, even if invoice lines are iterated multiple times
+Below are **all changes again, step-by-step**, with **no `safeAmount()`** (we’ll use your existing `toAmount()` only).
 
 ---
 
-## Step 1 — Add a *group-level* sum method for VAT 0
+# Step 1 — Stop MapStruct from mapping `taxTotal` per row
 
-Add to your `CsvInvoiceMapper`:
+In your mapper method:
 
 ```java
-default BigDecimal sumLineExtensionAmountForVatZero(CsvInvoiceGroup group) {
-
-    BigDecimal sum = BigDecimal.ZERO;
-
-    for (CsvInvoiceDto row : group.getRows()) {
-        BigDecimal vat = toAmount(row.getInvoiceLineCbcVATPercentage());
-        if (vat != null && vat.compareTo(BigDecimal.ZERO) == 0) {
-            BigDecimal lineExt = toAmount(row.getInvoiceLineCbcLineExtensionAmount());
-            if (lineExt != null) {
-                sum = sum.add(lineExt);
-            }
-        }
-    }
-
-    return sum;
-}
+InvoiceType toInvoiceType(CsvInvoiceDto dto);
 ```
 
----
-
-## Step 2 — Build ONE TaxSubtotal for VAT 0 using that sum
+Add:
 
 ```java
-default TaxSubtotalType buildVatZeroSubtotal(CsvInvoiceGroup group) {
-
-    boolean hasVatZeroLine = false;
-    for (CsvInvoiceDto row : group.getRows()) {
-        BigDecimal vat = toAmount(row.getInvoiceLineCbcVATPercentage());
-        if (vat != null && vat.compareTo(BigDecimal.ZERO) == 0) {
-            hasVatZeroLine = true;
-        }
-    }
-
-    if (!hasVatZeroLine) {
-        return null;
-    }
-
-    BigDecimal taxableSum = sumLineExtensionAmountForVatZero(group);
-
-    TaxSubtotalType taxSubtotal = new TaxSubtotalType();
-
-    TaxableAmountType taxableAmount = new TaxableAmountType();
-    taxableAmount.setCurrencyID("EUR");
-    taxableAmount.setValue(taxableSum);
-    taxSubtotal.setTaxableAmount(taxableAmount);
-
-    TaxAmountType taxAmount = new TaxAmountType();
-    taxAmount.setCurrencyID("EUR");
-    taxAmount.setValue(BigDecimal.ZERO);
-    taxSubtotal.setTaxAmount(taxAmount);
-
-    // Reuse your existing logic: VAT 0 => E + exemption reason if applicable
-    TaxCategoryType category =
-            getTaxCategory(BigDecimal.ZERO, false, group.getRows().get(0).getItemCbcName());
-    taxSubtotal.setTaxCategory(category);
-
-    return taxSubtotal;
-}
+@Mapping(target = "taxTotal", ignore = true)
 ```
+
+So MapStruct will **not** call any old `toTaxTotal(dto)` expression and won’t create duplicates.
+
+✅ This is mandatory.
 
 ---
 
-## Step 3 — Ensure VAT 21 subtotal is also built once (unchanged or similar)
+# Step 2 — Compute TaxTotal once per invoice group
 
-If you already have a method like `buildTaxSubtotalForVat(group, 21)`, keep it.
-
-Example:
+In your existing:
 
 ```java
-default TaxSubtotalType buildVat21Subtotal(CsvInvoiceGroup group) {
-    return buildTaxSubtotalForVat(group, new BigDecimal("21"));
-}
+default InvoiceType toInvoiceTypeGroup(CsvInvoiceGroup group)
 ```
 
-(If you want VAT 21 to ALSO sum `LineExtensionAmount`, say so and I’ll mirror VAT 0 logic for 21.)
+After you build invoice lines, add:
+
+```java
+invoice.getTaxTotal().clear();
+invoice.getTaxTotal().addAll(toTaxTotal(group));
+```
+
+So `TaxTotal` is set **one time**, using the whole invoice.
+
+✅ This is mandatory.
 
 ---
 
-## Step 4 — Build TaxTotal once per invoice (group)
+# Step 3 — Add the group-level `toTaxTotal(CsvInvoiceGroup group)`
+
+Add this `default` method in the same mapper interface:
 
 ```java
 default List<TaxTotalType> toTaxTotal(CsvInvoiceGroup group) {
@@ -165,34 +72,155 @@ default List<TaxTotalType> toTaxTotal(CsvInvoiceGroup group) {
 }
 ```
 
-✅ This guarantees: at most **two** subtotals total (21 + 0).
+✅ This guarantees **at most 2 subtotals**.
 
 ---
 
-## Step 5 — Mapping change: stop MapStruct from setting taxTotal per row
+# Step 4 — VAT 0 subtotal: taxable = SUM(LineExtensionAmount) for VAT=0
 
-In your MapStruct mapping for:
+This implements exactly what you asked:
 
-`InvoiceType toInvoiceType(CsvInvoiceDto dto);`
+> “calculate all the total of fields from CSV InvoiceLine_cbc_LineExtensionAmount only in case of VAT zero exempt”
 
 Add:
 
 ```java
-@Mapping(target = "taxTotal", ignore = true)
+default TaxSubtotalType buildVatZeroSubtotal(CsvInvoiceGroup group) {
+
+    BigDecimal taxableSum = BigDecimal.ZERO;
+    boolean hasVatZero = false;
+
+    for (CsvInvoiceDto row : group.getRows()) {
+        BigDecimal vat = toAmount(row.getInvoiceLineCbcVATPercentage());
+        if (vat != null && vat.compareTo(BigDecimal.ZERO) == 0) {
+            hasVatZero = true;
+
+            BigDecimal lineExt = toAmount(row.getInvoiceLineCbcLineExtensionAmount());
+            if (lineExt != null) {
+                taxableSum = taxableSum.add(lineExt);
+            }
+        }
+    }
+
+    if (!hasVatZero) {
+        return null;
+    }
+
+    TaxSubtotalType taxSubtotal = new TaxSubtotalType();
+
+    TaxableAmountType taxableAmount = new TaxableAmountType();
+    taxableAmount.setCurrencyID("EUR");
+    taxableAmount.setValue(taxableSum);
+    taxSubtotal.setTaxableAmount(taxableAmount);
+
+    TaxAmountType taxAmount = new TaxAmountType();
+    taxAmount.setCurrencyID("EUR");
+    taxAmount.setValue(BigDecimal.ZERO);
+    taxSubtotal.setTaxAmount(taxAmount);
+
+    // reuse your existing category method (should set ID=E, percent=0, etc.)
+    TaxCategoryType taxCategory =
+            getTaxCategory(BigDecimal.ZERO, false, group.getRows().get(0).getItemCbcName());
+    taxSubtotal.setTaxCategory(taxCategory);
+
+    return taxSubtotal;
+}
 ```
 
-So MapStruct can’t accidentally call the per-row tax logic.
+✅ VAT 0 subtotal printed **once**
+✅ Uses **LineExtensionAmount sum only** for VAT=0
+✅ TaxAmount explicitly 0
+✅ No duplicates
 
 ---
 
-## Step 6 — Set TaxTotal only inside `toInvoiceTypeGroup(group)`
+# Step 5 — VAT 21 subtotal: print once (group-level)
 
-In your existing `toInvoiceTypeGroup`:
+Now decide what “taxable” and “tax amount” should be for VAT 21:
+
+### Option A (recommended, consistent with VAT 0):
+
+Use `LineExtensionAmount` sum as taxable, and compute tax from it.
+
+```java
+default TaxSubtotalType buildVat21Subtotal(CsvInvoiceGroup group) {
+
+    BigDecimal taxableSum = BigDecimal.ZERO;
+    boolean hasVat21 = false;
+
+    for (CsvInvoiceDto row : group.getRows()) {
+        BigDecimal vat = toAmount(row.getInvoiceLineCbcVATPercentage());
+        if (vat != null && vat.compareTo(new BigDecimal("21")) == 0) {
+            hasVat21 = true;
+
+            BigDecimal lineExt = toAmount(row.getInvoiceLineCbcLineExtensionAmount());
+            if (lineExt != null) {
+                taxableSum = taxableSum.add(lineExt);
+            }
+        }
+    }
+
+    if (!hasVat21) {
+        return null;
+    }
+
+    BigDecimal taxSum = taxableSum
+            .multiply(new BigDecimal("21"))
+            .divide(new BigDecimal("100"));
+
+    TaxSubtotalType taxSubtotal = new TaxSubtotalType();
+
+    TaxableAmountType taxableAmount = new TaxableAmountType();
+    taxableAmount.setCurrencyID("EUR");
+    taxableAmount.setValue(taxableSum);
+    taxSubtotal.setTaxableAmount(taxableAmount);
+
+    TaxAmountType taxAmount = new TaxAmountType();
+    taxAmount.setCurrencyID("EUR");
+    taxAmount.setValue(taxSum);
+    taxSubtotal.setTaxAmount(taxAmount);
+
+    TaxCategoryType taxCategory =
+            getTaxCategory(new BigDecimal("21"), false, group.getRows().get(0).getItemCbcName());
+    taxSubtotal.setTaxCategory(taxCategory);
+
+    return taxSubtotal;
+}
+```
+
+📌 If you already have correct “VAT amount” fields per line and don’t want to calculate: you can sum those instead of calculating `taxSum`.
+
+### Option B (use your existing “subtotal excl vat” and “vat amount” CSV fields)
+
+If you already trust these two fields:
+
+* `AdditionalItemProperty_cbc_SubTotalExclVatValue`
+* `AdditionalItemProperty_cbc_SubTotalVatAmountValue`
+
+Then in VAT 21 builder, sum those two instead. (Tell me if you want this variant; it’s a 2-line change inside the loop.)
+
+---
+
+# Step 6 — Remove/ignore old `toTaxTotal(CsvInvoiceDto dto)` usage
+
+If you still have your old per-row `toTaxTotal(dto)` method, you can keep it, but:
+
+✅ It must NOT be referenced from MapStruct mappings anymore
+(because Step 1 ignored `taxTotal`)
+
+So it becomes effectively unused for invoice tax totals.
+
+---
+
+# Step 7 — Final wiring: update `toInvoiceTypeGroup(group)` (full view)
+
+Here’s the complete “group” method shape you should have:
 
 ```java
 default InvoiceType toInvoiceTypeGroup(CsvInvoiceGroup group) {
 
     CsvInvoiceDto first = group.getRows().get(0);
+
     InvoiceType invoice = toInvoiceType(first);
 
     invoice.getInvoiceLine().clear();
@@ -200,7 +228,6 @@ default InvoiceType toInvoiceTypeGroup(CsvInvoiceGroup group) {
         invoice.getInvoiceLine().add(toInvoiceLine(row));
     }
 
-    // ✅ set tax totals ONCE per invoice
     invoice.getTaxTotal().clear();
     invoice.getTaxTotal().addAll(toTaxTotal(group));
 
@@ -210,30 +237,21 @@ default InvoiceType toInvoiceTypeGroup(CsvInvoiceGroup group) {
 
 ---
 
-## Step 7 — (Recommended) Add 3 unit tests
+# Summary of ALL changes
 
-1. Invoice has many lines VAT 0 → **only 1 VAT-0 subtotal**, taxable amount = sum(LineExtensionAmount of VAT0 lines)
+1. **Mapping change**: `@Mapping(target="taxTotal", ignore=true)` on `toInvoiceType(dto)`
+2. **Group method change**: set tax totals once using `toTaxTotal(group)`
+3. **New methods** in mapper:
 
-2. Invoice has many lines VAT 21 → **only 1 VAT-21 subtotal**
-
-3. Invoice has both 21 + 0 → **2 subtotals only**
-
----
-
-## ✅ Step coverage checklist (confirming everything)
-
-* ✅ Summation rule (VAT 0 only) implemented
-* ✅ Subtotal creation rule (VAT 0 printed once) implemented
-* ✅ Mapping change to prevent duplicates (`taxTotal ignore`) included
-* ✅ Correct place to set totals (group method) included
-* ✅ Won’t break writer / batch logic
-* ✅ Handles multiple invoice lines safely
+   * `toTaxTotal(CsvInvoiceGroup group)`
+   * `buildVatZeroSubtotal(CsvInvoiceGroup group)` ✅ uses sum of `LineExtensionAmount` for VAT 0
+   * `buildVat21Subtotal(CsvInvoiceGroup group)` ✅ prints VAT 21 once (choose A or B)
 
 ---
 
-If you paste the exact DTO getter names for:
+If you tell me which VAT-21 strategy you want:
 
-* `InvoiceLine_cbc_LineExtensionAmount`
-* VAT percentage field
+* **A)** compute VAT from taxable sum, or
+* **B)** sum your existing CSV VAT amount fields
 
-…I’ll align the code 1:1 with your real class so you can copy/paste and compile immediately.
+…I’ll give you the final VAT-21 method matching your real CSV columns exactly.
