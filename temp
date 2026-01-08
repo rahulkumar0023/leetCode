@@ -1,3 +1,182 @@
+package com.bnpp.pt.einvoice.connect.batch.csv;
+
+import oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.TaxCategoryType;
+import oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.TaxSubtotalType;
+import oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.TaxTotalType;
+import org.junit.jupiter.api.Test;
+import org.mapstruct.factory.Mappers;
+
+import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class CsvInvoiceMapperTaxTotalCoverageTest {
+
+    private final CsvInvoiceMapper mapper = Mappers.getMapper(CsvInvoiceMapper.class);
+
+    @Test
+    void toTaxTotal_whenVat21AndVat0Present_returnsOneTaxTotalWithTwoSubtotals_andMainTaxAmountIsSum() {
+        CsvInvoiceGroup group = new CsvInvoiceGroup("INV-1", new ArrayList<>());
+        group.getRows().add(row("21", "100.00", "21.00"));
+        group.getRows().add(row("21", "50.00", "21.00")); // repeated per-row, should be taken once
+        group.getRows().add(row("0", "20.00", null));
+        group.getRows().add(row("0", "10.00", null));
+
+        List<TaxTotalType> taxTotals = mapper.toTaxTotal(group);
+
+        assertEquals(1, taxTotals.size());
+
+        TaxTotalType taxTotal = taxTotals.get(0);
+        assertNotNull(taxTotal.getTaxAmount());
+        assertBdEquals("21.00", taxTotal.getTaxAmount().getValue());
+
+        assertEquals(2, taxTotal.getTaxSubtotal().size());
+
+        TaxSubtotalType vat21 = findSubtotalByPercent(taxTotal.getTaxSubtotal(), new BigDecimal("21"));
+        assertNotNull(vat21);
+        assertBdEquals("150.00", vat21.getTaxableAmount().getValue());
+        assertBdEquals("21.00", vat21.getTaxAmount().getValue());
+        assertTaxCategory(vat21.getTaxCategory(), "S", "21");
+
+        TaxSubtotalType vat0 = findSubtotalByPercent(taxTotal.getTaxSubtotal(), BigDecimal.ZERO);
+        assertNotNull(vat0);
+        assertBdEquals("30.00", vat0.getTaxableAmount().getValue());
+        assertBdEquals("0", vat0.getTaxAmount().getValue());
+        assertTaxCategory(vat0.getTaxCategory(), "E", "0");
+
+        // Your final code adds "Exempt" for VAT 0 when isClassified=false
+        assertFalse(vat0.getTaxCategory().getTaxExemptionReason().isEmpty());
+        assertEquals("Exempt", vat0.getTaxCategory().getTaxExemptionReason().get(0).getValue());
+    }
+
+    @Test
+    void toTaxTotal_whenOnlyVat21Present_returnsOneTaxTotalWithOneSubtotal() {
+        CsvInvoiceGroup group = new CsvInvoiceGroup("INV-2", new ArrayList<>());
+        group.getRows().add(row("21", "40.00", "8.40"));
+        group.getRows().add(row("21", "60.00", "8.40"));
+
+        List<TaxTotalType> taxTotals = mapper.toTaxTotal(group);
+
+        assertEquals(1, taxTotals.size());
+
+        TaxTotalType taxTotal = taxTotals.get(0);
+        assertEquals(1, taxTotal.getTaxSubtotal().size());
+        assertBdEquals("8.40", taxTotal.getTaxAmount().getValue());
+
+        TaxSubtotalType vat21 = taxTotal.getTaxSubtotal().get(0);
+        assertBdEquals("100.00", vat21.getTaxableAmount().getValue());
+        assertBdEquals("8.40", vat21.getTaxAmount().getValue());
+        assertTaxCategory(vat21.getTaxCategory(), "S", "21");
+    }
+
+    @Test
+    void toTaxTotal_whenOnlyVat0Present_returnsOneTaxTotalWithOneSubtotal_andMainTaxAmountZero() {
+        CsvInvoiceGroup group = new CsvInvoiceGroup("INV-3", new ArrayList<>());
+        group.getRows().add(row("0", "10.00", null));
+        group.getRows().add(row("0", "15.00", null));
+
+        List<TaxTotalType> taxTotals = mapper.toTaxTotal(group);
+
+        assertEquals(1, taxTotals.size());
+
+        TaxTotalType taxTotal = taxTotals.get(0);
+        assertEquals(1, taxTotal.getTaxSubtotal().size());
+        assertBdEquals("0", taxTotal.getTaxAmount().getValue());
+
+        TaxSubtotalType vat0 = taxTotal.getTaxSubtotal().get(0);
+        assertBdEquals("25.00", vat0.getTaxableAmount().getValue());
+        assertBdEquals("0", vat0.getTaxAmount().getValue());
+        assertTaxCategory(vat0.getTaxCategory(), "E", "0");
+        assertFalse(vat0.getTaxCategory().getTaxExemptionReason().isEmpty());
+    }
+
+    @Test
+    void toTaxTotal_whenNoVat21AndNoVat0_returnsEmptyList() {
+        CsvInvoiceGroup group = new CsvInvoiceGroup("INV-4", new ArrayList<>());
+        group.getRows().add(row("6", "100.00", "6.00"));
+
+        List<TaxTotalType> taxTotals = mapper.toTaxTotal(group);
+
+        assertTrue(taxTotals.isEmpty());
+    }
+
+    @Test
+    void buildTaxSubtotalForVat_whenVat21Present_usesCsvVatAmountOnlyOnce_evenIfMultipleLines() {
+        CsvInvoiceGroup group = new CsvInvoiceGroup("INV-5", new ArrayList<>());
+        group.getRows().add(row("21", "100.00", "21.00"));
+        group.getRows().add(row("21", "50.00", "999.99")); // should NOT override, because first match is taken once
+
+        TaxSubtotalType vat21 = mapper.buildTaxSubtotalForVat(group, new BigDecimal("21"));
+
+        assertNotNull(vat21);
+        assertBdEquals("150.00", vat21.getTaxableAmount().getValue());
+        assertBdEquals("21.00", vat21.getTaxAmount().getValue());
+        assertTaxCategory(vat21.getTaxCategory(), "S", "21");
+    }
+
+    @Test
+    void buildTaxSubtotalForVat_whenVat21PresentButCsvVatAmountMissing_defaultsTaxAmountToZero() {
+        CsvInvoiceGroup group = new CsvInvoiceGroup("INV-6", new ArrayList<>());
+        group.getRows().add(row("21", "100.00", null));
+        group.getRows().add(row("21", "50.00", null));
+
+        TaxSubtotalType vat21 = mapper.buildTaxSubtotalForVat(group, new BigDecimal("21"));
+
+        assertNotNull(vat21);
+        assertBdEquals("150.00", vat21.getTaxableAmount().getValue());
+        assertBdEquals("0", vat21.getTaxAmount().getValue());
+        assertTaxCategory(vat21.getTaxCategory(), "S", "21");
+    }
+
+    // ---------------- helpers ----------------
+
+    private CsvInvoiceDto row(String vatPercent, String lineExtAmount, String subTotalVatAmountValue) {
+        CsvInvoiceDto dto = new CsvInvoiceDto();
+        dto.setInvoiceLineCbcVATPercentage(vatPercent);
+        dto.setInvoiceLineCbcLineExtensionAmount(lineExtAmount);
+        dto.setAdditionalItemPropertyCbcSubTotalVatAmountValue(subTotalVatAmountValue);
+        return dto;
+    }
+
+    private static void assertBdEquals(String expected, BigDecimal actual) {
+        assertNotNull(actual);
+        BigDecimal exp = new BigDecimal(expected);
+        assertEquals(0, exp.compareTo(actual), "Expected " + exp + " but was " + actual);
+    }
+
+    private static TaxSubtotalType findSubtotalByPercent(List<TaxSubtotalType> subtotals, BigDecimal percent) {
+        for (TaxSubtotalType subtotal : subtotals) {
+            TaxCategoryType cat = subtotal.getTaxCategory();
+            if (cat != null
+                    && cat.getPercent() != null
+                    && cat.getPercent().getValue() != null
+                    && cat.getPercent().getValue().compareTo(percent) == 0) {
+                return subtotal;
+            }
+        }
+        return null;
+    }
+
+    private static void assertTaxCategory(TaxCategoryType cat, String expectedId, String expectedPercent) {
+        assertNotNull(cat);
+
+        assertNotNull(cat.getID());
+        assertEquals(expectedId, cat.getID().getValue());
+
+        assertNotNull(cat.getPercent());
+        assertNotNull(cat.getPercent().getValue());
+        assertEquals(0, new BigDecimal(expectedPercent).compareTo(cat.getPercent().getValue()));
+
+        assertNotNull(cat.getTaxScheme());
+        assertNotNull(cat.getTaxScheme().getID());
+        assertEquals("VAT", cat.getTaxScheme().getID().getValue());
+    }
+}
+
+
+-------------
 default TaxSubtotalType buildTaxSubtotalForVat(CsvInvoiceGroup group, BigDecimal vatPercentage) {
 
     BigDecimal taxableSum = BigDecimal.ZERO;
