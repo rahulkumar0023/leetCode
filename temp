@@ -1,3 +1,53 @@
+default TaxSubtotalType buildTaxSubtotalForVat(
+        CsvInvoiceGroup group,
+        BigDecimal vatPercentage) {
+
+    BigDecimal taxableSum = BigDecimal.ZERO;
+    BigDecimal vatSum = BigDecimal.ZERO;
+    boolean found = false;
+
+    for (CsvInvoiceDto row : group.getRows()) {
+
+        BigDecimal rowVat = toAmount(row.getInvoiceLineCbcVATPercentage());
+        if (rowVat != null && rowVat.compareTo(vatPercentage) == 0) {
+            found = true;
+
+            taxableSum = taxableSum.add(
+                    safeAmount(row.getAdditionalItemPropertyCbcSubTotalExclVatValue())
+            );
+
+            vatSum = vatSum.add(
+                    safeAmount(row.getAdditionalItemPropertyCbcSubTotalVatAmountValue())
+            );
+        }
+    }
+
+    if (!found) {
+        return null;
+    }
+
+    TaxSubtotalType taxSubtotal = new TaxSubtotalType();
+
+    TaxableAmountType taxableAmount = new TaxableAmountType();
+    taxableAmount.setCurrencyID("EUR");
+    taxableAmount.setValue(taxableSum);
+    taxSubtotal.setTaxableAmount(taxableAmount);
+
+    TaxAmountType taxAmount = new TaxAmountType();
+    taxAmount.setCurrencyID("EUR");
+    taxAmount.setValue(vatSum);
+    taxSubtotal.setTaxAmount(taxAmount);
+
+    TaxCategoryType category =
+            getTaxCategory(vatPercentage, false, group.getRows().get(0).getItemCbcName());
+
+    taxSubtotal.setTaxCategory(category);
+
+    return taxSubtotal;
+}
+
+
+--------------------------------------------
 Yes — and here are **all steps, end-to-end**, in the exact order you need to implement so:
 
 ✅ VAT 0 “exempt” subtotal is printed **once**
