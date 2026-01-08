@@ -1,61 +1,83 @@
-You’re absolutely right 👍 — **there *is* duplicated code**, and the clean fix is to **factor it into ONE generic method** with **small VAT-specific decisions**.
+Yep — here’s the **final code** (only what you need), with:
 
-Below is the **final, correct, minimal design**, rewritten **step by step**, removing duplication and keeping everything **Sonar / Fortify / prod-safe**, and **using only your existing `toAmount()`**.
-
----
-
-# 🎯 Goal (restated clearly)
-
-For **each invoice (group)**:
-
-* VAT **21** → **one TaxSubtotal**
-* VAT **0 (exempt)** → **one TaxSubtotal**
-* VAT 0 **TaxableAmount = SUM(InvoiceLine_cbc_LineExtensionAmount)**
-* No duplicate subtotals
-* No per-row tax mapping
-* No duplicated code
+* **VAT 21 subtotal printed once** (tax amount taken **from CSV**, not calculated)
+* **VAT 0 subtotal printed once** (taxable = **sum of LineExtensionAmount** for VAT 0)
+* **TaxTotal/cbc:TaxAmount is always set** (sum of subtotals)
+* **No extra `money()` method**, and **only uses your `toAmount()`**
+* No duplicated VAT21/VAT0 methods — **one generic builder**
 
 ---
 
-# STEP 1 — Mapping change (MANDATORY)
-
-In your MapStruct method:
-
-```java
-InvoiceType toInvoiceType(CsvInvoiceDto dto);
-```
-
-add:
+## 1) Mapping change (required)
 
 ```java
 @Mapping(target = "taxTotal", ignore = true)
-```
-
-✅ prevents per-row tax creation
-✅ avoids duplicates
-✅ allows group-level tax only
-
----
-
-# STEP 2 — Call tax logic once per group
-
-In `toInvoiceTypeGroup(...)`:
-
-```java
-invoice.getTaxTotal().clear();
-invoice.getTaxTotal().addAll(toTaxTotal(group));
+InvoiceType toInvoiceType(CsvInvoiceDto dto);
 ```
 
 ---
 
-# STEP 3 — ONE generic TaxSubtotal builder (NO duplication)
-
-This replaces **both** `buildVat21Subtotal` and `buildVatZeroSubtotal`.
+## 2) Set tax totals once per group (in your existing group method)
 
 ```java
-default TaxSubtotalType buildTaxSubtotalForVat(
-        CsvInvoiceGroup group,
-        BigDecimal vatPercentage) {
+default InvoiceType toInvoiceTypeGroup(CsvInvoiceGroup group) {
+
+    CsvInvoiceDto first = group.getRows().get(0);
+    InvoiceType invoice = toInvoiceType(first);
+
+    invoice.getInvoiceLine().clear();
+    for (CsvInvoiceDto row : group.getRows()) {
+        invoice.getInvoiceLine().add(toInvoiceLine(row));
+    }
+
+    invoice.getTaxTotal().clear();
+    invoice.getTaxTotal().addAll(toTaxTotal(group));
+
+    return invoice;
+}
+```
+
+---
+
+## 3) Group-level TaxTotal (VAT 21 + VAT 0 once, and TaxTotal TaxAmount set)
+
+```java
+default List<TaxTotalType> toTaxTotal(CsvInvoiceGroup group) {
+
+    TaxTotalType taxTotal = new TaxTotalType();
+    BigDecimal totalTaxSum = BigDecimal.ZERO;
+
+    TaxSubtotalType vat21 = buildTaxSubtotalForVat(group, new BigDecimal("21"));
+    if (vat21 != null) {
+        taxTotal.getTaxSubtotal().add(vat21);
+        totalTaxSum = totalTaxSum.add(vat21.getTaxAmount().getValue());
+    }
+
+    TaxSubtotalType vat0 = buildTaxSubtotalForVat(group, BigDecimal.ZERO);
+    if (vat0 != null) {
+        taxTotal.getTaxSubtotal().add(vat0);
+        totalTaxSum = totalTaxSum.add(vat0.getTaxAmount().getValue());
+    }
+
+    if (taxTotal.getTaxSubtotal().isEmpty()) {
+        return Collections.emptyList();
+    }
+
+    TaxAmountType totalTaxAmount = new TaxAmountType();
+    totalTaxAmount.setCurrencyID("EUR");
+    totalTaxAmount.setValue(totalTaxSum);
+    taxTotal.setTaxAmount(totalTaxAmount);
+
+    return Collections.singletonList(taxTotal);
+}
+```
+
+---
+
+## 4) One generic subtotal builder (no duplication)
+
+```java
+default TaxSubtotalType buildTaxSubtotalForVat(CsvInvoiceGroup group, BigDecimal vatPercentage) {
 
     BigDecimal taxableSum = BigDecimal.ZERO;
     BigDecimal taxSum = BigDecimal.ZERO;
@@ -64,25 +86,25 @@ default TaxSubtotalType buildTaxSubtotalForVat(
     for (CsvInvoiceDto row : group.getRows()) {
 
         BigDecimal vat = toAmount(row.getInvoiceLineCbcVATPercentage());
-        if (vat != null && vat.compareTo(vatPercentage) == 0) {
+        if (vat == null || vat.compareTo(vatPercentage) != 0) {
+            continue;
+        }
 
-            foundVat = true;
+        foundVat = true;
 
-            // ALWAYS use LineExtensionAmount for taxable base
-            BigDecimal lineExt =
-                    toAmount(row.getInvoiceLineCbcLineExtensionAmount());
+        // Taxable base: sum LineExtensionAmount (works for both VAT 21 and VAT 0)
+        BigDecimal lineExt = toAmount(row.getInvoiceLineCbcLineExtensionAmount());
+        if (lineExt != null) {
+            taxableSum = taxableSum.add(lineExt);
+        }
 
-            if (lineExt != null) {
-                taxableSum = taxableSum.add(lineExt);
-
-                // Only VAT > 0 produces tax
-                if (vatPercentage.compareTo(BigDecimal.ZERO) > 0) {
-                    taxSum = taxSum.add(
-                            lineExt
-                                    .multiply(vatPercentage)
-                                    .divide(new BigDecimal("100"))
-                    );
-                }
+        // Tax amount:
+        // - VAT 0 => 0
+        // - VAT 21 => take VAT amount directly from CSV (no calculations)
+        if (vatPercentage.compareTo(BigDecimal.ZERO) > 0) {
+            BigDecimal csvVatAmount = toAmount(row.getAdditionalItemPropertyCbcSubTotalVatAmountValue());
+            if (csvVatAmount != null) {
+                taxSum = taxSum.add(csvVatAmount);
             }
         }
     }
@@ -100,104 +122,22 @@ default TaxSubtotalType buildTaxSubtotalForVat(
 
     TaxAmountType taxAmount = new TaxAmountType();
     taxAmount.setCurrencyID("EUR");
-    taxAmount.setValue(taxSum);   // 0 for VAT-0, >0 for VAT-21
+    taxAmount.setValue(taxSum);
     taxSubtotal.setTaxAmount(taxAmount);
 
     TaxCategoryType taxCategory =
-            getTaxCategory(
-                    vatPercentage,
-                    false,
-                    group.getRows().get(0).getItemCbcName()
-            );
-
+            getTaxCategory(vatPercentage, false, group.getRows().get(0).getItemCbcName());
     taxSubtotal.setTaxCategory(taxCategory);
 
     return taxSubtotal;
 }
 ```
 
-### ✅ What this handles
-
-| VAT | TaxableAmount            | TaxAmount  |
-| --- | ------------------------ | ---------- |
-| 0   | SUM(LineExtensionAmount) | 0          |
-| 21  | SUM(LineExtensionAmount) | calculated |
-
-✔ zero duplication
-✔ one loop
-✔ no branching explosion
-✔ no extra helpers
+> Note: This uses `continue;` once. If you want strict Sonar style (“avoid continue”), I can rewrite that if-block into a nested `if` with identical logic.
 
 ---
 
-# STEP 4 — Build TaxTotal using the generic method
+If you paste your existing `getTaxCategory(...)` signature (just that method), I’ll ensure it produces Peppol-correct:
 
-```java
-default List<TaxTotalType> toTaxTotal(CsvInvoiceGroup group) {
-
-    TaxTotalType taxTotal = new TaxTotalType();
-
-    TaxSubtotalType vat21 =
-            buildTaxSubtotalForVat(group, new BigDecimal("21"));
-    if (vat21 != null) {
-        taxTotal.getTaxSubtotal().add(vat21);
-    }
-
-    TaxSubtotalType vat0 =
-            buildTaxSubtotalForVat(group, BigDecimal.ZERO);
-    if (vat0 != null) {
-        taxTotal.getTaxSubtotal().add(vat0);
-    }
-
-    if (taxTotal.getTaxSubtotal().isEmpty()) {
-        return Collections.emptyList();
-    }
-
-    return Collections.singletonList(taxTotal);
-}
-```
-
----
-
-# STEP 5 — Final flow (sanity check)
-
-```
-CSV rows
-   ↓
-CsvInvoiceGroup
-   ↓
-toInvoiceTypeGroup()
-   ├─ build invoice header (first row)
-   ├─ build invoice lines (ALL rows)
-   └─ build tax totals ONCE
-         ├─ VAT 21 subtotal (if present)
-         └─ VAT 0 subtotal (if present)
-```
-
-✔ no duplicates
-✔ correct UBL
-✔ scalable
-✔ readable
-
----
-
-# Why this is the **best possible solution**
-
-* 🔁 **No duplicated code**
-* 🧮 Uses **LineExtensionAmount exactly as requested**
-* 🧼 Sonar-friendly (no streams, no continue/break)
-* 🔒 Fortify-safe
-* 🧩 Easy to extend (add VAT 6% later = 1 line)
-* 🧪 Easy to unit test
-
----
-
-## If you want next
-
-I can:
-
-* Add **JUnit tests** for mixed VAT invoices
-* Align this same logic for **CreditNoteType**
-* Validate output against **Peppol EN16931 tax rules**
-
-Just tell me 👍
+* VAT 21 → `ID=S`, `Percent=21`, `TaxScheme VAT`
+* VAT 0 → `ID=E`, `Percent=0`, `TaxScheme VAT` (+ exemption reason if you have it)
