@@ -1,192 +1,189 @@
-Perfect — since you’ve **moved it to a util class and made it `static`**, here is a **clean, minimal, Sonar/Fortify-safe JUnit 5 test** you can drop straight in.
+Yes — and here are **all steps, end-to-end**, in the exact order you need to implement so:
 
-I’ll assume:
-
-* Class name: `InvoiceBatchUtil`
-* Method signature:
-
-```java
-public static String sanitizeForFileName(String value)
-```
+✅ VAT 0 “exempt” subtotal is printed **once**
+✅ Its **TaxableAmount = SUM(InvoiceLine_cbc_LineExtensionAmount)** only for VAT 0 rows
+✅ VAT 21 subtotal is also printed **once** (your existing logic or same pattern)
+✅ No duplicates, even if invoice lines are iterated multiple times
 
 ---
 
-## ✅ JUnit 5 – `InvoiceBatchUtilTest`
+## Step 1 — Add a *group-level* sum method for VAT 0
+
+Add to your `CsvInvoiceMapper`:
 
 ```java
-import org.junit.jupiter.api.Test;
+default BigDecimal sumLineExtensionAmountForVatZero(CsvInvoiceGroup group) {
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+    BigDecimal sum = BigDecimal.ZERO;
 
-class InvoiceBatchUtilTest {
-
-    @Test
-    void shouldReturnUnknownWhenValueIsNull() {
-        String result = InvoiceBatchUtil.sanitizeForFileName(null);
-        assertEquals("unknown", result);
+    for (CsvInvoiceDto row : group.getRows()) {
+        BigDecimal vat = toAmount(row.getInvoiceLineCbcVATPercentage());
+        if (vat != null && vat.compareTo(BigDecimal.ZERO) == 0) {
+            BigDecimal lineExt = toAmount(row.getInvoiceLineCbcLineExtensionAmount());
+            if (lineExt != null) {
+                sum = sum.add(lineExt);
+            }
+        }
     }
 
-    @Test
-    void shouldReturnUnknownWhenValueIsBlank() {
-        String result = InvoiceBatchUtil.sanitizeForFileName("   ");
-        assertEquals("unknown", result);
-    }
-
-    @Test
-    void shouldTrimAndReplaceWhitespaceWithUnderscore() {
-        String result = InvoiceBatchUtil.sanitizeForFileName("  Big   Supplier  Name ");
-        assertEquals("Big_Supplier_Name", result);
-    }
-
-    @Test
-    void shouldReplaceForwardSlash() {
-        String result = InvoiceBatchUtil.sanitizeForFileName("ABC/DEF");
-        assertEquals("ABC_DEF", result);
-    }
-
-    @Test
-    void shouldReplaceMultipleUnsafeCharactersWithSingleUnderscore() {
-        String result = InvoiceBatchUtil.sanitizeForFileName("ACME / Finance : GmbH");
-        assertEquals("ACME_Finance_GmbH", result);
-    }
-
-    @Test
-    void shouldReplaceAllFileSystemUnsafeCharacters() {
-        String result = InvoiceBatchUtil.sanitizeForFileName("A\\B:C*D?E\"F<G>H|I");
-        assertEquals("A_B_C_D_E_F_G_H_I", result);
-    }
-
-    @Test
-    void shouldLeaveSafeCharactersUntouched() {
-        String result = InvoiceBatchUtil.sanitizeForFileName("Supplier-123_OK");
-        assertEquals("Supplier-123_OK", result);
-    }
-
-    @Test
-    void shouldHandleSingleCharacterInput() {
-        String result = InvoiceBatchUtil.sanitizeForFileName("/");
-        assertEquals("_", result);
-    }
+    return sum;
 }
 ```
 
 ---
 
-## 🔐 Why this test is **exactly right**
-
-* ✅ No Mockito (pure utility)
-* ✅ Covers **null**, **blank**, **whitespace**, **slashes**, **Windows chars**
-* ✅ Verifies collapsing to **single `_`**
-* ✅ Sonar clean (no unused vars, no magic)
-* ✅ Fortify-friendly (explicit untrusted input handling)
-
----
-
-## 🧠 Mapping tests → production risks
-
-| Test               | Real-world failure it prevents |
-| ------------------ | ------------------------------ |
-| Null / blank       | NPEs in batch                  |
-| Whitespace         | Broken COS keys                |
-| `/`                | Accidental directories         |
-| Windows chars      | Prod crash on Windows          |
-| Multiple bad chars | Ugly / unstable filenames      |
-
----
-
-## 📌 Optional (but nice)
-
-If you want **100% defensive**, you can add a length test later (e.g. truncate to 100 chars). But **do not add it unless required** — your current logic is already production-grade.
-
-If you want, next I can:
-
-* wire this util into **both XML & PDF writers**
-* add a **single parameterized test** instead of multiple ones
-* check Sonar rule IDs this satisfies
-
-Just say 👍
-
-
-=======
-Yep — I can see exactly where the issue comes from in your `updateInvoiceName(...)`:
+## Step 2 — Build ONE TaxSubtotal for VAT 0 using that sum
 
 ```java
-supplierParty.replace(" ", "-")
-...
-invoiceFileName.replace("/", "-")
-```
+default TaxSubtotalType buildVatZeroSubtotal(CsvInvoiceGroup group) {
 
-That only fixes **spaces** and **forward slashes**, but supplier names can contain lots of other filename-breaking characters (and multiple whitespaces).
-
-## Minimal, clean fix in `XmlInvoiceWriter`
-
-### 1) Add a small sanitizer (keep it local, Sonar/Fortify safe)
-
-Add these imports:
-
-```java
-import java.util.regex.Pattern;
-```
-
-Add this near the bottom of the class:
-
-```java
-private static final Pattern UNSAFE_FILE_CHARS = Pattern.compile("[\\s\\\\/:*?\"<>|]+");
-
-private String sanitizeForFileName(String value) {
-    if (value == null) {
-        return "unknown";
+    boolean hasVatZeroLine = false;
+    for (CsvInvoiceDto row : group.getRows()) {
+        BigDecimal vat = toAmount(row.getInvoiceLineCbcVATPercentage());
+        if (vat != null && vat.compareTo(BigDecimal.ZERO) == 0) {
+            hasVatZeroLine = true;
+        }
     }
-    String trimmed = value.trim();
-    if (trimmed.isEmpty()) {
-        return "unknown";
+
+    if (!hasVatZeroLine) {
+        return null;
     }
-    return UNSAFE_FILE_CHARS.matcher(trimmed).replaceAll("_");
+
+    BigDecimal taxableSum = sumLineExtensionAmountForVatZero(group);
+
+    TaxSubtotalType taxSubtotal = new TaxSubtotalType();
+
+    TaxableAmountType taxableAmount = new TaxableAmountType();
+    taxableAmount.setCurrencyID("EUR");
+    taxableAmount.setValue(taxableSum);
+    taxSubtotal.setTaxableAmount(taxableAmount);
+
+    TaxAmountType taxAmount = new TaxAmountType();
+    taxAmount.setCurrencyID("EUR");
+    taxAmount.setValue(BigDecimal.ZERO);
+    taxSubtotal.setTaxAmount(taxAmount);
+
+    // Reuse your existing logic: VAT 0 => E + exemption reason if applicable
+    TaxCategoryType category =
+            getTaxCategory(BigDecimal.ZERO, false, group.getRows().get(0).getItemCbcName());
+    taxSubtotal.setTaxCategory(category);
+
+    return taxSubtotal;
 }
 ```
 
-* Replaces **whitespace** + **/ \ : * ? " < > |** with `_`
-* Collapses repeated unsafe chars into a single `_`
-* Avoids weird folder creation
-* Pattern is **precompiled** (Sonar-friendly)
-
 ---
 
-### 2) Use it in your finance filename block (minimal change)
+## Step 3 — Ensure VAT 21 subtotal is also built once (unchanged or similar)
 
-Replace this part:
+If you already have a method like `buildTaxSubtotalForVat(group, 21)`, keep it.
+
+Example:
 
 ```java
-String supplierParty = invoiceBucketResolver.getSupplierName(invoice.getAccountingSupplierParty());
-invoiceFileName = getCurrentDateTimeValue() + "_" +
-        supplierParty.replace(" ", "-") +
-        "_INV_" + invoiceFileName.replace("/", "-") + ".xml";
+default TaxSubtotalType buildVat21Subtotal(CsvInvoiceGroup group) {
+    return buildTaxSubtotalForVat(group, new BigDecimal("21"));
+}
 ```
 
-With this:
+(If you want VAT 21 to ALSO sum `LineExtensionAmount`, say so and I’ll mirror VAT 0 logic for 21.)
+
+---
+
+## Step 4 — Build TaxTotal once per invoice (group)
 
 ```java
-String supplierPartyRaw = invoiceBucketResolver.getSupplierName(invoice.getAccountingSupplierParty());
-String supplierParty = sanitizeForFileName(supplierPartyRaw);
+default List<TaxTotalType> toTaxTotal(CsvInvoiceGroup group) {
 
-String invoicePart = sanitizeForFileName(invoiceFileName);
+    TaxTotalType taxTotal = new TaxTotalType();
 
-invoiceFileName = getCurrentDateTimeValue() + "_" +
-        supplierParty +
-        "_INV_" + invoicePart + ".xml";
+    TaxSubtotalType vat21 = buildVat21Subtotal(group);
+    if (vat21 != null) {
+        taxTotal.getTaxSubtotal().add(vat21);
+    }
+
+    TaxSubtotalType vat0 = buildVatZeroSubtotal(group);
+    if (vat0 != null) {
+        taxTotal.getTaxSubtotal().add(vat0);
+    }
+
+    if (taxTotal.getTaxSubtotal().isEmpty()) {
+        return Collections.emptyList();
+    }
+
+    return Collections.singletonList(taxTotal);
+}
 ```
 
-That’s it. You don’t need to touch the rest of the writer.
+✅ This guarantees: at most **two** subtotals total (21 + 0).
 
 ---
 
-## Why this fixes your issue
+## Step 5 — Mapping change: stop MapStruct from setting taxTotal per row
 
-* Supplier name like `ACME / Finance GmbH` becomes `ACME_Finance_GmbH`
-* Invoice IDs containing `/` (common!) become safe too
-* Works across Linux/Windows and avoids accidental directory nesting
+In your MapStruct mapping for:
+
+`InvoiceType toInvoiceType(CsvInvoiceDto dto);`
+
+Add:
+
+```java
+@Mapping(target = "taxTotal", ignore = true)
+```
+
+So MapStruct can’t accidentally call the per-row tax logic.
 
 ---
 
-If you want, paste the rest of `updateInvoiceName(...)` and I’ll show the final full method with only these minimal edits applied (no refactor).
+## Step 6 — Set TaxTotal only inside `toInvoiceTypeGroup(group)`
 
+In your existing `toInvoiceTypeGroup`:
+
+```java
+default InvoiceType toInvoiceTypeGroup(CsvInvoiceGroup group) {
+
+    CsvInvoiceDto first = group.getRows().get(0);
+    InvoiceType invoice = toInvoiceType(first);
+
+    invoice.getInvoiceLine().clear();
+    for (CsvInvoiceDto row : group.getRows()) {
+        invoice.getInvoiceLine().add(toInvoiceLine(row));
+    }
+
+    // ✅ set tax totals ONCE per invoice
+    invoice.getTaxTotal().clear();
+    invoice.getTaxTotal().addAll(toTaxTotal(group));
+
+    return invoice;
+}
+```
+
+---
+
+## Step 7 — (Recommended) Add 3 unit tests
+
+1. Invoice has many lines VAT 0 → **only 1 VAT-0 subtotal**, taxable amount = sum(LineExtensionAmount of VAT0 lines)
+
+2. Invoice has many lines VAT 21 → **only 1 VAT-21 subtotal**
+
+3. Invoice has both 21 + 0 → **2 subtotals only**
+
+---
+
+## ✅ Step coverage checklist (confirming everything)
+
+* ✅ Summation rule (VAT 0 only) implemented
+* ✅ Subtotal creation rule (VAT 0 printed once) implemented
+* ✅ Mapping change to prevent duplicates (`taxTotal ignore`) included
+* ✅ Correct place to set totals (group method) included
+* ✅ Won’t break writer / batch logic
+* ✅ Handles multiple invoice lines safely
+
+---
+
+If you paste the exact DTO getter names for:
+
+* `InvoiceLine_cbc_LineExtensionAmount`
+* VAT percentage field
+
+…I’ll align the code 1:1 with your real class so you can copy/paste and compile immediately.
