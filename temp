@@ -1,3 +1,58 @@
+default TaxSubtotalType buildTaxSubtotalForVat(CsvInvoiceGroup group, BigDecimal vatPercentage) {
+
+    BigDecimal taxableSum = BigDecimal.ZERO;
+    BigDecimal taxAmountValue = null;
+    boolean foundVat = false;
+
+    for (CsvInvoiceDto row : group.getRows()) {
+
+        BigDecimal vat = toAmount(row.getInvoiceLineCbcVATPercentage());
+        if (vat != null && vat.compareTo(vatPercentage) == 0) {
+
+            foundVat = true;
+
+            // taxable base: sum LineExtensionAmount for matching VAT
+            BigDecimal lineExt = toAmount(row.getInvoiceLineCbcLineExtensionAmount());
+            if (lineExt != null) {
+                taxableSum = taxableSum.add(lineExt);
+            }
+
+            // tax amount: take it ONCE from CSV subtotal VAT amount (do not sum per line)
+            if (vatPercentage.compareTo(BigDecimal.ZERO) > 0 && taxAmountValue == null) {
+                taxAmountValue = toAmount(row.getAdditionalItemPropertyCbcSubTotalVatAmountValue());
+            }
+        }
+    }
+
+    if (!foundVat) {
+        return null;
+    }
+
+    if (taxAmountValue == null) {
+        taxAmountValue = BigDecimal.ZERO;
+    }
+
+    TaxSubtotalType taxSubtotal = new TaxSubtotalType();
+
+    TaxableAmountType taxableAmount = new TaxableAmountType();
+    taxableAmount.setCurrencyID("EUR");
+    taxableAmount.setValue(taxableSum);
+    taxSubtotal.setTaxableAmount(taxableAmount);
+
+    TaxAmountType taxAmount = new TaxAmountType();
+    taxAmount.setCurrencyID("EUR");
+    taxAmount.setValue(taxAmountValue);
+    taxSubtotal.setTaxAmount(taxAmount);
+
+    TaxCategoryType taxCategory =
+            getTaxCategory(vatPercentage, false, group.getRows().get(0).getItemCbcName());
+    taxSubtotal.setTaxCategory(taxCategory);
+
+    return taxSubtotal;
+}
+
+
+----------------------
 Yep — here’s the **final code** (only what you need), with:
 
 * **VAT 21 subtotal printed once** (tax amount taken **from CSV**, not calculated)
