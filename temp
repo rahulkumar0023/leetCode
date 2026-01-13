@@ -1,3 +1,9 @@
+In this case, I believe he is referring to additional attachment files. These could be another PDF, a JPEG, or another file type attached to the invoice, not the invoice itself. Those attachments are part of the XML.
+
+I need to check whether it’s possible to extract these attachments from the XML and send them as separate files. Let me investigate this first and get back to you, as this will likely require additional code changes.
+
+To start with, could we ask him for a few sample invoice numbers that include attachments? I will investigate this with Emilia on production. We also need to ask Generix about all supported attachment extensions for invoices (maybe JB or Andrei can answer this as well).
+
 package com.bnpp.pt.einvoice.connect.batch.csv;
 
 import oasis.names.specification.ubl.schema.xsd.commonaggregatecomponents_2.TaxCategoryType;
