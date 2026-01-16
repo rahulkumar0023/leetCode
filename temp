@@ -1,3 +1,67 @@
+Yep — Sonar is complaining because the loop has **multiple `continue`**. Easiest fix: **invert the logic** and do the work inside a single `if (shouldCopy)` block (no `continue`, no `break`). That keeps it clean and readable.
+
+Here’s the **Sonar-friendly** rewrite of just that loop section:
+
+```java
+try (DirectoryStream<Path> stream = Files.newDirectoryStream(sourceDir)) {
+    for (Path p : stream) {
+
+        boolean isFile = Files.isRegularFile(p);
+        String name = isFile ? p.getFileName().toString() : "";
+        String lower = isFile ? name.toLowerCase(Locale.ROOT) : "";
+
+        boolean isXmlItself = isFile && lower.equals(normalizedBase + ".xml");
+        boolean isAttachment = isFile && lower.startsWith(normalizedBase + "-");
+        boolean shouldCopy = isAttachment && !isXmlItself;
+
+        if (shouldCopy) {
+            String suffix = name.substring(xmlBaseName.length()); // e.g. "-1.pdf"
+            String destName = targetBase + suffix;
+
+            Path dest = uniqueIfExists(targetDir.resolve(destName));
+            Files.copy(p, dest, StandardCopyOption.COPY_ATTRIBUTES);
+
+            moved.add(dest);
+        }
+    }
+}
+```
+
+### Why this passes Sonar
+
+* **0 `continue`**, **0 `break`**
+* all conditions are expressed explicitly
+* the loop has a single “action path”
+
+If you want it even tighter (still Sonar-safe), you can remove the “empty string” trick and wrap in `if (Files.isRegularFile(p))` — still no `continue`:
+
+```java
+try (DirectoryStream<Path> stream = Files.newDirectoryStream(sourceDir)) {
+    for (Path p : stream) {
+        if (Files.isRegularFile(p)) {
+            String name = p.getFileName().toString();
+            String lower = name.toLowerCase(Locale.ROOT);
+
+            boolean shouldCopy = lower.startsWith(normalizedBase + "-")
+                    && !lower.equals(normalizedBase + ".xml");
+
+            if (shouldCopy) {
+                String suffix = name.substring(xmlBaseName.length());
+                String destName = targetBase + suffix;
+
+                Path dest = uniqueIfExists(targetDir.resolve(destName));
+                Files.copy(p, dest, StandardCopyOption.COPY_ATTRIBUTES);
+                moved.add(dest);
+            }
+        }
+    }
+}
+```
+
+Either version satisfies “use at most one break/continue” (actually uses none).
+
+
+---------------------
 Yes — with the new rule (**A.xml can have A-1.pdf, A-2.jpg, A-3.anything**), you should **replace the “single PDF mover” assumption** with a **generic attachment mover** that:
 
 * finds **all files belonging to the same XML base**
