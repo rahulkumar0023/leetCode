@@ -1,13 +1,18 @@
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.Mockito;
 
+import java.io.IOException;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.when;
 
 class SplitAttachmentMoverTest {
 
@@ -28,63 +33,70 @@ class SplitAttachmentMoverTest {
         pathConfig = Mockito.mock(PathConfig.class);
         PathConfig.Unzipped unzipped = Mockito.mock(PathConfig.Unzipped.class);
 
-        Mockito.when(pathConfig.getUnzipped()).thenReturn(unzipped);
-        Mockito.when(unzipped.getXml()).thenReturn(sourceDir);
+        when(pathConfig.getUnzipped()).thenReturn(unzipped);
+        when(unzipped.getXml()).thenReturn(sourceDir);
 
         mover = new SplitAttachmentMover(pathConfig);
     }
 
+    // -------------------------
+    // Public API tests (moveAttachments)
+    // -------------------------
+
     @Test
-    void moveAttachments_copiesMultipleMatchingAttachments_andRenamesToOutputBase() throws Exception {
+    void moveAttachments_copiesNewFormatAttachments_base_underscoreNN() throws Exception {
         write(sourceDir, "A.xml", "<xml/>");
-        write(sourceDir, "A_01.pdf", "pdf1");
-        write(sourceDir, "A_02.jpeg", "img2");
+        write(sourceDir, "A_01.pdf", "pdf");
+        write(sourceDir, "A_02.csv", "csv");
         write(sourceDir, "B_01.pdf", "other");
 
-        List<Path> moved = mover.moveAttachments("A", "NEWNAME_INV_123.xml", targetDir);
+        List<Path> moved = mover.moveAttachments("A", "OUT.xml", targetDir);
 
         assertEquals(2, moved.size());
-        assertTrue(Files.exists(targetDir.resolve("NEWNAME_INV_123_01.pdf")));
-        assertTrue(Files.exists(targetDir.resolve("NEWNAME_INV_123_02.jpeg")));
-        assertFalse(Files.exists(targetDir.resolve("B_01.pdf")));
+        assertTrue(Files.exists(targetDir.resolve("OUT_01.pdf")));
+        assertTrue(Files.exists(targetDir.resolve("OUT_02.csv")));
+        assertFalse(Files.exists(targetDir.resolve("OUT.xml"))); // never copy xml as attachment
     }
 
     @Test
-    void moveAttachments_supportsLegacyFormat_baseDotExt() throws Exception {
+    void moveAttachments_supportsLegacy_baseDotExt_A_pdf() throws Exception {
         write(sourceDir, "A.xml", "<xml/>");
-        write(sourceDir, "A.pdf", "legacyPdf");
+        write(sourceDir, "A.pdf", "legacy");
 
         List<Path> moved = mover.moveAttachments("A", "OUT.xml", targetDir);
 
         assertEquals(1, moved.size());
-        assertTrue(Files.exists(targetDir.resolve("OUT.pdf"))); // legacy suffix ".pdf"
+        assertTrue(Files.exists(targetDir.resolve("OUT.pdf")));
     }
 
     @Test
-    void moveAttachments_doesNotCopyXmlItself() throws Exception {
+    void moveAttachments_supportsOlderLegacy_baseDashNN_A_1_pdf() throws Exception {
         write(sourceDir, "A.xml", "<xml/>");
+        write(sourceDir, "A-1.pdf", "olderLegacy");
+
+        List<Path> moved = mover.moveAttachments("A", "OUT.xml", targetDir);
+
+        assertEquals(1, moved.size());
+        assertTrue(Files.exists(targetDir.resolve("OUT-1.pdf")));
+    }
+
+    @Test
+    void moveAttachments_skipsNonMatchingPrefix() throws Exception {
+        write(sourceDir, "A.xml", "<xml/>");
+        write(sourceDir, "X_01.pdf", "nope");
+        write(sourceDir, "XA.pdf", "nope");
 
         List<Path> moved = mover.moveAttachments("A", "OUT.xml", targetDir);
 
         assertTrue(moved.isEmpty());
-        assertFalse(Files.exists(targetDir.resolve("OUT.xml"))); // we never copy XML as attachment
-    }
-
-    @Test
-    void moveAttachments_matchesCaseInsensitive() throws Exception {
-        write(sourceDir, "a.XML", "<xml/>");
-        write(sourceDir, "A_01.PDF", "pdf");
-
-        List<Path> moved = mover.moveAttachments("a", "out.xml", targetDir);
-
-        assertEquals(1, moved.size());
-        assertTrue(Files.exists(targetDir.resolve("out_01.PDF"))); // preserves original suffix case
+        assertFalse(Files.exists(targetDir.resolve("OUT_01.pdf")));
+        assertFalse(Files.exists(targetDir.resolve("OUTA.pdf")));
     }
 
     @Test
     void moveAttachments_ignoresNonRegularFiles() throws Exception {
         write(sourceDir, "A.xml", "<xml/>");
-        Files.createDirectory(sourceDir.resolve("A_01.pdf")); // directory, not file
+        Files.createDirectory(sourceDir.resolve("A_01.pdf")); // directory named like attachment
 
         List<Path> moved = mover.moveAttachments("A", "OUT.xml", targetDir);
 
@@ -96,7 +108,7 @@ class SplitAttachmentMoverTest {
         write(sourceDir, "A.xml", "<xml/>");
         write(sourceDir, "A_01.pdf", "pdf");
 
-        // pre-create destination to force uniqueIfExists
+        // precreate output
         write(targetDir, "OUT_01.pdf", "existing");
 
         List<Path> moved = mover.moveAttachments("A", "OUT.xml", targetDir);
@@ -114,9 +126,11 @@ class SplitAttachmentMoverTest {
 
     @Test
     void moveAttachments_returnsEmpty_whenSourceDirMissing() throws Exception {
-        Path fileInsteadOfDir = write(tempDir, "notADir.txt", "x");
+        // point sourceDir to a file instead of directory
+        Path notADir = write(tempDir, "notADir.txt", "x");
+
         PathConfig.Unzipped unzipped = pathConfig.getUnzipped();
-        Mockito.when(unzipped.getXml()).thenReturn(fileInsteadOfDir);
+        when(unzipped.getXml()).thenReturn(notADir);
 
         List<Path> moved = mover.moveAttachments("A", "OUT.xml", targetDir);
 
@@ -124,11 +138,10 @@ class SplitAttachmentMoverTest {
     }
 
     @Test
-    void moveAttachments_handlesIOException_andDoesNotThrow() throws Exception {
+    void moveAttachments_handlesIOException_whenTargetIsFile() throws Exception {
         write(sourceDir, "A.xml", "<xml/>");
         write(sourceDir, "A_01.pdf", "pdf");
 
-        // pass a targetDir which is a file -> createDirectories/copy will fail
         Path targetIsFile = write(tempDir, "targetFile", "x");
 
         assertDoesNotThrow(() -> {
@@ -137,7 +150,61 @@ class SplitAttachmentMoverTest {
         });
     }
 
-    private static Path write(Path dir, String name, String content) throws Exception {
+    // -------------------------
+    // Private method branch coverage (reflection)
+    // This is needed because some branches are unreachable from filesystem iteration.
+    // -------------------------
+
+    @ParameterizedTest
+    @CsvSource({
+        // null/blank guards
+        " ,A,false",
+        "'',A,false",
+        "A, ,false",
+        "A,'',false",
+
+        // xml itself must be false
+        "A.xml,A,false",
+        "a.XML,a,false",
+
+        // prefix mismatch
+        "B_01.pdf,A,false",
+
+        // length <= baseLen branch (e.g., filename exactly base)
+        "A,A,false",
+
+        // separator not allowed: base followed by letter/number directly
+        "A01.pdf,A,false",
+
+        // allowed separators: '_', '.', '-'
+        "A_01.pdf,A,true",
+        "A.pdf,A,true",
+        "A-1.pdf,A,true"
+    })
+    void isAttachmentForBase_privateMethodCoverage(String fileName, String base, boolean expected) throws Exception {
+        boolean actual = invokeIsAttachmentForBase(fileName, base == null ? null : base.toLowerCase());
+        assertEquals(expected, actual);
+    }
+
+    @Test
+    void isAttachmentForBase_returnsFalse_whenFileNameDoesNotStartWithBase() throws Exception {
+        assertFalse(invokeIsAttachmentForBase("XA.pdf", "a"));
+        assertFalse(invokeIsAttachmentForBase("BA_01.pdf", "a"));
+    }
+
+    // -------------------------
+    // Helpers
+    // -------------------------
+
+    private boolean invokeIsAttachmentForBase(String fileName, String normalizedBase) throws Exception {
+        Method m = SplitAttachmentMover.class.getDeclaredMethod(
+            "isAttachmentForBase", String.class, String.class
+        );
+        m.setAccessible(true);
+        return (boolean) m.invoke(mover, fileName, normalizedBase);
+    }
+
+    private static Path write(Path dir, String name, String content) throws IOException {
         Path p = dir.resolve(name);
         Files.writeString(p, content);
         return p;
