@@ -1,232 +1,145 @@
-Yes — you can adapt the logic to support **both formats**:
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.mockito.Mockito;
 
-* **New**: `A_01.pdf`, `A_02.csv`, etc.
-* **Legacy**: `A.pdf` (and `A.csv`, `A.jpeg`, etc.)
-
-Right now your `isAttachmentForBase()` only matches `base + "_"...`, so `A.pdf` is not considered an attachment and gets skipped.
-
----
-
-## 1) Code change: accept `A.<ext>` as well as `A_<suffix>.<ext>`
-
-Update your method like this (also keeps legacy `-` just in case):
-
-```java
-private boolean isAttachmentForBase(String fileName, String normalizedBase) {
-    if (fileName == null || fileName.isBlank() || normalizedBase == null || normalizedBase.isBlank()) {
-        return false;
-    }
-
-    String lower = fileName.toLowerCase(Locale.ROOT);
-
-    // Never treat the XML itself as an attachment
-    if (lower.equals(normalizedBase + ".xml")) {
-        return false;
-    }
-
-    if (!lower.startsWith(normalizedBase)) {
-        return false;
-    }
-
-    int baseLen = normalizedBase.length();
-    if (lower.length() <= baseLen) {
-        return false;
-    }
-
-    char separator = lower.charAt(baseLen);
-
-    // Support: A_01.pdf (new), A.pdf (legacy), A-1.pdf (older legacy)
-    return separator == '_' || separator == '.' || separator == '-';
-}
-```
-
-✅ With this change:
-
-* `A.pdf` matches (separator `.`)
-* `A_01.pdf` matches (separator `_`)
-* `A.xml` does **not** match
-* `AB.pdf` does **not** match (doesn’t start with `A` + separator)
-
-Your existing `copySingleAttachment()` already works for both:
-
-* for `A.pdf`, suffix becomes `.pdf`
-* for `A_01.pdf`, suffix becomes `_01.pdf`
-
-So **no change needed** there.
-
----
-
-## 2) JUnit 5 test class (high coverage + covers your “A.pdf is skipped” bug)
-
-This covers:
-
-* legacy `A.pdf`
-* new `A_01.pdf`, `A_02.csv`
-* not copying `A.xml`
-* `shouldSkip()` branches
-* invalid source dir branch
-* IOException branch (by passing a “targetDir” that is actually a file)
-
-```java
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
-
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.junit.jupiter.MockitoExtension;
+import static org.junit.jupiter.api.Assertions.*;
 
-@ExtendWith(MockitoExtension.class)
 class SplitAttachmentMoverTest {
 
     @TempDir
     Path tempDir;
 
-    @Test
-    void moveAttachments_shouldCopyLegacyAndNewAttachments_andSkipXml() throws Exception {
-        Path sourceDir = tempDir.resolve("source");
-        Path targetDir = tempDir.resolve("target");
-        Files.createDirectories(sourceDir);
-        Files.createDirectories(targetDir);
+    private Path sourceDir;
+    private Path targetDir;
 
-        // Source files
-        Files.writeString(sourceDir.resolve("A.xml"), "<xml/>");
-        Files.write(sourceDir.resolve("A.pdf"), new byte[] { 1, 2, 3 });
-        Files.write(sourceDir.resolve("A_01.pdf"), new byte[] { 4, 5 });
-        Files.write(sourceDir.resolve("A_02.csv"), "x,y\n1,2\n".getBytes());
-        Files.write(sourceDir.resolve("B.pdf"), new byte[] { 9 }); // should not match
+    private PathConfig pathConfig;
+    private SplitAttachmentMover mover;
 
-        // Mock PathConfig -> unzipped/xml directory
-        PathConfig pathConfig = mock(PathConfig.class);
-        UnzippedPathConfig unzipped = mock(UnzippedPathConfig.class);
-        when(pathConfig.getUnzipped()).thenReturn(unzipped);
-        when(unzipped.getXml()).thenReturn(sourceDir);
+    @BeforeEach
+    void setup() throws Exception {
+        sourceDir = Files.createDirectory(tempDir.resolve("unzippedXml"));
+        targetDir = Files.createDirectory(tempDir.resolve("out"));
 
-        SplitAttachmentMover mover = new SplitAttachmentMover(pathConfig);
+        pathConfig = Mockito.mock(PathConfig.class);
+        PathConfig.Unzipped unzipped = Mockito.mock(PathConfig.Unzipped.class);
 
-        List<Path> moved = mover.moveAttachments("A", "A.xml", targetDir);
+        Mockito.when(pathConfig.getUnzipped()).thenReturn(unzipped);
+        Mockito.when(unzipped.getXml()).thenReturn(sourceDir);
 
-        assertEquals(3, moved.size(), "Expected A.pdf, A_01.pdf, A_02.csv");
-
-        assertTrue(Files.exists(targetDir.resolve("A.pdf")));
-        assertTrue(Files.exists(targetDir.resolve("A_01.pdf")));
-        assertTrue(Files.exists(targetDir.resolve("A_02.csv")));
-
-        assertFalse(Files.exists(targetDir.resolve("A.xml")), "XML must not be copied as attachment");
-        assertFalse(Files.exists(targetDir.resolve("B.pdf")), "Other base attachments must not be copied");
+        mover = new SplitAttachmentMover(pathConfig);
     }
 
     @Test
-    void moveAttachments_shouldCreateUniqueNameIfTargetAlreadyExists() throws Exception {
-        Path sourceDir = tempDir.resolve("source2");
-        Path targetDir = tempDir.resolve("target2");
-        Files.createDirectories(sourceDir);
-        Files.createDirectories(targetDir);
+    void moveAttachments_copiesMultipleMatchingAttachments_andRenamesToOutputBase() throws Exception {
+        write(sourceDir, "A.xml", "<xml/>");
+        write(sourceDir, "A_01.pdf", "pdf1");
+        write(sourceDir, "A_02.jpeg", "img2");
+        write(sourceDir, "B_01.pdf", "other");
 
-        Files.writeString(sourceDir.resolve("A.xml"), "<xml/>");
-        Files.write(sourceDir.resolve("A.pdf"), new byte[] { 1 });
+        List<Path> moved = mover.moveAttachments("A", "NEWNAME_INV_123.xml", targetDir);
 
-        // Pre-create A.pdf in target to trigger uniqueIfExists()
-        Files.write(targetDir.resolve("A.pdf"), new byte[] { 9 });
+        assertEquals(2, moved.size());
+        assertTrue(Files.exists(targetDir.resolve("NEWNAME_INV_123_01.pdf")));
+        assertTrue(Files.exists(targetDir.resolve("NEWNAME_INV_123_02.jpeg")));
+        assertFalse(Files.exists(targetDir.resolve("B_01.pdf")));
+    }
 
-        PathConfig pathConfig = mock(PathConfig.class);
-        UnzippedPathConfig unzipped = mock(UnzippedPathConfig.class);
-        when(pathConfig.getUnzipped()).thenReturn(unzipped);
-        when(unzipped.getXml()).thenReturn(sourceDir);
+    @Test
+    void moveAttachments_supportsLegacyFormat_baseDotExt() throws Exception {
+        write(sourceDir, "A.xml", "<xml/>");
+        write(sourceDir, "A.pdf", "legacyPdf");
 
-        SplitAttachmentMover mover = new SplitAttachmentMover(pathConfig);
-
-        List<Path> moved = mover.moveAttachments("A", "A.xml", targetDir);
+        List<Path> moved = mover.moveAttachments("A", "OUT.xml", targetDir);
 
         assertEquals(1, moved.size());
-        assertTrue(Files.exists(targetDir.resolve("A.pdf")));
-        assertTrue(
-            Files.exists(targetDir.resolve("A-2.pdf")),
-            "Expected unique filename A-2.pdf when A.pdf already exists"
-        );
+        assertTrue(Files.exists(targetDir.resolve("OUT.pdf"))); // legacy suffix ".pdf"
     }
 
     @Test
-    void moveAttachments_shouldReturnEmpty_whenShouldSkip() {
-        PathConfig pathConfig = mock(PathConfig.class);
-        SplitAttachmentMover mover = new SplitAttachmentMover(pathConfig);
+    void moveAttachments_doesNotCopyXmlItself() throws Exception {
+        write(sourceDir, "A.xml", "<xml/>");
 
-        List<Path> moved = mover.moveAttachments(" ", "A.xml", tempDir.resolve("t"));
+        List<Path> moved = mover.moveAttachments("A", "OUT.xml", targetDir);
+
+        assertTrue(moved.isEmpty());
+        assertFalse(Files.exists(targetDir.resolve("OUT.xml"))); // we never copy XML as attachment
+    }
+
+    @Test
+    void moveAttachments_matchesCaseInsensitive() throws Exception {
+        write(sourceDir, "a.XML", "<xml/>");
+        write(sourceDir, "A_01.PDF", "pdf");
+
+        List<Path> moved = mover.moveAttachments("a", "out.xml", targetDir);
+
+        assertEquals(1, moved.size());
+        assertTrue(Files.exists(targetDir.resolve("out_01.PDF"))); // preserves original suffix case
+    }
+
+    @Test
+    void moveAttachments_ignoresNonRegularFiles() throws Exception {
+        write(sourceDir, "A.xml", "<xml/>");
+        Files.createDirectory(sourceDir.resolve("A_01.pdf")); // directory, not file
+
+        List<Path> moved = mover.moveAttachments("A", "OUT.xml", targetDir);
+
         assertTrue(moved.isEmpty());
     }
 
     @Test
-    void moveAttachments_shouldReturnEmpty_whenSourceDirMissing() {
-        PathConfig pathConfig = mock(PathConfig.class);
-        UnzippedPathConfig unzipped = mock(UnzippedPathConfig.class);
-        when(pathConfig.getUnzipped()).thenReturn(unzipped);
-        when(unzipped.getXml()).thenReturn(tempDir.resolve("does-not-exist"));
+    void moveAttachments_createsUniqueNameIfTargetExists() throws Exception {
+        write(sourceDir, "A.xml", "<xml/>");
+        write(sourceDir, "A_01.pdf", "pdf");
 
-        SplitAttachmentMover mover = new SplitAttachmentMover(pathConfig);
+        // pre-create destination to force uniqueIfExists
+        write(targetDir, "OUT_01.pdf", "existing");
 
-        List<Path> moved = mover.moveAttachments("A", "A.xml", tempDir.resolve("t"));
+        List<Path> moved = mover.moveAttachments("A", "OUT.xml", targetDir);
+
+        assertEquals(1, moved.size());
+        assertTrue(Files.exists(targetDir.resolve("OUT_01-2.pdf")));
+    }
+
+    @Test
+    void moveAttachments_returnsEmpty_whenInputsInvalid() {
+        assertTrue(mover.moveAttachments("", "OUT.xml", targetDir).isEmpty());
+        assertTrue(mover.moveAttachments("A", "", targetDir).isEmpty());
+        assertTrue(mover.moveAttachments("A", "OUT.xml", null).isEmpty());
+    }
+
+    @Test
+    void moveAttachments_returnsEmpty_whenSourceDirMissing() throws Exception {
+        Path fileInsteadOfDir = write(tempDir, "notADir.txt", "x");
+        PathConfig.Unzipped unzipped = pathConfig.getUnzipped();
+        Mockito.when(unzipped.getXml()).thenReturn(fileInsteadOfDir);
+
+        List<Path> moved = mover.moveAttachments("A", "OUT.xml", targetDir);
+
         assertTrue(moved.isEmpty());
     }
 
     @Test
-    void moveAttachments_shouldReturnEmpty_onIOException_whenTargetDirIsAFile() throws IOException {
-        Path sourceDir = tempDir.resolve("source3");
-        Files.createDirectories(sourceDir);
-        Files.writeString(sourceDir.resolve("A.xml"), "<xml/>");
-        Files.write(sourceDir.resolve("A.pdf"), new byte[] { 1 });
+    void moveAttachments_handlesIOException_andDoesNotThrow() throws Exception {
+        write(sourceDir, "A.xml", "<xml/>");
+        write(sourceDir, "A_01.pdf", "pdf");
 
-        Path targetAsFile = tempDir.resolve("targetAsFile");
-        Files.writeString(targetAsFile, "I am a file, not a directory");
+        // pass a targetDir which is a file -> createDirectories/copy will fail
+        Path targetIsFile = write(tempDir, "targetFile", "x");
 
-        PathConfig pathConfig = mock(PathConfig.class);
-        UnzippedPathConfig unzipped = mock(UnzippedPathConfig.class);
-        when(pathConfig.getUnzipped()).thenReturn(unzipped);
-        when(unzipped.getXml()).thenReturn(sourceDir);
-
-        SplitAttachmentMover mover = new SplitAttachmentMover(pathConfig);
-
-        List<Path> moved = mover.moveAttachments("A", "A.xml", targetAsFile);
-
-        assertTrue(moved.isEmpty(), "Should return empty when createDirectories fails");
+        assertDoesNotThrow(() -> {
+            List<Path> moved = mover.moveAttachments("A", "OUT.xml", targetIsFile);
+            assertTrue(moved.isEmpty());
+        });
     }
 
-    /**
-     * These types must match your real project types.
-     * If your Unzipped config class name differs, replace it accordingly.
-     */
-    interface PathConfig {
-        UnzippedPathConfig getUnzipped();
-    }
-
-    interface UnzippedPathConfig {
-        Path getXml();
+    private static Path write(Path dir, String name, String content) throws Exception {
+        Path p = dir.resolve(name);
+        Files.writeString(p, content);
+        return p;
     }
 }
-```
-
-### Notes on the test
-
-* I intentionally avoided Mockito `eq()` to match your Sonar guidance.
-* If your real types are not `PathConfig` / `UnzippedPathConfig` (names differ), replace those interfaces with your actual classes, **or keep these interfaces and mock the real ones in your project**.
-
----
-
-## 3) Why your PDF “disappeared”
-
-Because with your current matcher:
-
-```java
-return lower.startsWith(normalizedBase + "_")
-    && !lower.equals(normalizedBase + ".xml");
-```
-
-`A.pdf` does not start with `A_`, so it never gets copied. After the updated matcher, it will be picked up again.
-
----
-
-If you paste your actual `PathConfig` / `getUnzipped()` classes (names + methods), I can adjust the test to compile in your repo exactly (no placeholder interfaces).
