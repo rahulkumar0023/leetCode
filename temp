@@ -437,6 +437,446 @@ What this fixes for your reported issue
 
 If you want, paste your current attachment mover integration point (the place you call moveAttachments) and I’ll point out why the PDF “disappeared” after the refactor (usually it’s either: wrong sourceDir path, wrong xmlBaseName passed, or you moved PDFs earlier than renaming logic and then the registry lookup can’t find them).
 
+—-
+Got it — with the new rule (..._01.xml and attachments ..._02.pdf, etc.) you must derive the “bundle base” by removing the trailing _<digits> from the XML filename (and also still support legacy A.xml + A.pdf).
+
+Below is the final updated class (full code) and an updated JUnit that covers:
+	•	new format: A1_B123_multiplethings_01.xml + _02/_03/_999 attachments
+	•	legacy: A.xml + A.pdf
+	•	“don’t move any .xml”
+	•	invalid inputs, missing source dir, deterministic IOException path, non-regular files
+	•	uniqueIfExists branch
+
+⸻
+
+SplitAttachmentMover.java (final)
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
+
+import java.io.IOException;
+import java.nio.file.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.regex.Pattern;
+
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class SplitAttachmentMover {
+
+    private static final Pattern TRAILING_SEQ = Pattern.compile("(?i)_[0-9]+$");
+
+    private final PathConfig pathConfig;
+
+    /**
+     * @param xmlBaseName can be:
+     *  - legacy: "A" or "A.xml"
+     *  - new:    "A1_B123_multiplethings_01" or "A1_B123_multiplethings_01.xml"
+     * Attachment base will be derived by stripping extension and removing trailing _<digits>.
+     */
+    public List<Path> moveAttachments(String xmlBaseName, String outputXmlFileName, Path targetDir) {
+        if (shouldSkip(xmlBaseName, outputXmlFileName, targetDir)) {
+            return List.of();
+        }
+
+        Path sourceDir = getSourceDir();
+        if (!isValidSourceDir(sourceDir)) {
+            return List.of();
+        }
+
+        String normalizedBase = normalizeAttachmentBase(xmlBaseName);
+        if (normalizedBase == null || normalizedBase.isBlank()) {
+            log.warn("Normalized attachment base is blank for xmlBaseName='{}'. Skipping attachment move.", xmlBaseName);
+            return List.of();
+        }
+
+        String targetBase = stripExtension(Paths.get(outputXmlFileName).getFileName().toString());
+
+        try {
+            Files.createDirectories(targetDir);
+            List<Path> moved = copyMatchingAttachments(sourceDir, targetDir, normalizedBase, targetBase);
+            logResult(normalizedBase, moved);
+            return moved;
+        } catch (IOException ex) {
+            log.error("Failed moving attachments for base '{}': {}", xmlBaseName, ex.getMessage(), ex);
+            return List.of();
+        }
+    }
+
+    private Path getSourceDir() {
+        return pathConfig.getUnzipped().getXml();
+    }
+
+    private List<Path> copyMatchingAttachments(Path sourceDir,
+                                               Path targetDir,
+                                               String normalizedBase,
+                                               String targetBase) throws IOException {
+
+        List<Path> moved = new ArrayList<>();
+
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(sourceDir)) {
+            for (Path p : stream) {
+                if (Files.isRegularFile(p)) {
+                    String fileName = p.getFileName().toString();
+                    if (isAttachmentForBase(fileName, normalizedBase)) {
+                        Path copied = copySingleAttachment(p, fileName, normalizedBase, targetDir, targetBase);
+                        moved.add(copied);
+                    }
+                }
+            }
+        }
+
+        return moved;
+    }
+
+    /**
+     * Matches:
+     *  - New:    base_02.pdf, base_03.csv, base_999.jpeg ...
+     *  - Legacy: base.pdf, base.jpeg, base.csv ...
+     *  - Older legacy: base-2.pdf (optional support)
+     *
+     * Excludes:
+     *  - any *.xml
+     */
+    private boolean isAttachmentForBase(String fileName, String normalizedBase) {
+        if (fileName == null || fileName.isBlank() || normalizedBase == null || normalizedBase.isBlank()) {
+            return false;
+        }
+
+        String lower = fileName.toLowerCase(Locale.ROOT);
+        String base = normalizedBase.toLowerCase(Locale.ROOT);
+
+        // never move xml files as attachments (covers base.xml and base_01.xml, etc.)
+        if (lower.endsWith(".xml")) {
+            return false;
+        }
+
+        // new: base_<digits>.<ext>
+        if (lower.startsWith(base + "_")) {
+            int i = base.length() + 1;
+            if (i >= lower.length() || !Character.isDigit(lower.charAt(i))) {
+                return false;
+            }
+            while (i < lower.length() && Character.isDigit(lower.charAt(i))) {
+                i++;
+            }
+            return i < lower.length() && lower.charAt(i) == '.';
+        }
+
+        // legacy: base.<ext>
+        if (lower.startsWith(base + ".")) {
+            return true;
+        }
+
+        // older legacy: base-<digits>.<ext>
+        if (lower.startsWith(base + "-")) {
+            int i = base.length() + 1;
+            if (i >= lower.length() || !Character.isDigit(lower.charAt(i))) {
+                return false;
+            }
+            while (i < lower.length() && Character.isDigit(lower.charAt(i))) {
+                i++;
+            }
+            return i < lower.length() && lower.charAt(i) == '.';
+        }
+
+        return false;
+    }
+
+    private Path copySingleAttachment(Path source,
+                                      String fileName,
+                                      String normalizedBase,
+                                      Path targetDir,
+                                      String targetBase) throws IOException {
+
+        // We compute suffix from the ORIGINAL fileName using the original base length.
+        // Works even if fileName has different casing. We just need matching length.
+        int baseLen = normalizedBase.length();
+        if (fileName.length() < baseLen) {
+            return uniqueIfExists(targetDir.resolve(targetBase + "-" + fileName));
+        }
+
+        String suffix = fileName.substring(baseLen); // ".pdf" OR "_02.pdf" OR "-2.pdf" OR ".CSV"
+        Path dest = uniqueIfExists(targetDir.resolve(targetBase + suffix));
+        Files.copy(source, dest, StandardCopyOption.COPY_ATTRIBUTES);
+
+        return dest;
+    }
+
+    private void logResult(String normalizedBase, List<Path> moved) {
+        if (moved.isEmpty()) {
+            log.debug("No attachments found for base '{}'", normalizedBase);
+        } else {
+            log.info("Moved {} attachment(s) for base '{}'", moved.size(), normalizedBase);
+        }
+    }
+
+    private boolean shouldSkip(String xmlBaseName, String outputXmlFileName, Path targetDir) {
+        if (xmlBaseName == null || xmlBaseName.isBlank()) {
+            log.warn("XML base name is blank. Skipping attachment move.");
+            return true;
+        }
+        if (outputXmlFileName == null || outputXmlFileName.isBlank()) {
+            log.warn("Output XML file name is blank. Skipping attachment move.");
+            return true;
+        }
+        if (targetDir == null) {
+            log.warn("Target directory is null. Skipping attachment move.");
+            return true;
+        }
+        return false;
+    }
+
+    private boolean isValidSourceDir(Path sourceDir) {
+        if (sourceDir == null || !Files.isDirectory(sourceDir)) {
+            log.warn("Source directory is missing. Skipping attachment move.");
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * IMPORTANT:
+     * - Strips extension
+     * - Removes trailing _<digits> (new scheme where XML ends with _01)
+     * Examples:
+     *  - "X_01.xml" -> "x"
+     *  - "A1_B123_multiplethings_01" -> "a1_b123_multiplethings"
+     *  - "A.xml" -> "a"  (no change besides normalize)
+     */
+    private static String normalizeAttachmentBase(String xmlBaseNameOrFileName) {
+        if (xmlBaseNameOrFileName == null) {
+            return null;
+        }
+        String raw = Paths.get(xmlBaseNameOrFileName).getFileName().toString();
+        String noExt = stripExtension(raw).trim();
+        String noSeq = TRAILING_SEQ.matcher(noExt).replaceFirst("");
+        return normalize(noSeq);
+    }
+
+    private static String stripExtension(String fileName) {
+        int dot = fileName.lastIndexOf('.');
+        return dot > 0 ? fileName.substring(0, dot) : fileName;
+    }
+
+    private static String normalize(String s) {
+        return s == null ? null : s.toLowerCase(Locale.ROOT).trim();
+    }
+
+    private static Path uniqueIfExists(Path dest) {
+        if (!Files.exists(dest)) {
+            return dest;
+        }
+
+        String name = dest.getFileName().toString();
+        String base = stripExtension(name);
+        String ext = "";
+
+        int dot = name.lastIndexOf('.');
+        if (dot > 0) {
+            ext = name.substring(dot);
+        }
+
+        Path dir = dest.getParent();
+        int i = 2;
+        Path candidate = dir.resolve(base + "-" + i + ext);
+        while (Files.exists(candidate)) {
+            i++;
+            candidate = dir.resolve(base + "-" + i + ext);
+        }
+        return candidate;
+    }
+}
+
+
+⸻
+
+SplitAttachmentMoverTest.java (final)
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.mockito.Mockito;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class SplitAttachmentMoverTest {
+
+    @TempDir
+    Path tempDir;
+
+    private Path sourceDir;
+    private Path targetDir;
+
+    private PathConfig pathConfig;
+    private SplitAttachmentMover mover;
+
+    @BeforeEach
+    void setup() throws IOException {
+        sourceDir = Files.createDirectory(tempDir.resolve("unzippedXml"));
+        targetDir = Files.createDirectory(tempDir.resolve("out"));
+
+        pathConfig = Mockito.mock(PathConfig.class);
+        PathConfig.Unzipped unzipped = Mockito.mock(PathConfig.Unzipped.class);
+
+        Mockito.when(pathConfig.getUnzipped()).thenReturn(unzipped);
+        Mockito.when(unzipped.getXml()).thenReturn(sourceDir);
+
+        mover = new SplitAttachmentMover(pathConfig);
+    }
+
+    @Test
+    void moveAttachments_newXmlSuffix_baseDerivedAndCopiesAllMatching() throws Exception {
+        write(sourceDir, "A1_B123_multiplethings_01.xml", "<xml/>");
+        write(sourceDir, "A1_B123_multiplethings_02.pdf", "pdf2");
+        write(sourceDir, "A1_B123_multiplethings_03.pdf", "pdf3");
+        write(sourceDir, "A1_B123_multiplethings_04.csv", "csv4");
+        write(sourceDir, "A1_B123_multiplethings_999.jpeg", "img");
+        write(sourceDir, "OTHER_02.pdf", "nope");
+
+        List<Path> moved = mover.moveAttachments(
+                "A1_B123_multiplethings_01.xml",
+                "NEWNAME_INV_123.xml",
+                targetDir
+        );
+
+        assertEquals(4, moved.size());
+        assertTrue(Files.exists(targetDir.resolve("NEWNAME_INV_123_02.pdf")));
+        assertTrue(Files.exists(targetDir.resolve("NEWNAME_INV_123_03.pdf")));
+        assertTrue(Files.exists(targetDir.resolve("NEWNAME_INV_123_04.csv")));
+        assertTrue(Files.exists(targetDir.resolve("NEWNAME_INV_123_999.jpeg")));
+
+        // xml should never be moved
+        assertFalse(Files.exists(targetDir.resolve("NEWNAME_INV_123_01.xml")));
+    }
+
+    @Test
+    void moveAttachments_legacyXmlAndLegacySinglePdf_isCopied() throws Exception {
+        write(sourceDir, "A.xml", "<xml/>");
+        write(sourceDir, "A.pdf", "pdf");
+
+        List<Path> moved = mover.moveAttachments("A.xml", "OUT.xml", targetDir);
+
+        assertEquals(1, moved.size());
+        assertTrue(Files.exists(targetDir.resolve("OUT.pdf")));
+    }
+
+    @Test
+    void moveAttachments_doesNotMoveAnyXmlEvenIfMatchesBase() throws Exception {
+        write(sourceDir, "X_01.xml", "<xml/>");
+        write(sourceDir, "X_02.xml", "<xml/>"); // should NOT be moved
+        write(sourceDir, "X_02.pdf", "pdf");
+
+        List<Path> moved = mover.moveAttachments("X_01.xml", "OUT.xml", targetDir);
+
+        assertEquals(1, moved.size());
+        assertTrue(Files.exists(targetDir.resolve("OUT_02.pdf")));
+        assertFalse(Files.exists(targetDir.resolve("OUT_02.xml")));
+    }
+
+    @Test
+    void moveAttachments_ignoresNonRegularFiles() throws Exception {
+        write(sourceDir, "A_01.xml", "<xml/>");
+        Files.createDirectory(sourceDir.resolve("A_02.pdf")); // directory, not a file
+
+        List<Path> moved = mover.moveAttachments("A_01.xml", "OUT.xml", targetDir);
+
+        assertTrue(moved.isEmpty());
+    }
+
+    @Test
+    void moveAttachments_createsUniqueNameIfTargetExists() throws Exception {
+        write(sourceDir, "A.xml", "<xml/>");
+        write(sourceDir, "A.pdf", "pdf");
+
+        // pre-create destination so uniqueIfExists triggers
+        write(targetDir, "OUT.pdf", "existing");
+
+        List<Path> moved = mover.moveAttachments("A.xml", "OUT.xml", targetDir);
+
+        assertEquals(1, moved.size());
+        assertTrue(Files.exists(targetDir.resolve("OUT-2.pdf")));
+    }
+
+    @Test
+    void moveAttachments_returnsEmptyList_whenNoAttachmentsPresent() throws Exception {
+        write(sourceDir, "A_01.xml", "<xml/>");
+
+        List<Path> moved = mover.moveAttachments("A_01.xml", "OUT.xml", targetDir);
+
+        assertNotNull(moved);
+        assertTrue(moved.isEmpty());
+    }
+
+    @Test
+    void moveAttachments_returnsEmptyList_whenInputsInvalid() {
+        assertTrue(mover.moveAttachments(" ", "OUT.xml", targetDir).isEmpty());
+        assertTrue(mover.moveAttachments("A", " ", targetDir).isEmpty());
+        assertTrue(mover.moveAttachments("A", "OUT.xml", null).isEmpty());
+    }
+
+    @Test
+    void moveAttachments_returnsEmptyList_whenSourceDirMissing() throws Exception {
+        // point sourceDir to a file (not directory)
+        Path fileInsteadOfDir = write(tempDir, "notADir.txt", "x");
+        PathConfig.Unzipped unzipped = pathConfig.getUnzipped();
+        Mockito.when(unzipped.getXml()).thenReturn(fileInsteadOfDir);
+
+        List<Path> moved = mover.moveAttachments("A.xml", "OUT.xml", targetDir);
+
+        assertTrue(moved.isEmpty());
+    }
+
+    @Test
+    void moveAttachments_handlesIOException_andDoesNotThrow() throws Exception {
+        write(sourceDir, "A.xml", "<xml/>");
+        write(sourceDir, "A.pdf", "pdf");
+
+        // deterministic IOException: pass a file path as targetDir so createDirectories/copy fails
+        Path targetIsFile = write(tempDir, "targetFile", "x");
+
+        assertDoesNotThrow(() -> {
+            List<Path> moved = mover.moveAttachments("A.xml", "OUT.xml", targetIsFile);
+            assertTrue(moved.isEmpty());
+        });
+    }
+
+    @Test
+    void moveAttachments_supportsOlderLegacyDashPattern() throws Exception {
+        write(sourceDir, "A.xml", "<xml/>");
+        write(sourceDir, "A-2.pdf", "pdf");
+
+        List<Path> moved = mover.moveAttachments("A.xml", "OUT.xml", targetDir);
+
+        assertEquals(1, moved.size());
+        assertTrue(Files.exists(targetDir.resolve("OUT-2.pdf")));
+    }
+
+    private static Path write(Path dir, String name, String content) throws IOException {
+        Path p = dir.resolve(name);
+        Files.writeString(p, content);
+        return p;
+    }
+}
+
+
+⸻
+
+What this fixes for your reported issue
+	•	Legacy A.xml + A.pdf no longer gets skipped (it matches base.<ext> and we don’t require _nn).
+	•	New A1_B123_multiplethings_01.xml correctly derives base A1_B123_multiplethings and moves _02/_03/_999 attachments.
+	•	Never moves XML as attachment (so you don’t accidentally copy X_02.xml).
+
+If you want, paste your current attachment mover integration point (the place you call moveAttachments) and I’ll point out why the PDF “disappeared” after the refactor (usually it’s either: wrong sourceDir path, wrong xmlBaseName passed, or you moved PDFs earlier than renaming logic and then the registry lookup can’t find them).
+
 ———
 Got it — this changes the concept of “base”.
 
