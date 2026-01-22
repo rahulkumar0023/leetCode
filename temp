@@ -1,3 +1,190 @@
+Got it — this changes the concept of “base”.
+
+Now the XML itself is indexed (X_01.xml), while attachments use the same prefix X_ but different indices (X_02.pdf, X_03.pdf, …, X_999.jpeg).
+So you must normalize the base from X_01 → X and then match/copy everything starting with X_ (except any .xml).
+
+Below are the exact changes to make in your SplitAttachmentMover.
+
+⸻
+
+1) Add a “bundle base” normalizer
+
+private static String normalizeBundleBase(String xmlBaseName) {
+    if (xmlBaseName == null) return null;
+    // X_01 -> X, ABC_999 -> ABC
+    return xmlBaseName.replaceFirst("(?i)_[0-9]+$", "");
+}
+
+
+⸻
+
+2) Update moveAttachments(...) to use normalized base for matching + suffix
+
+Key change: compute normalizedBase = normalizeBundleBase(stripExtension(xmlBaseName)).toLowerCase()
+
+public List<Path> moveAttachments(String xmlBaseName,
+                                 String outputXmlFileName,
+                                 Path targetDir) {
+
+    if (shouldSkip(xmlBaseName, outputXmlFileName, targetDir)) {
+        return List.of();
+    }
+
+    Path sourceDir = pathConfig.getUnzipped().getXml();
+    if (!isValidSourceDir(sourceDir)) {
+        return List.of();
+    }
+
+    // xmlBaseName may be "X_01" now -> normalize to "X"
+    String normalizedBase = normalizeBundleBase(xmlBaseName);
+    if (normalizedBase == null || normalizedBase.isBlank()) {
+        log.warn("Normalized base is blank for xmlBaseName='{}'. Skipping attachment move.", xmlBaseName);
+        return List.of();
+    }
+    normalizedBase = normalizedBase.toLowerCase(Locale.ROOT);
+
+    String targetBase = stripExtension(Paths.get(outputXmlFileName).getFileName().toString());
+
+    try {
+        Files.createDirectories(targetDir);
+        return copyMatchingAttachments(sourceDir, targetDir, normalizedBase, targetBase);
+    } catch (IOException ex) {
+        log.error("Failed moving attachments for base '{}': {}", xmlBaseName, ex.getMessage());
+        return List.of();
+    }
+}
+
+
+⸻
+
+3) Update copyMatchingAttachments(...) signature + suffix logic
+
+You no longer use xmlBaseName for substring. Use normalizedBase length instead.
+
+private List<Path> copyMatchingAttachments(Path sourceDir,
+                                          Path targetDir,
+                                          String normalizedBase,
+                                          String targetBase) throws IOException {
+
+    List<Path> moved = new ArrayList<>();
+
+    try (DirectoryStream<Path> stream = Files.newDirectoryStream(sourceDir)) {
+        for (Path p : stream) {
+            if (!Files.isRegularFile(p)) {
+                continue;
+            }
+
+            String fileName = p.getFileName().toString();
+            if (!isAttachmentForBase(fileName, normalizedBase)) {
+                continue;
+            }
+
+            Path copied = copySingleAttachment(p, fileName, normalizedBase, targetDir, targetBase);
+            moved.add(copied);
+        }
+    }
+
+    logResult(normalizedBase, moved);
+    return moved;
+}
+
+
+⸻
+
+4) Update copySingleAttachment(...)
+
+private Path copySingleAttachment(Path source,
+                                 String fileName,
+                                 String normalizedBase,
+                                 Path targetDir,
+                                 String targetBase) throws IOException {
+
+    // keep original suffix: "_02.pdf", ".pdf", "-1.pdf", etc.
+    String suffix = fileName.substring(normalizedBase.length());
+
+    Path dest = uniqueIfExists(targetDir.resolve(targetBase + suffix));
+    Files.copy(source, dest, StandardCopyOption.COPY_ATTRIBUTES);
+
+    return dest;
+}
+
+
+⸻
+
+5) Update isAttachmentForBase(...) for new scheme
+
+Important changes:
+	•	Exclude any .xml (since xmls are not attachments now)
+	•	Support:
+	•	X_02.pdf (new)
+	•	X.pdf (legacy)
+	•	X-1.pdf (older legacy) if you still want it
+
+private boolean isAttachmentForBase(String fileName, String normalizedBase) {
+    if (fileName == null || fileName.isBlank() || normalizedBase == null || normalizedBase.isBlank()) {
+        return false;
+    }
+
+    String lower = fileName.toLowerCase(Locale.ROOT);
+    String base = normalizedBase.toLowerCase(Locale.ROOT);
+
+    // Never treat ANY xml as attachment (important for X_01.xml, and possible other xmls)
+    if (lower.endsWith(".xml")) {
+        return false;
+    }
+
+    if (!lower.startsWith(base)) {
+        return false;
+    }
+
+    int baseLen = base.length();
+    if (lower.length() <= baseLen) {
+        return false;
+    }
+
+    char sep = lower.charAt(baseLen);
+
+    // New: X_02.pdf / X_999.jpeg
+    if (sep == '_') {
+        // must be digits after '_' (at least 1), then a dot later
+        int i = baseLen + 1;
+        if (i >= lower.length() || !Character.isDigit(lower.charAt(i))) {
+            return false;
+        }
+        while (i < lower.length() && Character.isDigit(lower.charAt(i))) {
+            i++;
+        }
+        return i < lower.length() && lower.charAt(i) == '.';
+    }
+
+    // Legacy: X.pdf
+    if (sep == '.') {
+        return true;
+    }
+
+    // Older legacy: X-1.pdf
+    if (sep == '-') {
+        return true;
+    }
+
+    return false;
+}
+
+
+⸻
+
+Test you must add (for this new naming)
+
+Add one test like this:
+	•	xmlBaseName = "X_01" (from stripExtension("X_01.xml"))
+	•	attachments: X_02.pdf, X_03.pdf, X_04.csv, X_999.jpeg
+
+Expected outputs: OUT_02.pdf, OUT_03.pdf, OUT_04.csv, OUT_999.jpeg
+
+If you want, paste your current SplitAttachmentMover file (as text), and I’ll return it as a single final class + the updated full JUnit class matching your exact package/imports.
+
+
+=======
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
