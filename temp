@@ -1,3 +1,176 @@
+Got it — this is a classic PEPPOL/UBL rule, and your understanding is 100% correct 👍
+Let’s walk through it cleanly, step by step, and then I’ll give you final code-style guidance you can drop into your mapper.
+
+⸻
+
+Business rule (what must happen)
+
+When AllowanceChargeIndicator = true in CSV:
+
+1️⃣ InvoiceLine
+	•	❌ DO NOT create an InvoiceLine
+	•	❌ DO NOT include the amount in any line-level totals
+
+2️⃣ LegalMonetaryTotal
+	•	❌ DO NOT add amount to LineExtensionAmount
+	•	✅ ADD amount to AllowanceTotalAmount
+
+3️⃣ Totals logic
+
+Field	Should include allowance?
+LineExtensionAmount	❌ No
+AllowanceTotalAmount	✅ Yes
+TaxExclusiveAmount	Depends (usually Line − Allowance)
+PayableAmount	Depends on your existing calculation
+
+This aligns with PEPPOL BIS Billing 3.0.
+
+⸻
+
+Where this logic belongs (important)
+
+You must split logic in two places:
+	1.	InvoiceLine creation
+	2.	LegalMonetaryTotal aggregation
+
+Do NOT try to “fix” this only in totals — that causes reconciliation errors.
+
+⸻
+
+Step 1: Skip InvoiceLine when AllowanceChargeIndicator = true
+
+CSV assumption
+
+You have something like:
+
+row.getAllowanceChargeIndicator()  // "true" / "false"
+
+Mapper change (InvoiceLine)
+
+default List<InvoiceLineType> toInvoiceLines(CsvInvoiceGroup group) {
+    List<InvoiceLineType> lines = new ArrayList<>();
+
+    for (CsvInvoiceDto row : group.getRows()) {
+
+        if (Boolean.TRUE.equals(row.getAllowanceChargeIndicator())) {
+            // Allowance → NOT an invoice line
+            continue;
+        }
+
+        InvoiceLineType line = buildInvoiceLine(row);
+        lines.add(line);
+    }
+
+    return lines;
+}
+
+✅ This guarantees:
+	•	No allowance rows become invoice lines
+	•	No accidental inclusion in line totals
+
+⸻
+
+Step 2: Exclude allowance rows from LineExtensionAmount
+
+Wherever you currently calculate LineExtensionAmount, change from:
+
+❌ WRONG
+
+sum += toAmount(row.getInvoiceLineCbcLineExtensionAmount());
+
+✅ CORRECT
+
+if (!Boolean.TRUE.equals(row.getAllowanceChargeIndicator())) {
+    sum = sum.add(toAmount(row.getInvoiceLineCbcLineExtensionAmount()));
+}
+
+
+⸻
+
+Step 3: Add Allowance rows to AllowanceTotalAmount
+
+Calculation
+
+private BigDecimal calculateAllowanceTotal(CsvInvoiceGroup group) {
+    BigDecimal allowanceTotal = BigDecimal.ZERO;
+
+    for (CsvInvoiceDto row : group.getRows()) {
+        if (Boolean.TRUE.equals(row.getAllowanceChargeIndicator())) {
+            allowanceTotal = allowanceTotal.add(
+                toAmount(row.getInvoiceLineCbcLineExtensionAmount())
+            );
+        }
+    }
+
+    return allowanceTotal;
+}
+
+
+⸻
+
+Step 4: Map LegalMonetaryTotal correctly
+
+default MonetaryTotalType toLegalMonetaryTotal(CsvInvoiceGroup group) {
+
+    MonetaryTotalType total = new MonetaryTotalType();
+
+    BigDecimal lineTotal = calculateLineExtensionAmount(group);
+    BigDecimal allowanceTotal = calculateAllowanceTotal(group);
+
+    // LineExtensionAmount (NO allowance rows)
+    LineExtensionAmountType lineExt = new LineExtensionAmountType();
+    lineExt.setCurrencyID("EUR");
+    lineExt.setValue(lineTotal);
+    total.setLineExtensionAmount(lineExt);
+
+    // AllowanceTotalAmount
+    if (allowanceTotal.compareTo(BigDecimal.ZERO) > 0) {
+        AllowanceTotalAmountType allowanceAmt = new AllowanceTotalAmountType();
+        allowanceAmt.setCurrencyID("EUR");
+        allowanceAmt.setValue(allowanceTotal);
+        total.setAllowanceTotalAmount(allowanceAmt);
+    }
+
+    return total;
+}
+
+
+⸻
+
+Resulting XML (correct PEPPOL output)
+
+<cac:LegalMonetaryTotal>
+  <cbc:LineExtensionAmount currencyID="EUR">100.00</cbc:LineExtensionAmount>
+  <cbc:AllowanceTotalAmount currencyID="EUR">10.00</cbc:AllowanceTotalAmount>
+</cac:LegalMonetaryTotal>
+
+✔ Allowance rows excluded from lines
+✔ Allowance correctly reflected in totals
+✔ PEPPOL compliant
+
+⸻
+
+Common mistakes to avoid 🚨
+
+❌ Including allowance rows as InvoiceLine
+❌ Adding allowance amounts into LineExtensionAmount
+❌ Trying to “subtract later” instead of excluding early
+❌ Mixing allowance logic into TaxSubtotal (wrong level)
+
+⸻
+
+If you want next
+
+I can:
+	•	give you JUnit tests for this scenario
+	•	verify TaxExclusiveAmount / PayableAmount logic
+	•	show how this interacts with VAT 0 vs VAT 21
+	•	or check credit note behavior (slightly different but related)
+
+Just tell me 👍
+
+
+xxxxxx====
 Yep, let’s lock this in and give you ready-to-paste code.
 
 I’ll give you:
