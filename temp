@@ -1,3 +1,350 @@
+Below is **drop-in JUnit 5 coverage** for the code in your screenshot:
+
+* `toCreditNoteTypeGroup(...)` branch behavior:
+
+  * when `AllowanceChargeCbcChargeIndicator` is **false** → creates **CreditNoteLine**
+  * when **true** → **skips** line and calls `createAllowanceCharge(...)`
+* `createAllowanceCharge(...)` behavior:
+
+  * sets `LegalMonetaryTotal.AllowanceTotalAmount` only when `LegalMonetaryTotalCbcAllowanceAmount` is present
+  * always appends `toAllowanceChargeList(row)` results into `creditNoteType.getAllowanceCharge()`
+
+I’ve written these in the same style as your existing `CsvInvoiceMapperTest` (no Mockito, no `eq()`, uses your generated `CsvInvoiceMapperImpl`).
+
+---
+
+## ✅ Add these tests to `CsvInvoiceMapperTest`
+
+```java
+import org.junit.jupiter.api.Test;
+
+import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class CsvInvoiceMapperTest {
+
+    private final CsvInvoiceMapper mapper = new CsvInvoiceMapperImpl();
+
+    @Test
+    void toCreditNoteTypeGroup_whenIndicatorFalse_addsCreditLine_andDoesNotAddAllowanceCharge() {
+        CsvInvoiceGroup group = new CsvInvoiceGroup("CN-1", new ArrayList<>());
+        CsvInvoiceDto line = new CsvInvoiceDto();
+        line.setInvoiceLineCbcId("1");
+        line.setAllowanceChargeCbcChargeIndicator("false");
+        line.setInvoiceLineCbcLineExtensionAmount("10.00");
+        line.setInvoiceLineCbcVATPercentage("21");
+
+        group.getRows().add(line);
+
+        CreditNoteType credit = mapper.toCreditNoteTypeGroup(group);
+
+        assertThat(credit.getCreditNoteLine()).hasSize(1);
+        assertThat(credit.getAllowanceCharge()).isEmpty();
+    }
+
+    @Test
+    void toCreditNoteTypeGroup_whenIndicatorTrue_skipsCreditLine_andCreatesAllowanceCharge_andSetsAllowanceTotal() {
+        CsvInvoiceGroup group = new CsvInvoiceGroup("CN-2", new ArrayList<>());
+
+        CsvInvoiceDto allowanceRow = new CsvInvoiceDto();
+        allowanceRow.setInvoiceLineCbcId("1");
+        allowanceRow.setAllowanceChargeCbcChargeIndicator("true");
+
+        // triggers allowancetotalamount set
+        allowanceRow.setLegalMonetaryTotalCbcAllowanceAmount("15.00");
+
+        // triggers charge build in toAllowanceChargeList(row)
+        allowanceRow.setAllowanceChargeCbcAmount("15.00");
+        allowanceRow.setBaseAmountCbcCurrencyId("EUR");
+        allowanceRow.setAllowanceChargeCbcChargeReason("Discount");
+
+        group.getRows().add(allowanceRow);
+
+        CreditNoteType credit = mapper.toCreditNoteTypeGroup(group);
+
+        // because indicator true => else branch => no credit line created
+        assertThat(credit.getCreditNoteLine()).isEmpty();
+
+        // allowance total set
+        assertThat(credit.getLegalMonetaryTotal()).isNotNull();
+        assertThat(credit.getLegalMonetaryTotal().getAllowanceTotalAmount()).isNotNull();
+        assertThat(credit.getLegalMonetaryTotal().getAllowanceTotalAmount().getCurrencyID()).isEqualTo("EUR");
+        assertThat(credit.getLegalMonetaryTotal().getAllowanceTotalAmount().getValue())
+                .isEqualByComparingTo(new BigDecimal("15.00"));
+
+        // allowanceCharge list populated from toAllowanceChargeList(row)
+        assertThat(credit.getAllowanceCharge()).hasSize(1);
+    }
+
+    @Test
+    void toCreditNoteTypeGroup_whenIndicatorTrue_andAllowanceAmountMissing_doesNotSetAllowanceTotal_butStillAddsAllowanceCharge() {
+        CsvInvoiceGroup group = new CsvInvoiceGroup("CN-3", new ArrayList<>());
+
+        CsvInvoiceDto allowanceRow = new CsvInvoiceDto();
+        allowanceRow.setInvoiceLineCbcId("1");
+        allowanceRow.setAllowanceChargeCbcChargeIndicator("true");
+
+        // allowance total is NOT set when this is empty/null
+        allowanceRow.setLegalMonetaryTotalCbcAllowanceAmount(null);
+
+        // but charge list is still added
+        allowanceRow.setAllowanceChargeCbcAmount("10.00");
+        allowanceRow.setBaseAmountCbcCurrencyId("EUR");
+
+        group.getRows().add(allowanceRow);
+
+        CreditNoteType credit = mapper.toCreditNoteTypeGroup(group);
+
+        assertThat(credit.getCreditNoteLine()).isEmpty();
+
+        // allowance total should remain unset
+        assertThat(credit.getLegalMonetaryTotal()).isNotNull();
+        assertThat(credit.getLegalMonetaryTotal().getAllowanceTotalAmount()).isNull();
+
+        // but allowance charge should still be present
+        assertThat(credit.getAllowanceCharge()).hasSize(1);
+    }
+
+    @Test
+    void toCreditNoteTypeGroup_mixedRows_createsCreditLinesForNonAllowanceRows_andAllowanceChargeForAllowanceRow() {
+        CsvInvoiceGroup group = new CsvInvoiceGroup("CN-4", new ArrayList<>());
+
+        CsvInvoiceDto normal1 = new CsvInvoiceDto();
+        normal1.setInvoiceLineCbcId("1");
+        normal1.setAllowanceChargeCbcChargeIndicator("false");
+        normal1.setInvoiceLineCbcLineExtensionAmount("100.00");
+        normal1.setInvoiceLineCbcVATPercentage("21");
+
+        CsvInvoiceDto allowance = new CsvInvoiceDto();
+        allowance.setInvoiceLineCbcId("2");
+        allowance.setAllowanceChargeCbcChargeIndicator("true");
+        allowance.setLegalMonetaryTotalCbcAllowanceAmount("5.00");
+        allowance.setAllowanceChargeCbcAmount("5.00");
+        allowance.setBaseAmountCbcCurrencyId("EUR");
+
+        CsvInvoiceDto normal2 = new CsvInvoiceDto();
+        normal2.setInvoiceLineCbcId("3");
+        normal2.setAllowanceChargeCbcChargeIndicator("false");
+        normal2.setInvoiceLineCbcLineExtensionAmount("50.00");
+        normal2.setInvoiceLineCbcVATPercentage("0");
+
+        group.getRows().addAll(List.of(normal1, allowance, normal2));
+
+        CreditNoteType credit = mapper.toCreditNoteTypeGroup(group);
+
+        // only the two non-allowance rows become credit lines
+        assertThat(credit.getCreditNoteLine()).hasSize(2);
+
+        // allowance row becomes allowance charge
+        assertThat(credit.getAllowanceCharge()).hasSize(1);
+
+        // allowance total set from allowance row
+        assertThat(credit.getLegalMonetaryTotal().getAllowanceTotalAmount().getValue())
+                .isEqualByComparingTo("5.00");
+
+        // tax totals computed once at end
+        assertThat(credit.getTaxTotal()).isNotEmpty();
+    }
+}
+```
+
+---
+
+## Notes (why these tests match your implementation)
+
+* Your code uses:
+
+  ```java
+  boolean allowanceChargeIndicator =
+      Boolean.parseBoolean(row.getAllowanceChargeCbcChargeIndicator());
+  if (!allowanceChargeIndicator) { add line } else { createAllowanceCharge(...) }
+  ```
+
+  So `"true"` → allowance branch, `"false"` → line branch.
+
+* `createAllowanceCharge` sets `AllowanceTotalAmount` only if the string is non-empty, and always:
+
+  ```java
+  allowanceCharge.addAll(toAllowanceChargeList(row));
+  ```
+
+These tests assert exactly those behaviors.
+
+---
+
+If you paste the **exact package name** and confirm whether your group constructor is `new CsvInvoiceGroup("id", new ArrayList<>())` (as shown in your earlier tests), I can tailor the imports/types so it compiles 100% without any tweaking.
+
+
+
+
+------------
+
+
+Yep — your current `SplitAttachmentMover` is **very close**, but one detail in the rename logic is what breaks the “keep number on XML but not duplicate it on attachments” requirement.
+
+### ✅ What you want
+
+Given:
+
+```
+A_01.xml   (output XML)
+A_02.pdf
+A_03.pdf
+A_04.jpg
+A_05.csv
+```
+
+When copying attachments for `A_01.xml`, the copied files should remain:
+
+```
+A_02.pdf, A_03.pdf, A_04.jpg, A_05.csv
+```
+
+**Not**:
+
+```
+A_01_02.pdf, A_01_03.pdf, ...
+```
+
+---
+
+## Why it happens in your current code
+
+In `moveAttachments()` you compute:
+
+* `normalizedBase = normalizeAttachmentBase(xmlBaseName)`  ✅ (becomes `"a"`)
+* `targetBase = stripExtension(outputXmlFileName)` ✅ (becomes `"A_01"`)
+
+Then in `copySingleAttachment()` you do:
+
+```java
+String suffix = fileName.substring(baseLen);   // "_02.pdf"
+Path dest = targetDir.resolve(targetBase + suffix); // "A_01" + "_02.pdf"
+```
+
+So it becomes: **`A_01_02.pdf`** ❌
+
+---
+
+# ✅ Minimal change you need
+
+### 1) Compute a *targetPrefixWithoutSeq* (e.g. `"A"`) once in `moveAttachments()`
+
+Add this next to `targetBase`:
+
+```java
+String targetFileName = Paths.get(outputXmlFileName).getFileName().toString();
+String targetNoExt = stripExtension(targetFileName).trim();
+String targetPrefix = stripTrailingSeqRaw(targetNoExt);   // "A" from "A_01"
+```
+
+Where `stripTrailingSeqRaw()` removes the last `_<digits>` **without lowercasing**:
+
+```java
+private static String stripTrailingSeqRaw(String s) {
+    if (s == null) {
+        return null;
+    }
+    int us = s.lastIndexOf('_');
+    if (us < 0 || us == s.length() - 1) {
+        return s;
+    }
+    int i = us + 1;
+    while (i < s.length() && Character.isDigit(s.charAt(i))) {
+        i++;
+    }
+    if (i == us + 1) {
+        return s; // no digits after underscore
+    }
+    if (i != s.length()) {
+        return s; // digits not at end -> don't strip
+    }
+    return s.substring(0, us);
+}
+```
+
+### 2) Pass `targetPrefix` into `copyMatchingAttachments(...)`
+
+Change signature:
+
+```java
+private List<Path> copyMatchingAttachments(
+        Path sourceDir,
+        Path targetDir,
+        String normalizedBase,
+        String targetBase,
+        String targetPrefix) throws IOException
+```
+
+And call it like:
+
+```java
+List<Path> moved = copyMatchingAttachments(sourceDir, targetDir, normalizedBase, targetBase, targetPrefix);
+```
+
+### 3) In `copySingleAttachment()`, use `targetPrefix` (not `targetBase`) when building dest
+
+Change method signature too:
+
+```java
+private Path copySingleAttachment(
+        Path source,
+        String fileName,
+        String normalizedBase,
+        Path targetDir,
+        String targetBase,
+        String targetPrefix) throws IOException
+```
+
+Then change this line:
+
+```java
+Path dest = uniqueIfExists(targetDir.resolve(targetBase + suffix));
+```
+
+to:
+
+```java
+Path dest = uniqueIfExists(targetDir.resolve(targetPrefix + suffix));
+```
+
+✅ Now the output will be:
+
+* XML stays: `A_01.xml`
+* Attachments stay: `A_02.pdf`, `A_03.pdf`, …
+
+---
+
+## Important: you do NOT need to change `normalizeAttachmentBase()`
+
+Even though it strips `_01`, that is still correct because:
+
+* it’s used only for **matching**
+* you **don’t want** attachments to be tied to `_01`, you want them tied to the prefix (`A`)
+
+So:
+
+* keep stripping sequence for matching ✅
+* stop using target XML seq in attachment rename ✅
+
+---
+
+## Quick sanity example after change
+
+* `outputXmlFileName = A_01.xml` → `targetPrefix = A`
+* fileName = `A_02.pdf` → suffix `_02.pdf`
+* dest = `A + _02.pdf` → `A_02.pdf` ✅
+
+---
+
+If you want, I can also give you a small **JUnit @TempDir test** for `SplitAttachmentMover` that creates a fake unzipped folder and verifies the copied filenames exactly match `A_02.pdf`, `A_03.pdf`, etc.
+
+
+
+----------
 Great catch — this is exactly the right question to ask 👍
 Nothing is “missing” at runtime, it’s just a **method you still need to define**.
 
