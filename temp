@@ -1,3 +1,223 @@
+Understood. Right now your pipeline is doing:
+
+* It **uses the XML** as the “truth” to rename everything else ✅
+* But when you **rename the XML itself**, you rebuild the name and accidentally drop the original trailing sequence (`_01`) ❌
+
+So you need one extra rule:
+
+> **When generating the new XML filename, carry forward the trailing `_NNN` from the *source* XML name (`X_01.xml`) and append it to the *new* XML name.**
+
+Because your attachments are renamed “based on the XML”, if the XML becomes `…_INV_123.xml` instead of `…_INV_123_01.xml`, then everything will follow the wrong base.
+
+---
+
+## Where to get the `_01` from
+
+In your `XmlInvoiceWriter` you already do:
+
+```java
+String invoiceId = registry.lookup(invoice);
+attachmentMover.moveAttachments(invoiceId, invoiceFileName, outputDir);
+```
+
+That `invoiceId` is your **source filename base**, usually coming from the unzipped XML name (e.g., `X_01` or `A1_B123_multiplethings_01`).
+That’s the best place to extract the suffix.
+
+---
+
+## Fix: Preserve trailing sequence when building `invoiceFileName`
+
+### 1) Add a helper that extracts trailing `_NNN`
+
+No regex needed:
+
+```java
+private static String extractTrailingSequenceSuffix(String sourceBaseName) {
+    if (sourceBaseName == null || sourceBaseName.isBlank()) {
+        return "";
+    }
+
+    int lastUnderscore = sourceBaseName.lastIndexOf('_');
+    if (lastUnderscore < 0) {
+        return "";
+    }
+
+    String suffix = sourceBaseName.substring(lastUnderscore + 1);
+    if (suffix.length() < 1 || suffix.length() > 3) {
+        return "";
+    }
+
+    for (int i = 0; i < suffix.length(); i++) {
+        char ch = suffix.charAt(i);
+        if (ch < '0' || ch > '9') {
+            return "";
+        }
+    }
+
+    return "_" + suffix; // keep underscore
+}
+```
+
+This supports:
+
+* `X_01` → `_01`
+* `X_2` → `_2`
+* `X_999` → `_999`
+* `A1_B123_multiplethings_01` → `_01`
+
+…and ignores:
+
+* `X_ABC`
+* `X_0000`
+* `X_01_more`
+
+---
+
+### 2) Apply it when generating the *new* XML filename
+
+Inside your `updateInvoiceName(...)`, you currently build:
+
+* `... + ".xml"`
+
+Change it to:
+
+* `... + suffix + ".xml"`
+
+But you must compute `suffix` from the **source XML name**, not from the new name.
+
+So do this inside the `isJobTypeXml` block:
+
+```java
+String invoiceId = registry.lookup(invoice); // e.g. "X_01"
+String trailingSuffix = extractTrailingSequenceSuffix(invoiceId);
+...
+invoiceFileName = /* your renamed base */ + trailingSuffix + ".xml";
+createOutputxml(invoice, outputDir, invoiceFileName);
+attachmentMover.moveAttachments(invoiceId, invoiceFileName, outputDir);
+```
+
+### Concretely, your finance branch becomes:
+
+```java
+String invoiceId = registry.lookup(invoice);
+String trailingSuffix = extractTrailingSequenceSuffix(invoiceId);
+
+String supplierPartyRaw = invoiceBucketResolver.getSupplierName(invoice.getAccountingSupplierParty());
+String supplierParty = sanitizeForFileName(supplierPartyRaw);
+String invoiceNumberPart = sanitizeForFileName(invoice.getID().getValue());
+
+invoiceFileName =
+        getCurrentDateTimeValue()
+                + (supplierParty != null ? supplierParty + "_" : "")
+                + "_INV_" + invoiceNumberPart
+                + trailingSuffix
+                + ".xml";
+```
+
+And your non-finance branch becomes:
+
+```java
+String invoiceId = registry.lookup(invoice);
+String trailingSuffix = extractTrailingSequenceSuffix(invoiceId);
+
+String invoiceNumberPart = sanitizeForFileName(invoice.getID().getValue());
+
+invoiceFileName =
+        sanitizeForFileName(invoiceFileName)
+                + "_INV_" + invoiceNumberPart + "_"
+                + getCurrentDateTimeValue()
+                + trailingSuffix
+                + ".xml";
+```
+
+✅ Result: `X_01.xml` renames to something like:
+
+* `20260130_SUPPLIER_INV_123456_01.xml`
+  …and then attachments become:
+* `20260130_SUPPLIER_INV_123456_02.pdf` (etc) only if your mover also preserves their own `_NNN` (see note below)
+
+---
+
+## Important note about the attachments (`X_02.pdf`, `X_03.pdf`, …)
+
+You said **all these are renamed based on the XML**.
+
+There are two valid strategies:
+
+### Strategy A (most common)
+
+* XML final name ends with `_01`
+* Each attachment keeps its *own* trailing sequence (`_02`, `_03`, …) and only changes the base
+
+So:
+
+* `X_02.pdf` → `NEWBASE_02.pdf`
+* `X_03.pdf` → `NEWBASE_03.pdf`
+
+This requires the mover to:
+
+* derive `NEWBASE` from `invoiceFileName` **without extension and without `_01`**
+* then append each attachment’s original suffix
+
+If your mover instead renames every attachment to match the XML exactly, you’ll overwrite.
+
+### Strategy B (simpler but lossy)
+
+* rename all attachments to the XML base exactly (bad if multiple PDFs)
+
+Given your earlier summary and multi-attachment examples, you likely want **Strategy A**.
+
+If you paste `SplitAttachmentMover.moveAttachments(...)`, I’ll tell you which strategy it’s implementing and adjust it to preserve per-attachment suffixes safely.
+
+---
+
+## JUnit tests to lock this in
+
+### Unit test for suffix extraction
+
+```java
+@Test
+void extractTrailingSequenceSuffix_shouldReturnUnderscoreDigits_whenPresentAtEnd() {
+    assertThat(extractTrailingSequenceSuffix("X_01")).isEqualTo("_01");
+    assertThat(extractTrailingSequenceSuffix("A1_B123_multiplethings_999")).isEqualTo("_999");
+    assertThat(extractTrailingSequenceSuffix("X_2")).isEqualTo("_2");
+}
+
+@Test
+void extractTrailingSequenceSuffix_shouldReturnEmpty_whenMissingOrInvalid() {
+    assertThat(extractTrailingSequenceSuffix("X")).isEmpty();
+    assertThat(extractTrailingSequenceSuffix("X_")).isEmpty();
+    assertThat(extractTrailingSequenceSuffix("X_0000")).isEmpty();
+    assertThat(extractTrailingSequenceSuffix("X_0A")).isEmpty();
+}
+```
+
+### Writer-level test idea (minimal)
+
+Mock/stub `registry.lookup(invoice)` to return `"X_01"` and assert the generated output xml filename contains `"_01.xml"`.
+
+(If you show your existing writer tests setup, I’ll give you the exact compile-ready test.)
+
+---
+
+## Bottom line
+
+To keep `_01`:
+
+✅ **Extract trailing `_NNN` from the source XML base** (`registry.lookup(invoice)`)
+✅ **Append it to the newly generated XML filename before `.xml`**
+✅ Then the mover will automatically rename everything based on the corrected XML name
+
+If you share `SplitAttachmentMover.moveAttachments(...)` (even a screenshot), I’ll also ensure your PDFs keep `_02/_03` instead of being forced to `_01`.
+
+
+
+
+
+
+
+---------------------------
+
 Below is **drop-in JUnit 5 coverage** for the code in your screenshot:
 
 * `toCreditNoteTypeGroup(...)` branch behavior:
