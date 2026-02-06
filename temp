@@ -1,3 +1,222 @@
+---
+Yep — below are concrete, copy-pasteable changes for both:
+	1.	XmlInvoiceWriter (same pattern applies to XmlCreditNoteWriter too)
+	2.	PackageAndUploadTasklet
+
+Goal:
+✅ Put invoices into a per-invoice subdirectory only for MILES and FINANCE
+✅ Keep attachments in the same per-invoice folder
+✅ Ensure packaging still finds files recursively and zips them
+
+⸻
+
+1) Changes in XmlInvoiceWriter
+
+What we’ll do
+
+When you already resolved the base output directory (e.g. processed/xml/miles or processed/xml/finance), we will:
+	•	derive a safe folder name from invoice id
+	•	create outputDir = baseDir/<invoiceId>/ ONLY for miles+finance
+	•	write XML into that folder
+	•	move attachments into that same folder
+
+Add these helpers in XmlInvoiceWriter
+
+Put near other private helpers:
+
+private Path resolveInvoiceSubDirIfNeeded(Path baseOutputDir, InvoiceType invoice) throws IOException {
+    if (baseOutputDir == null) {
+        throw new IOException("Base output directory is null");
+    }
+
+    String baseDirName = baseOutputDir.getFileName() != null ? baseOutputDir.getFileName().toString() : "";
+    boolean isMilesOrFinance = MILES.equalsIgnoreCase(baseDirName) || "finance".equalsIgnoreCase(baseDirName);
+
+    Path finalDir = baseOutputDir;
+
+    if (isMilesOrFinance) {
+        String invoiceId = safeInvoiceId(invoice);
+        String folderName = sanitizeForFileName(invoiceId); // you already import this
+        if (folderName == null || folderName.isBlank()) {
+            throw new IOException("Invoice id is missing for miles/finance folder");
+        }
+
+        Path normalizedBase = baseOutputDir.toAbsolutePath().normalize();
+        Path candidate = normalizedBase.resolve(folderName).normalize();
+
+        if (!candidate.startsWith(normalizedBase)) {
+            throw new IOException("Invalid invoice subdirectory");
+        }
+
+        Files.createDirectories(candidate);
+        finalDir = candidate;
+    }
+
+    return finalDir;
+}
+
+private static String safeInvoiceId(InvoiceType invoice) {
+    String id = null;
+    if (invoice != null && invoice.getID() != null) {
+        id = invoice.getID().getValue();
+    }
+    return id;
+}
+
+Now change updateInvoiceName(...) to use it
+
+Find the place where you currently do:
+	•	createOutputxml(invoice, outputDir, invoiceFileName);
+	•	and then attachmentMover.moveAttachments(invoiceId, invoiceFileName, outputDir);
+
+Replace with:
+
+Path finalOutputDir = resolveInvoiceSubDirIfNeeded(outputDir, invoice);
+
+createOutputxml(invoice, finalOutputDir, invoiceFileName);
+
+if (isJobTypeXml) {
+    String sourceInvoiceBase = registry.lookup(invoice); // used for attachment matching
+    attachmentMover.moveAttachments(sourceInvoiceBase, invoiceFileName, finalOutputDir);
+}
+
+✅ That’s the key change.
+Everything else (bucket resolving, filename logic, etc.) can remain as-is.
+
+Do the same thing in XmlCreditNoteWriter, just adapt types:
+	•	CreditNoteType instead of InvoiceType
+	•	and call safeCreditNoteId(...) accordingly.
+
+⸻
+
+2) Changes in PackageAndUploadTasklet
+
+Your tasklet currently:
+	•	uses listFiles() / isEmptyPath(...) in a way that will treat “folder full of subfolders” as empty
+	•	then zipDirectory(processedFile, zipFile) — if that zip is not recursive, you’ll miss everything
+
+So we update:
+	1.	isEmptyPath(...) → recursive
+	2.	zipDirectory(...) → recursive file walk
+
+⸻
+
+2.1 Replace isEmptyPath(...) with a recursive version
+
+private static boolean isEmptyPath(Path root) throws IOException {
+    boolean empty = true;
+
+    if (root != null && Files.exists(root)) {
+        try (var stream = Files.walk(root)) {
+            empty = stream.filter(Files::isRegularFile).findFirst().isEmpty();
+        }
+    }
+
+    return empty;
+}
+
+Optional: If you want better log counts (instead of listFiles().length), add:
+
+private static long countFilesRecursively(Path root) throws IOException {
+    long count = 0L;
+
+    if (root != null && Files.exists(root)) {
+        try (var stream = Files.walk(root)) {
+            count = stream.filter(Files::isRegularFile).count();
+        }
+    }
+
+    return count;
+}
+
+Then your logs for miles/finance can be:
+
+log.info("Miles XML directory path: {} contains {} files", milesXmlPath, countFilesRecursively(milesXmlPath));
+
+(Also: consider avoiding absolute paths in logs if Fortify is strict.)
+
+⸻
+
+2.2 Make sure zipDirectory(...) is recursive
+
+If your existing zipDirectory(...) is one-level, replace it with this:
+
+private void zipDirectory(Path rootDir, File zipFile) throws IOException {
+    Path normalizedRoot = rootDir.toAbsolutePath().normalize();
+
+    try (var fos = new FileOutputStream(zipFile);
+         var bos = new BufferedOutputStream(fos);
+         var zos = new ZipOutputStream(bos)) {
+
+        try (var paths = Files.walk(normalizedRoot)) {
+            paths.filter(Files::isRegularFile).forEach(path -> {
+                Path normalizedPath = path.toAbsolutePath().normalize();
+                if (!normalizedPath.startsWith(normalizedRoot)) {
+                    // safety check; should never happen
+                    throw new UncheckedIOException(new IOException("Invalid path while zipping"));
+                }
+
+                String entryName = normalizedRoot.relativize(normalizedPath)
+                        .toString()
+                        .replace('\\', '/');
+
+                ZipEntry entry = new ZipEntry(entryName);
+
+                try {
+                    zos.putNextEntry(entry);
+                    Files.copy(normalizedPath, zos);
+                    zos.closeEntry();
+                } catch (IOException ex) {
+                    throw new UncheckedIOException(ex);
+                }
+            });
+        } catch (UncheckedIOException ex) {
+            throw ex.getCause();
+        }
+    }
+}
+
+✅ This will include:
+	•	miles/<invoiceId>/...
+	•	finance/<invoiceId>/...
+
+inside the zip.
+
+⸻
+
+2.3 Fortify/Sonar improvement in encrypt step (highly recommended)
+
+You currently do:
+
+pgpEncrypt.encrypt(new FileInputStream(zipFile), new FileOutputStream(encryptedFile));
+
+Change to try-with-resources:
+
+try (var in = new FileInputStream(zipFile);
+     var out = new FileOutputStream(encryptedFile)) {
+    pgpEncrypt.encrypt(in, out);
+}
+
+
+⸻
+
+Quick checklist after these changes
+
+✅ Writers create:
+	•	processed/xml/miles/<invoiceId>/*.xml
+	•	processed/xml/finance/<invoiceId>/*.xml
+…and attachments land there too.
+
+✅ Tasklet:
+	•	sees miles/finance as “not empty” even if only subfolders exist
+	•	zips recursively, so it will include invoice folders + files
+
+⸻
+
+If you want, paste your current zipDirectory(...) and isEmptyPath(...) implementations (or screenshots) and I’ll tailor the patch to match your existing style and avoid any surprise diffs.
+
+----
+
 Understood. Right now your pipeline is doing:
 
 * It **uses the XML** as the “truth” to rename everything else ✅
