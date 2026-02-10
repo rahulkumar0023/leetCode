@@ -1,3 +1,310 @@
+Yep — you can do this, and you **don’t need to touch your encrypt/upload logic much**.
+
+You already plan to create subfolders like:
+
+* `processed/xml/miles/<invoiceId>/...`
+* `processed/xml/finance/<invoiceId>/...`
+
+If your **zip code preserves relative paths**, the zip will contain those subfolders automatically.
+
+Right now your `zipDirectory()` flattens everything because it uses:
+
+```java
+new ZipEntry(path.getFileName().toString())
+```
+
+So the minimal and correct change is: **zip using the path relative to the root dir**.
+
+---
+
+## 1) Minimal change in `PackageAndUploadTasklet.zipDirectory` (keep subdirs inside zip)
+
+### ✅ Replace only the ZipEntry name
+
+```java
+void zipDirectory(Path dir, File zipFile) throws IOException {
+    if (dir == null) {
+        throw new IOException("Zip root directory is null");
+    }
+    if (!Files.exists(dir)) return;
+
+    Path normalizedRoot = dir.toAbsolutePath().normalize();
+
+    try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(zipFile))) {
+        Files.walk(normalizedRoot)
+            .filter(Files::isRegularFile)
+            .forEach(path -> {
+                try {
+                    Path normalizedFile = path.toAbsolutePath().normalize();
+
+                    // Fortify/Sonar safe: block path traversal outside root
+                    if (!normalizedFile.startsWith(normalizedRoot)) {
+                        throw new IOException("Invalid file outside zip root");
+                    }
+
+                    // ✅ Preserve subdirectories in ZIP
+                    String entryName = normalizedRoot.relativize(normalizedFile)
+                        .toString()
+                        .replace('\\', '/'); // windows safe
+
+                    log.info("Adding file {} to zip as {}", path.getFileName(), entryName);
+
+                    ZipEntry entry = new ZipEntry(entryName);
+                    zos.putNextEntry(entry);
+
+                    try (InputStream is = Files.newInputStream(normalizedFile)) {
+                        is.transferTo(zos);
+                    }
+
+                    zos.closeEntry();
+
+                } catch (IOException e) {
+                    throw new InvoiceProcessingException(e.getMessage());
+                }
+            });
+    }
+
+    log.info("Created ZIP: {}", zipFile.getAbsolutePath());
+}
+```
+
+### Why this is minimal + safe
+
+* Only changes **ZipEntry naming**
+* Keeps your current stream logic, encrypt, COS upload unchanged
+* Preserves folder structure inside zip (exactly what you asked)
+
+No other changes needed in `execute()` / `zipEncryptUploadFiles()`.
+
+---
+
+## 2) Changes in `XmlInvoiceWriter` (put invoices into `<invoiceId>` folder only for miles/finance)
+
+From your latest screenshot, you already implemented something like `resolveInvoiceSubDirIfNeeded(...)`. That’s the correct approach.
+
+### ✅ Recommended final shape inside `updateInvoiceName(...)`
+
+(Only the important part shown)
+
+```java
+if (isJobTypeXml) {
+    String invoiceId = registry.lookup(invoice);
+    String trailingSuffix = extractTrailingSequenceSuffix(invoiceId);
+    String finalInvoiceFileName = invoiceFileName + trailingSuffix + XML_EXTENTION;
+
+    log.info("base invoice name for attachment move : {}", invoiceId);
+
+    Path finalOutputDir = resolveInvoiceSubDirIfNeeded(outputDir, invoice);
+
+    createOutputxml(invoice, finalOutputDir, finalInvoiceFileName);
+
+    // IMPORTANT: pass finalOutputDir so attachments go into same invoice folder
+    attachmentMover.moveAttachments(invoiceId, invoiceFileName + XML_EXTENTION, finalOutputDir);
+} else {
+    createOutputxml(invoice, outputDir, invoiceFileName + XML_EXTENTION);
+}
+```
+
+That will generate:
+
+* XML → `.../miles/<invoiceId>/<finalInvoiceFileName>`
+* Attachments → moved into `.../miles/<invoiceId>/...` (same folder)
+
+So your zip will now include `miles/<invoiceId>/...` automatically once zipDirectory preserves structure.
+
+---
+
+## 3) Reuse the same logic for `XmlCreditNoteWriter` (avoid duplicate code)
+
+Yes — you should pull the common bits into a small util (minimal refactor, low risk).
+
+### `InvoiceBatchFileUtil` (or similar)
+
+```java
+public final class InvoiceBatchFileUtil {
+
+    private InvoiceBatchFileUtil() {}
+
+    public static Path resolveSubDirIfNeeded(Path baseOutputDir, String baseDirName, String docId) throws IOException {
+        if (baseOutputDir == null) {
+            throw new IOException("Base output directory is null");
+        }
+
+        boolean isMilesOrFinance =
+            "miles".equalsIgnoreCase(baseDirName) || "finance".equalsIgnoreCase(baseDirName);
+
+        if (!isMilesOrFinance) {
+            return baseOutputDir;
+        }
+
+        String folder = sanitizeForFileName(docId);
+        if (folder == null || folder.isBlank()) {
+            throw new IOException("Document id is missing for miles/finance folder");
+        }
+
+        Path normalizedBase = baseOutputDir.toAbsolutePath().normalize();
+        Path candidate = normalizedBase.resolve(folder).normalize();
+
+        // Fortify safe: prevent traversal
+        if (!candidate.startsWith(normalizedBase)) {
+            throw new IOException("Invalid document subdirectory");
+        }
+
+        Files.createDirectories(candidate);
+        return candidate;
+    }
+
+    public static String safeId(String id) {
+        return id;
+    }
+
+    // you already have this somewhere:
+    public static String sanitizeForFileName(String input) {
+        // your existing sanitizeForFileName
+        return input;
+    }
+}
+```
+
+### Use it in `XmlInvoiceWriter`
+
+```java
+private Path resolveInvoiceSubDirIfNeeded(Path baseOutputDir, InvoiceType invoice) throws IOException {
+    String baseDirName = baseOutputDir.getFileName() != null ? baseOutputDir.getFileName().toString() : "";
+    String invoiceId = safeInvoiceId(invoice);
+    return InvoiceBatchFileUtil.resolveSubDirIfNeeded(baseOutputDir, baseDirName, invoiceId);
+}
+```
+
+### Use it in `XmlCreditNoteWriter`
+
+Same idea, but `safeCreditNoteId(creditNote)`.
+
+This keeps your writer classes small and avoids copy/paste.
+
+---
+
+## 4) JUnit tests you need
+
+### A) Test zip preserves subdirectories
+
+This validates your “subdirectories must appear in zip” requirement.
+
+```java
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.zip.ZipFile;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class PackageAndUploadTaskletZipTest {
+
+    @TempDir
+    Path tempDir;
+
+    @Test
+    void zipDirectory_preservesSubdirectories() throws Exception {
+        // given
+        Path root = tempDir.resolve("miles");
+        Path invDir = root.resolve("INV-123");
+        Files.createDirectories(invDir);
+
+        Files.writeString(invDir.resolve("a.xml"), "<xml/>");
+        Files.writeString(invDir.resolve("a.pdf"), "pdf");
+
+        File zip = tempDir.resolve("out.zip").toFile();
+
+        PackageAndUploadTasklet tasklet = new PackageAndUploadTasklet();
+        tasklet.zipDirectory(root, zip);
+
+        // then
+        try (ZipFile zipFile = new ZipFile(zip)) {
+            assertThat(zipFile.getEntry("INV-123/a.xml")).isNotNull();
+            assertThat(zipFile.getEntry("INV-123/a.pdf")).isNotNull();
+        }
+    }
+}
+```
+
+> Note: because you zip `milesXmlPath` itself (`processed/xml/miles`), inside zip you’ll get `INV-123/...` (not `miles/INV-123/...`). That matches your current code which calls `zipDirectory(milesXmlPath, zipFile)`.
+
+---
+
+### B) Test resolveSubDirIfNeeded creates invoice folder only for miles/finance
+
+```java
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+class InvoiceBatchFileUtilTest {
+
+    @TempDir
+    Path tempDir;
+
+    @Test
+    void resolveSubDirIfNeeded_createsFolderForMiles() throws Exception {
+        Path milesDir = tempDir.resolve("miles");
+        Files.createDirectories(milesDir);
+
+        Path result = InvoiceBatchFileUtil.resolveSubDirIfNeeded(milesDir, "miles", "INV-999");
+
+        assertThat(result).isEqualTo(milesDir.resolve("INV-999"));
+        assertThat(Files.exists(result)).isTrue();
+        assertThat(Files.isDirectory(result)).isTrue();
+    }
+
+    @Test
+    void resolveSubDirIfNeeded_returnsSameDirForOtherBuckets() throws Exception {
+        Path regularDir = tempDir.resolve("regular");
+        Files.createDirectories(regularDir);
+
+        Path result = InvoiceBatchFileUtil.resolveSubDirIfNeeded(regularDir, "regular", "INV-999");
+
+        assertThat(result).isEqualTo(regularDir);
+    }
+
+    @Test
+    void resolveSubDirIfNeeded_throwsIfIdMissingForMiles() throws Exception {
+        Path milesDir = tempDir.resolve("miles");
+        Files.createDirectories(milesDir);
+
+        assertThatThrownBy(() ->
+            InvoiceBatchFileUtil.resolveSubDirIfNeeded(milesDir, "miles", "  ")
+        ).isInstanceOf(Exception.class);
+    }
+}
+```
+
+---
+
+## What you *don’t* need to change
+
+* Your PGP encrypt code
+* COS upload code
+* How you collect `processedFiles` (you can still add `milesXmlPath`, `financeXmlPath`)
+
+As long as:
+
+1. Writers create invoice subfolders under miles/finance
+2. Zip preserves relative paths
+
+…you get exactly what you want: **zip contains subdirectories**.
+
+---
+
+If you paste your `XmlCreditNoteWriter.updateInvoiceName(...)` snippet, I can show the exact 3–5-line change there too (it’ll mirror the invoice writer: resolve subdir → write xml into it → move attachments into it).
+
+
 
 -----1435-----
 Your method is **already recursive** (`Files.walk(dir)`), so you’re 90% there ✅
