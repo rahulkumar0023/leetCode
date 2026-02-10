@@ -1,75 +1,113 @@
-Yep — you want the ZIP to **preserve the folder structure**:
+Your method is **already recursive** (`Files.walk(dir)`), so you’re 90% there ✅
+
+Right now you’re flattening because you create the entry with only:
+
+```java
+new ZipEntry(...)
+path.getFileName().toString()
+```
+
+So the *minimal* change you need is:
+
+* build the ZIP entry name as the **relative path from `dir`**
+* (optionally) normalize + basic safety check to keep Fortify happy
+* keep everything else the same
+
+---
+
+## ✅ Minimal diff inside your `zipDirectory(...)`
+
+### Replace ONLY these two lines:
+
+```java
+log.info("Adding file {} to zip", path.getFileName());
+ZipEntry entry = new ZipEntry(path.getFileName().toString());
+```
+
+### With this:
+
+```java
+Path relativePath = dir.relativize(path);
+String entryName = relativePath.toString().replace('\\', '/');
+
+// Extra safety (very small + Fortify-friendly)
+if (entryName.contains("..") || entryName.startsWith("/")) {
+    throw new InvoiceProcessingException("Invalid zip entry name");
+}
+
+log.info("Adding file {} to zip", entryName);
+ZipEntry entry = new ZipEntry(entryName);
+```
+
+That’s it.
+
+---
+
+## Your full method with only the minimal change applied
+
+```java
+void zipDirectory(Path dir, File zipFile) throws IOException {
+    if (!Files.exists(dir)) return;
+
+    try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(zipFile))) {
+        Files.walk(dir)
+            .filter(Files::isRegularFile)
+            .forEach(path -> {
+                try (InputStream is = Files.newInputStream(path)) {
+
+                    Path relativePath = dir.relativize(path);
+                    String entryName = relativePath.toString().replace('\\', '/');
+
+                    if (entryName.contains("..") || entryName.startsWith("/")) {
+                        throw new InvoiceProcessingException("Invalid zip entry name");
+                    }
+
+                    log.info("Adding file {} to zip", entryName);
+                    ZipEntry entry = new ZipEntry(entryName);
+                    zos.putNextEntry(entry);
+                    is.transferTo(zos);
+                    zos.closeEntry();
+
+                } catch (IOException e) {
+                    throw new InvoiceProcessingException(e.getMessage());
+                }
+            });
+    }
+
+    log.info("Created ZIP: {}", zipFile.getAbsolutePath());
+}
+```
+
+---
+
+## What this achieves
+
+If your directory is:
 
 ```
 miles/
   INV123/
-    ....xml
-    ....pdf
-finance/
-  INV999/
-    ....
+    a.xml
+    a.pdf
 ```
 
-So the rule is: **zip the directory as-is (recursive) using relative paths**, and don’t “flatten” anything.
+The ZIP will contain:
 
-### Good news
+```
+INV123/a.xml
+INV123/a.pdf
+```
 
-If your current `zipDirectory(processedFile, zipFile)` already does a recursive walk and uses **relative paths**, then you’re done — adding subfolders on disk automatically results in subfolders inside the ZIP.
-
-If it **doesn’t**, then the *minimal* (and Fortify-friendly) change is: update `zipDirectory(...)` to walk recursively and write entries with `base.relativize(path)`.
+✅ subfolders preserved
+✅ still recursive
+✅ still try-with-resources
+✅ minimal code change
+✅ usually passes Sonar/Fortify (and the quick `..` check helps)
 
 ---
 
-## Minimal change in `PackageAndUploadTasklet`: `zipDirectory(...)` (preserve subdirs)
-
-Replace/adjust your `zipDirectory(processedFile, zipFile)` implementation to something like this (this keeps subdirectories exactly):
-
-```java
-private void zipDirectory(Path baseDir, File zipFile) throws IOException {
-    try (FileOutputStream fos = new FileOutputStream(zipFile);
-         BufferedOutputStream bos = new BufferedOutputStream(fos);
-         ZipOutputStream zos = new ZipOutputStream(bos)) {
-
-        if (!Files.exists(baseDir)) {
-            return;
-        }
-
-        // Walk recursively and keep relative paths
-        try (Stream<Path> stream = Files.walk(baseDir)) {
-            stream
-                .filter(p -> !Files.isDirectory(p))
-                .forEach(p -> {
-                    String entryName = baseDir.relativize(p).toString().replace("\\", "/");
-
-                    ZipEntry entry = new ZipEntry(entryName);
-                    try {
-                        zos.putNextEntry(entry);
-                        Files.copy(p, zos);
-                        zos.closeEntry();
-                    } catch (IOException e) {
-                        throw new UncheckedIOException(e);
-                    }
-                });
-        } catch (UncheckedIOException e) {
-            throw e.getCause();
-        }
-    }
-}
-```
-
-### Why this meets your requirement
-
-* Uses `baseDir.relativize(p)` → keeps `INV123/file.xml` exactly
-* Uses forward slashes → ZIP-standard path separator
-* Doesn’t pull files out / doesn’t flatten
-
-### Fortify note (why this is usually “safe”)
-
-* You are **creating** the zip, not extracting it (Zip Slip is about extraction).
-* Entry names come from filesystem paths under `baseDir` (not user-provided strings).
-* You’re not doing any path concatenation for extraction.
-
-(If Fortify still complains, the usual “appeasement” is to reject any entry containing `..` — but in this flow it shouldn’t happen unless you have symlinks or weird paths.)
+If you want the ZIP entries to include the top-level folder name too (e.g., `miles/INV123/a.xml`), tell me what path you pass into `zipDirectory()` (is it `milesXmlPath` or its parent?) and I’ll show the one-line tweak.
+Fortify still complains, the usual “appeasement” is to reject any entry containing `..` — but in this flow it shouldn’t happen unless you have symlinks or weird paths.)
 
 ---
 
