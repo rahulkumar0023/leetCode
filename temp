@@ -1,3 +1,5 @@
+
+-----1435-----
 Your method is **already recursive** (`Files.walk(dir)`), so you’re 90% there ✅
 
 Right now you’re flattening because you create the entry with only:
