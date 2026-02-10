@@ -1,3 +1,104 @@
+Yep — you want the ZIP to **preserve the folder structure**:
+
+```
+miles/
+  INV123/
+    ....xml
+    ....pdf
+finance/
+  INV999/
+    ....
+```
+
+So the rule is: **zip the directory as-is (recursive) using relative paths**, and don’t “flatten” anything.
+
+### Good news
+
+If your current `zipDirectory(processedFile, zipFile)` already does a recursive walk and uses **relative paths**, then you’re done — adding subfolders on disk automatically results in subfolders inside the ZIP.
+
+If it **doesn’t**, then the *minimal* (and Fortify-friendly) change is: update `zipDirectory(...)` to walk recursively and write entries with `base.relativize(path)`.
+
+---
+
+## Minimal change in `PackageAndUploadTasklet`: `zipDirectory(...)` (preserve subdirs)
+
+Replace/adjust your `zipDirectory(processedFile, zipFile)` implementation to something like this (this keeps subdirectories exactly):
+
+```java
+private void zipDirectory(Path baseDir, File zipFile) throws IOException {
+    try (FileOutputStream fos = new FileOutputStream(zipFile);
+         BufferedOutputStream bos = new BufferedOutputStream(fos);
+         ZipOutputStream zos = new ZipOutputStream(bos)) {
+
+        if (!Files.exists(baseDir)) {
+            return;
+        }
+
+        // Walk recursively and keep relative paths
+        try (Stream<Path> stream = Files.walk(baseDir)) {
+            stream
+                .filter(p -> !Files.isDirectory(p))
+                .forEach(p -> {
+                    String entryName = baseDir.relativize(p).toString().replace("\\", "/");
+
+                    ZipEntry entry = new ZipEntry(entryName);
+                    try {
+                        zos.putNextEntry(entry);
+                        Files.copy(p, zos);
+                        zos.closeEntry();
+                    } catch (IOException e) {
+                        throw new UncheckedIOException(e);
+                    }
+                });
+        } catch (UncheckedIOException e) {
+            throw e.getCause();
+        }
+    }
+}
+```
+
+### Why this meets your requirement
+
+* Uses `baseDir.relativize(p)` → keeps `INV123/file.xml` exactly
+* Uses forward slashes → ZIP-standard path separator
+* Doesn’t pull files out / doesn’t flatten
+
+### Fortify note (why this is usually “safe”)
+
+* You are **creating** the zip, not extracting it (Zip Slip is about extraction).
+* Entry names come from filesystem paths under `baseDir` (not user-provided strings).
+* You’re not doing any path concatenation for extraction.
+
+(If Fortify still complains, the usual “appeasement” is to reject any entry containing `..` — but in this flow it shouldn’t happen unless you have symlinks or weird paths.)
+
+---
+
+## `XmlInvoiceWriter` change reminder (disk layout = zip layout)
+
+As long as you create:
+
+* `processed/xml/miles/<invoiceId>/...`
+* `processed/xml/finance/<invoiceId>/...`
+
+then the zip method above will preserve it.
+
+---
+
+## One quick check before you change anything
+
+Open your existing `zipDirectory(...)` and look for either:
+
+* `Files.walk(...)` (or recursion)
+* `baseDir.relativize(...)`
+
+If you don’t see those, it’s flattening and you’ll need the change above.
+
+If you paste/screenshot just your current `zipDirectory(...)` method, I’ll tell you **exactly** what the smallest diff is (often it’s literally 2–6 lines: switch to `Files.walk` + change the ZipEntry name).
+
+
+
+
+
 ---
 Yep — below are concrete, copy-pasteable changes for both:
 	1.	XmlInvoiceWriter (same pattern applies to XmlCreditNoteWriter too)
