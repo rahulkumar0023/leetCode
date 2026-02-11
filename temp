@@ -1,3 +1,272 @@
+Yep — based on your screenshots, the **missing coverage** is coming from the new utility-style logic:
+
+* `safeInvoiceId(...)` (null / non-null branches)
+* `resolveSubDirIfNeeded(baseOutputDir, docId)` (miles/finance vs not, blank docId, null base, and the `startsWith(normalizedBase)` guard)
+* and (in your tasklet) the **zip keeps subdirectories** change: using `dir.relativize(path)` instead of `path.getFileName()`.
+
+Below are **drop-in JUnit 5 tests** that cover those branches (and also verify the zip contains nested folders).
+
+---
+
+## 1) JUnit for `safeInvoiceId(...)`
+
+```java
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class InvoiceBatchUtilTest {
+
+    @Test
+    void safeInvoiceId_returnsNull_whenInvoiceIsNull() {
+        assertNull(InvoiceBatchUtil.safeInvoiceId(null));
+    }
+
+    @Test
+    void safeInvoiceId_returnsNull_whenInvoiceIdIsNull() {
+        var inv = new network.oxalis.peppol.ubl2.jaxb.ubl.InvoiceType();
+        // inv.getID() == null
+        assertNull(InvoiceBatchUtil.safeInvoiceId(inv));
+    }
+
+    @Test
+    void safeInvoiceId_returnsValue_whenInvoiceIdPresent() {
+        var inv = new network.oxalis.peppol.ubl2.jaxb.ubl.InvoiceType();
+        var id = new network.oxalis.peppol.ubl2.jaxb.cbc.IDType();
+        id.setValue("INV-123");
+        inv.setID(id);
+
+        assertEquals("INV-123", InvoiceBatchUtil.safeInvoiceId(inv));
+    }
+}
+```
+
+This hits:
+
+* `invoice == null`
+* `invoice != null && invoice.getID() == null`
+* `invoice != null && invoice.getID() != null` ✅ (your “partially covered” line)
+
+---
+
+## 2) JUnit for `resolveSubDirIfNeeded(Path baseOutputDir, String docId)`
+
+Assumptions from your screenshot:
+
+* It checks the **last folder name**: `miles` or `finance` → create `<base>/<docId>/`
+* Otherwise return base unchanged
+* It throws if:
+
+  * baseOutputDir is null
+  * docId blank/null (after sanitize)
+  * `candidate.normalize()` escapes the base (the `startsWith(normalizedBase)` safety check)
+
+```java
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class ResolveSubDirIfNeededTest {
+
+    @TempDir
+    Path tmp;
+
+    @Test
+    void resolveSubDirIfNeeded_throws_whenBaseIsNull() {
+        assertThrows(
+                Exception.class,
+                () -> InvoiceBatchUtil.resolveSubDirIfNeeded(null, "INV-1")
+        );
+    }
+
+    @Test
+    void resolveSubDirIfNeeded_returnsBase_whenNotMilesOrFinance() throws Exception {
+        Path base = tmp.resolve("regular");
+        Files.createDirectories(base);
+
+        Path out = InvoiceBatchUtil.resolveSubDirIfNeeded(base, "INV-1");
+
+        assertEquals(base.toAbsolutePath().normalize(), out.toAbsolutePath().normalize());
+    }
+
+    @Test
+    void resolveSubDirIfNeeded_createsInvoiceSubDir_whenMiles() throws Exception {
+        Path base = tmp.resolve("miles");
+        Files.createDirectories(base);
+
+        Path out = InvoiceBatchUtil.resolveSubDirIfNeeded(base, "INV-123");
+
+        assertTrue(Files.exists(out));
+        assertTrue(Files.isDirectory(out));
+        assertEquals(base.resolve("INV-123").toAbsolutePath().normalize(), out.toAbsolutePath().normalize());
+    }
+
+    @Test
+    void resolveSubDirIfNeeded_createsInvoiceSubDir_whenFinance() throws Exception {
+        Path base = tmp.resolve("finance");
+        Files.createDirectories(base);
+
+        Path out = InvoiceBatchUtil.resolveSubDirIfNeeded(base, "INV-999");
+
+        assertTrue(Files.exists(out));
+        assertTrue(Files.isDirectory(out));
+        assertEquals(base.resolve("INV-999").toAbsolutePath().normalize(), out.toAbsolutePath().normalize());
+    }
+
+    @Test
+    void resolveSubDirIfNeeded_throws_whenDocIdBlank_forMilesOrFinance() throws Exception {
+        Path base = tmp.resolve("miles");
+        Files.createDirectories(base);
+
+        assertThrows(
+                Exception.class,
+                () -> InvoiceBatchUtil.resolveSubDirIfNeeded(base, "   ")
+        );
+    }
+
+    @Test
+    void resolveSubDirIfNeeded_throws_whenDocIdEscapesBase_usingDotDot() throws Exception {
+        // This is specifically to cover:
+        // if (!candidate.startsWith(normalizedBase)) throw ...
+        //
+        // Works IF your sanitizeForFileName keeps dots.
+        // If your sanitize replaces '.' too, this test will NOT trigger the guard.
+        Path base = tmp.resolve("finance");
+        Files.createDirectories(base);
+
+        assertThrows(
+                Exception.class,
+                () -> InvoiceBatchUtil.resolveSubDirIfNeeded(base, "..")
+        );
+    }
+}
+```
+
+### If the `"..”` test doesn’t fail (sanitize removes dots)
+
+Then your `startsWith(normalizedBase)` guard is still safe, but you need a different “escape” input.
+
+Common options:
+
+* If sanitize **does not remove dots** → `".."` works ✅
+* If sanitize removes dots → it’s hard to generate an escape string (which is good!).
+  In that case, you can still cover the guard by temporarily unit-testing a **package-private helper** that accepts the already-sanitized folder string (but that’s not “minimal changes”).
+
+If you tell me what `sanitizeForFileName` does with `".."` (output), I can give the exact escaping input that triggers the guard **without changing prod code**.
+
+---
+
+## 3) JUnit for “zip should keep subdirectories”
+
+Your current `zipDirectory(...)` uses:
+
+```java
+new ZipEntry(path.getFileName().toString())
+```
+
+That **flattens** everything and loses folder structure.
+
+To keep subdirectories inside the zip (minimal change), you should use:
+
+```java
+String entryName = dir.relativize(path).toString().replace("\\", "/");
+ZipEntry entry = new ZipEntry(entryName);
+```
+
+Now the test:
+
+```java
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class PackageAndUploadTaskletZipTest {
+
+    @TempDir
+    Path tmp;
+
+    @Test
+    void zipDirectory_preservesSubdirectoriesInZip() throws Exception {
+        // Arrange: dir structure
+        Path root = tmp.resolve("miles");
+        Path sub = root.resolve("INV-123");
+        Files.createDirectories(sub);
+
+        Files.writeString(root.resolve("root.xml"), "ROOT", StandardCharsets.UTF_8);
+        Files.writeString(sub.resolve("inv.xml"), "INV", StandardCharsets.UTF_8);
+        Files.writeString(sub.resolve("inv.pdf"), "PDF", StandardCharsets.UTF_8);
+
+        File zipFile = tmp.resolve("out.zip").toFile();
+
+        // Act: call your method (adjust call to your actual class / visibility)
+        PackageAndUploadTasklet t = new PackageAndUploadTasklet();
+        t.zipDirectory(root, zipFile);
+
+        // Assert: entries include sub-paths
+        Set<String> entries = readZipEntries(zipFile);
+
+        assertTrue(entries.contains("root.xml"));
+        assertTrue(entries.contains("INV-123/inv.xml"));
+        assertTrue(entries.contains("INV-123/inv.pdf"));
+    }
+
+    private static Set<String> readZipEntries(File zipFile) throws IOException {
+        Set<String> names = new HashSet<>();
+        try (ZipInputStream zis = new ZipInputStream(new FileInputStream(zipFile))) {
+            ZipEntry e;
+            while ((e = zis.getNextEntry()) != null) {
+                names.add(e.getName());
+                zis.closeEntry();
+            }
+        }
+        return names;
+    }
+}
+```
+
+> If `zipDirectory(...)` isn’t accessible (private), keep the test at the “public API level” by calling the method that triggers `zipDirectory` (like `zipEncryptUploadFiles(...)`) and stub the external calls (PGP + COS) with mocks — but that’s more work.
+
+---
+
+## What purpose is `resolveSubDirIfNeeded(...)` serving?
+
+It’s doing **two things**:
+
+1. **Business behavior**: For `miles` and `finance`, group output per invoice:
+
+```
+processed/xml/miles/<invoiceId>/<files>
+processed/xml/finance/<invoiceId>/<files>
+```
+
+2. **Security/Fortify**: prevent “path traversal” and unsafe folder names:
+
+* sanitize `docId` → safe folder name
+* normalize & verify the candidate directory stays inside `baseOutputDir`
+  (`candidate.startsWith(normalizedBase)`)
+
+So it’s both a **functional change** + a **Fortify-safe guardrail**.
+
+---
+
+If you paste your **actual** `sanitizeForFileName` implementation (or just tell me what it returns for `".."` and `"../x"`), I’ll tune the “escape base” test so it **always** hits the `startsWith` exception branch without changing production code.
+
+
+-------
 Yep — you can do this, and you **don’t need to touch your encrypt/upload logic much**.
 
 You already plan to create subfolders like:
