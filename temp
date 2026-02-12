@@ -1,22 +1,16 @@
 
-Good catch 👍 — yes, “is being performed” sounds passive and ongoing. Since the actions are already completed, we should use **past tense** and make it clearer and more direct.
-
-Here’s a cleaner, more confident version:
-
----
-
 Hi Team,
 
 Please find the current status below.
 
 I checked out the project from the Git repository:
-[https://github.com/jerodj-cdata/dremio-db2-connector/](https://github.com/jerodj-cdata/dremio-db2-connector/)
+https://github.com/jerodj-cdata/dremio-db2-connector/
 
-I built the project locally using Java 11 (the project requires Java 11; I have typically been using JDK 17).
+The project requires Java 11, so I configured my local environment to use Java 11 (I have typically been using JDK 17).
 
-While building version **25.2.0-202410241428100111-a963b970**, the build pulled a specific custom version of Apache Iceberg. This version is hosted in the **dremio/public** repository.
+While attempting to build version **25.2.0-202410241428100111-a963b970**, the process pulled a specific custom version of Apache Iceberg. This version is hosted in the **dremio/public** repository.
 
-At present, we only have access to the **dremio/free** repository, and the required Iceberg artifact is not available there. As a result, the build failed due to the missing dependency.
+Currently, we only have access to the **dremio/free** repository, and the required Iceberg artifact is not available there. As a result, the build could not be completed due to the missing dependency.
 
 To proceed, we would need access to the **dremio/public** repository. I can submit a request for this access; however, it will require approval from our CISO.
 
@@ -24,6 +18,7 @@ Please let me know how you would like to proceed.
 
 Best regards,
 [Your Name]
+
 
 ---
 
