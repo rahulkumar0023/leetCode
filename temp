@@ -1,3 +1,26 @@
+
+Hi Team,
+
+Please find the current status below.
+
+I have checked out the project from the Git repository:
+https://github.com/jerodj-cdata/dremio-db2-connector/
+
+The build is being performed locally using Java 11 (I have typically been using JDK 17, but this project requires Java 11).
+
+While attempting to build version **25.2.0-202410241428100111-a963b970**, the project pulls a specific custom version of Apache Iceberg. This version is hosted under the **dremio/public** repository.
+
+At present, we only have access to the **dremio/free** repository, and the required Iceberg artifact is not available there. As a result, the build cannot complete successfully.
+
+To proceed, we would need access to the **dremio/public** repository. I can raise a request for this access; however, it will require approval from our CISO.
+
+Please advise on how you would like to proceed.
+
+Best regards,
+[Your Name]
+
+
+----------
 Yep — based on your screenshots, the **missing coverage** is coming from the new utility-style logic:
 
 * `safeInvoiceId(...)` (null / non-null branches)
