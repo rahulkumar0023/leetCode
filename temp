@@ -1,23 +1,40 @@
 
+Good catch 👍 — yes, “is being performed” sounds passive and ongoing. Since the actions are already completed, we should use **past tense** and make it clearer and more direct.
+
+Here’s a cleaner, more confident version:
+
+---
+
 Hi Team,
 
 Please find the current status below.
 
-I have checked out the project from the Git repository:
-https://github.com/jerodj-cdata/dremio-db2-connector/
+I checked out the project from the Git repository:
+[https://github.com/jerodj-cdata/dremio-db2-connector/](https://github.com/jerodj-cdata/dremio-db2-connector/)
 
-The build is being performed locally using Java 11 (I have typically been using JDK 17, but this project requires Java 11).
+I built the project locally using Java 11 (the project requires Java 11; I have typically been using JDK 17).
 
-While attempting to build version **25.2.0-202410241428100111-a963b970**, the project pulls a specific custom version of Apache Iceberg. This version is hosted under the **dremio/public** repository.
+While building version **25.2.0-202410241428100111-a963b970**, the build pulled a specific custom version of Apache Iceberg. This version is hosted in the **dremio/public** repository.
 
-At present, we only have access to the **dremio/free** repository, and the required Iceberg artifact is not available there. As a result, the build cannot complete successfully.
+At present, we only have access to the **dremio/free** repository, and the required Iceberg artifact is not available there. As a result, the build failed due to the missing dependency.
 
-To proceed, we would need access to the **dremio/public** repository. I can raise a request for this access; however, it will require approval from our CISO.
+To proceed, we would need access to the **dremio/public** repository. I can submit a request for this access; however, it will require approval from our CISO.
 
-Please advise on how you would like to proceed.
+Please let me know how you would like to proceed.
 
 Best regards,
 [Your Name]
+
+---
+
+If you want, I can also make:
+
+* A more concise version
+* A more technical version
+* A version that subtly recommends requesting access
+* A version that sounds more executive-level
+
+Just tell me the audience 😊
 
 
 ----------
