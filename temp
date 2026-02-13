@@ -1,22 +1,15 @@
-Hi Team,
+Dear Dimitrik,
 
-Please find the current status below.
+To complete the Dremio DB2 connector build, access to the **dremio/public** Maven repository is required.
 
-I checked out the project from the Git repository:
-https://github.com/jerodj-cdata/dremio-db2-connector/
+The dependency is a Dremio-maintained Apache Iceberg library used strictly at build time and does not introduce runtime services, external connectivity, or changes to our security posture.
 
-The project requires Java 11, so I configured my local environment to use Java 11 (I have typically been using JDK 17).
+Access would be configured through our internal Artifactory/Nexus proxy, ensuring HTTPS retrieval, internal caching, audit logging, and vulnerability scanning.
 
-While attempting to build version **25.2.0-202410241428100111-a963b970**, the process pulled a specific custom version of Apache Iceberg. This version is hosted in the **dremio/public** repository.
+Kindly request your approval to proceed.
 
-Currently, we only have access to the **dremio/free** repository, and the required Iceberg artifact is not available there. As a result, the build could not be completed due to the missing dependency.
-
-To proceed, we would need access to the **dremio/public** repository. I can submit a request for this access; however, it will require approval from our CISO.
-
-Please let me know how you would like to proceed.
-
-Best regards,
-[Your Name]
+Regards,
+Rahul
 
 
 
