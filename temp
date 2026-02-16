@@ -1,3 +1,184 @@
+Good catch 👍 — let’s look at your current pattern carefully.
+
+From your screenshot your pattern is:
+
+Pattern.compile("[\\s\\\\/:*?\"<>|]+");
+
+
+⸻
+
+✅ Does This Handle Spaces?
+
+Yes.
+
+Because of:
+
+\ s
+
+Inside a character class [], \s means:
+	•	space
+	•	tab
+	•	newline
+	•	carriage return
+
+So yes — space is already included in your current pattern.
+
+⸻
+
+⚠️ But Here’s The Real Issue
+
+Your current pattern only replaces:
+
+whitespace
+\ / : * ? " < > |
+
+It does NOT replace:
+	•	&
+	•	. (dot)
+	•	accented letters (È)
+	•	other special characters
+	•	characters like ' ( ) + etc.
+
+So for:
+
+HUITRIÈRE & EOLe
+
+Your current method will produce something like:
+
+HUITRIÈRE_&_EOLe
+
+Because:
+	•	space → replaced
+	•	& → NOT replaced
+	•	È → NOT normalized
+
+⸻
+
+🎯 If Your Goal Is Only “Filesystem Safe”
+
+Your current regex is fine.
+
+It is Windows-safe and Fortify-safe.
+
+⸻
+
+🎯 If Your Goal Is “Consistent + Matching + COS-safe”
+
+Then I recommend slightly improving it to:
+
+[^a-zA-Z0-9._-]+
+
+This means:
+
+Allow only:
+	•	letters
+	•	numbers
+	•	dot
+	•	underscore
+	•	dash
+
+Everything else becomes _.
+
+⸻
+
+🔎 Should You Replace Dot?
+
+Be careful.
+
+You said earlier you want to:
+
+include point in my regex and replace with _
+
+If you replace . you will break:
+	•	invoice id like 26.51.510012
+	•	file extensions if not careful
+
+So if you replace dot, do it only for filename body, not extension.
+
+⸻
+
+🎯 Recommended Pattern For Your Case
+
+Since you want:
+	•	no duplicate invoice id
+	•	invoice id only at end
+	•	dot replaced with underscore
+	•	consistent attachment matching
+
+I would suggest:
+
+private static final Pattern UNSAFE_FILE_CHARS =
+        Pattern.compile("[^a-zA-Z0-9_-]+");
+
+Then:
+
+return UNSAFE_FILE_CHARS.matcher(normalized).replaceAll("_");
+
+That replaces:
+	•	spaces
+	•	dots
+	•	ampersand
+	•	accents (after normalization)
+	•	everything unsafe
+
+And keeps only:
+
+A-Z a-z 0-9 _ -
+
+Very stable for COS + ZIP + attachment matching.
+
+⸻
+
+🧠 Important For Your Current Flow
+
+Right now your biggest mismatch issue is not space.
+
+It is that:
+
+invoiceFileName + trailingSuffix
+
+Is using:
+
+extractTrailingSequenceSuffix(invoiceId)
+
+But invoiceId contains dots.
+
+If you sanitize invoiceFileName differently than invoiceId,
+they will not match when attachments move.
+
+So:
+
+✔ Always sanitize invoiceId before extracting suffix
+✔ Always use same sanitize method everywhere
+
+⸻
+
+📌 Final Answer To Your Direct Question
+
+Did you also consider space in this?
+
+Yes — your current \s already handles spaces.
+
+But it does NOT handle:
+	•	&
+	•	accented letters
+	•	dots
+	•	other special chars
+
+Which are likely causing your remaining mismatches.
+
+⸻
+
+If you want, I can now give you:
+	•	The exact minimal change to your current pattern
+	•	That fixes your mismatch
+	•	Without breaking existing behaviour
+	•	And without upsetting Fortify / Sonar
+
+Just say 👍
+
+
+
 Yes 👍 you should absolutely sanitize the party name before using it in your output filename.
 
 From your XML:
