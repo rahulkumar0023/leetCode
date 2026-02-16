@@ -1,35 +1,56 @@
-Yes — **you can use `sanitizeFilenamePreserveExtension()` everywhere you are sanitizing a *full filename* (something that already has `.xml/.pdf/.csv/...`)**.
+Totally fair — you **should not** sanitize the full filename string if it contains the extension. The fix is simple:
 
-But don’t use it for values that are **not full filenames**, like:
+✅ **sanitize only the “base name”** (everything before the last `.`)
+✅ **keep the extension exactly as-is** (`.xml`, `.pdf`, `.csv`, …)
 
-* party name (`"HUÎTRIÈRE & EOLE"`)
-* supplier name
-* invoice id (sometimes you want to keep dots)
-* bucket / contract / registry keys
-
-For those, you should sanitize as a **token**, not as a filename-with-extension.
-
-### Rule of thumb
-
-* ✅ **Full filename** (has extension): use `sanitizeFilenamePreserveExtension("abc...pdf")`
-* ✅ **Folder name / token** (no extension): use `sanitizeToken("HUÎTRIÈRE & EOLE")`
-
-### Why it matters
-
-If you pass `"HUÎTRIÈRE & EOLE"` into `sanitizeFilenamePreserveExtension()`:
-
-* it has **no extension**, so it sanitizes the entire string (fine)
-* but if the value contains dots (like `26.51.510012`) it will treat the last dot like an “extension separator” and may keep the tail as an “extension”, which is **not what you want for IDs**.
-
-So the clean minimal setup is:
+Here’s a minimal, Fortify/Sonar-friendly way to do it.
 
 ```java
-String safeParty = sanitizeToken(partyName);              // token
-String safeId    = sanitizeToken(invoiceId);              // token (or a special “keep dots” version)
-String safeFile  = sanitizeFilenamePreserveExtension(fileName); // filename
+private static final Pattern UNSAFE_FILE_CHARS = Pattern.compile("[^a-zA-Z0-9_-]+");
+
+public static String sanitizeFilenamePreserveExtension(String filename) {
+    if (filename == null) return "";
+    String trimmed = filename.trim();
+    if (trimmed.isEmpty()) return "";
+
+    int lastDot = trimmed.lastIndexOf('.');
+    // No extension (or ".bashrc"-like) -> sanitize whole thing
+    if (lastDot <= 0 || lastDot == trimmed.length() - 1) {
+        return UNSAFE_FILE_CHARS.matcher(trimmed).replaceAll("_");
+    }
+
+    String base = trimmed.substring(0, lastDot);
+    String ext  = trimmed.substring(lastDot); // includes the dot
+
+    String safeBase = UNSAFE_FILE_CHARS.matcher(base).replaceAll("_");
+    return safeBase + ext;
+}
 ```
 
-If you want, paste 2–3 examples of your **invoiceId formats** (dot vs underscore expectations), and I’ll give you the exact `sanitizeInvoiceId()` that:
+### What this gives you
 
-* keeps dots *or* converts them (your choice),
-* and ensures the invoiceId appears **only once at the end** of the output filename.
+* `BE..._26.51.510012_579.xml` → **base sanitized**, but extension stays `.xml`
+* `file name with space.pdf` → `file_name_with_space.pdf`
+* `name?.csv` → `name_.csv`
+
+---
+
+### If you *also* want to sanitize “party name” before adding into the filename
+
+Do the same idea: sanitize **only the party name fragment** (not the full filename with extension).
+
+```java
+public static String sanitizeToken(String value) {
+    if (value == null) return "";
+    String trimmed = value.trim();
+    if (trimmed.isEmpty()) return "";
+    return UNSAFE_FILE_CHARS.matcher(trimmed).replaceAll("_");
+}
+```
+
+Then build:
+
+* `safeParty = sanitizeToken(partyName)`
+* `safeInvoiceId = sanitizeToken(invoiceId)` (or keep dots if you want — but then don’t use this token method for invoiceId)
+
+If you tell me **whether invoiceId should keep dots** (`26.51.510012`) or become underscores (`26_51_510012`), I’ll show the cleanest way to guarantee it appears **only once at the end**.
