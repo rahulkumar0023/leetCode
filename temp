@@ -1,56 +1,65 @@
-Totally fair — you **should not** sanitize the full filename string if it contains the extension. The fix is simple:
+Timport org.junit.jupiter.api.Test;
 
-✅ **sanitize only the “base name”** (everything before the last `.`)
-✅ **keep the extension exactly as-is** (`.xml`, `.pdf`, `.csv`, …)
+import static org.junit.jupiter.api.Assertions.*;
 
-Here’s a minimal, Fortify/Sonar-friendly way to do it.
+class FileSanitizerTest {
 
-```java
-private static final Pattern UNSAFE_FILE_CHARS = Pattern.compile("[^a-zA-Z0-9_-]+");
+    @Test
+    void sanitizeFilenamePreserveExtension_keepsExtension() {
+        String input = "invoice test?.xml";
+        String result = FileNameUtil.sanitizeFilenamePreserveExtension(input);
 
-public static String sanitizeFilenamePreserveExtension(String filename) {
-    if (filename == null) return "";
-    String trimmed = filename.trim();
-    if (trimmed.isEmpty()) return "";
-
-    int lastDot = trimmed.lastIndexOf('.');
-    // No extension (or ".bashrc"-like) -> sanitize whole thing
-    if (lastDot <= 0 || lastDot == trimmed.length() - 1) {
-        return UNSAFE_FILE_CHARS.matcher(trimmed).replaceAll("_");
+        assertEquals("invoice_test_.xml", result);
     }
 
-    String base = trimmed.substring(0, lastDot);
-    String ext  = trimmed.substring(lastDot); // includes the dot
+    @Test
+    void sanitizeFilenamePreserveExtension_handlesPdf() {
+        String input = "my file name.pdf";
+        String result = FileNameUtil.sanitizeFilenamePreserveExtension(input);
 
-    String safeBase = UNSAFE_FILE_CHARS.matcher(base).replaceAll("_");
-    return safeBase + ext;
+        assertEquals("my_file_name.pdf", result);
+    }
+
+    @Test
+    void sanitizeFilenamePreserveExtension_sanitizesUnsafeCharacters() {
+        String input = "bad:name*file?.xml";
+        String result = FileNameUtil.sanitizeFilenamePreserveExtension(input);
+
+        assertEquals("bad_name_file_.xml", result);
+    }
+
+    @Test
+    void sanitizeFilenamePreserveExtension_handlesNoExtension() {
+        String input = "file name without ext";
+        String result = FileNameUtil.sanitizeFilenamePreserveExtension(input);
+
+        assertEquals("file_name_without_ext", result);
+    }
+
+    @Test
+    void sanitizeFilenamePreserveExtension_handlesTrailingDot() {
+        String input = "file.";
+        String result = FileNameUtil.sanitizeFilenamePreserveExtension(input);
+
+        assertEquals("file_", result);
+    }
+
+    @Test
+    void sanitizeFilenamePreserveExtension_handlesNull() {
+        assertEquals("", FileNameUtil.sanitizeFilenamePreserveExtension(null));
+    }
+
+    @Test
+    void sanitizeFilenamePreserveExtension_handlesBlank() {
+        assertEquals("", FileNameUtil.sanitizeFilenamePreserveExtension("   "));
+    }
+
+    @Test
+    void sanitizeFilenamePreserveExtension_keepsDotsInExtensionOnly() {
+        String input = "26.51.510012.xml";
+        String result = FileNameUtil.sanitizeFilenamePreserveExtension(input);
+
+        // only last dot is extension separator
+        assertEquals("26_51_510012.xml", result);
+    }
 }
-```
-
-### What this gives you
-
-* `BE..._26.51.510012_579.xml` → **base sanitized**, but extension stays `.xml`
-* `file name with space.pdf` → `file_name_with_space.pdf`
-* `name?.csv` → `name_.csv`
-
----
-
-### If you *also* want to sanitize “party name” before adding into the filename
-
-Do the same idea: sanitize **only the party name fragment** (not the full filename with extension).
-
-```java
-public static String sanitizeToken(String value) {
-    if (value == null) return "";
-    String trimmed = value.trim();
-    if (trimmed.isEmpty()) return "";
-    return UNSAFE_FILE_CHARS.matcher(trimmed).replaceAll("_");
-}
-```
-
-Then build:
-
-* `safeParty = sanitizeToken(partyName)`
-* `safeInvoiceId = sanitizeToken(invoiceId)` (or keep dots if you want — but then don’t use this token method for invoiceId)
-
-If you tell me **whether invoiceId should keep dots** (`26.51.510012`) or become underscores (`26_51_510012`), I’ll show the cleanest way to guarantee it appears **only once at the end**.
