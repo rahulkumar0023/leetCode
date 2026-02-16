@@ -1,65 +1,119 @@
-Timport org.junit.jupiter.api.Test;
+Perfect 👍 — here is a clean JUnit 5 test class for the **accent-stripping sanitizeToken method**.
+
+This assumes your implementation is:
+
+```java
+public static String sanitizeToken(String value) {
+    if (value == null) return "";
+
+    String trimmed = value.trim();
+    if (trimmed.isEmpty()) return "";
+
+    String normalized = Normalizer.normalize(trimmed, Normalizer.Form.NFD)
+            .replaceAll("\\p{M}", "");
+
+    return UNSAFE_FILE_CHARS.matcher(normalized).replaceAll("_");
+}
+```
+
+Where:
+
+```java
+private static final Pattern UNSAFE_FILE_CHARS =
+        Pattern.compile("[^a-zA-Z0-9_-]+");
+```
+
+---
+
+# ✅ JUnit Test Class
+
+```java
+import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class FileSanitizerTest {
+class FileNameUtilTest {
 
     @Test
-    void sanitizeFilenamePreserveExtension_keepsExtension() {
-        String input = "invoice test?.xml";
-        String result = FileNameUtil.sanitizeFilenamePreserveExtension(input);
+    void sanitizeToken_stripsAccents() {
+        String input = "HUITRIÈRE";
+        String result = FileNameUtil.sanitizeToken(input);
 
-        assertEquals("invoice_test_.xml", result);
+        assertEquals("HUITRIERE", result);
     }
 
     @Test
-    void sanitizeFilenamePreserveExtension_handlesPdf() {
-        String input = "my file name.pdf";
-        String result = FileNameUtil.sanitizeFilenamePreserveExtension(input);
+    void sanitizeToken_stripsLowercaseAccents() {
+        String input = "Crème brûlée";
+        String result = FileNameUtil.sanitizeToken(input);
 
-        assertEquals("my_file_name.pdf", result);
+        assertEquals("Creme_brulee", result);
     }
 
     @Test
-    void sanitizeFilenamePreserveExtension_sanitizesUnsafeCharacters() {
-        String input = "bad:name*file?.xml";
-        String result = FileNameUtil.sanitizeFilenamePreserveExtension(input);
+    void sanitizeToken_replacesSpacesAndSpecialCharacters() {
+        String input = "HUITRIÈRE & EOLe";
+        String result = FileNameUtil.sanitizeToken(input);
 
-        assertEquals("bad_name_file_.xml", result);
+        assertEquals("HUITRIERE_EOLe", result);
     }
 
     @Test
-    void sanitizeFilenamePreserveExtension_handlesNoExtension() {
-        String input = "file name without ext";
-        String result = FileNameUtil.sanitizeFilenamePreserveExtension(input);
+    void sanitizeToken_replacesDots() {
+        String input = "26.51.510012";
+        String result = FileNameUtil.sanitizeToken(input);
 
-        assertEquals("file_name_without_ext", result);
+        assertEquals("26_51_510012", result);
     }
 
     @Test
-    void sanitizeFilenamePreserveExtension_handlesTrailingDot() {
-        String input = "file.";
-        String result = FileNameUtil.sanitizeFilenamePreserveExtension(input);
+    void sanitizeToken_handlesMixedUnsafeCharacters() {
+        String input = "Test/Name:File*Here?";
+        String result = FileNameUtil.sanitizeToken(input);
 
-        assertEquals("file_", result);
+        assertEquals("Test_Name_File_Here_", result);
     }
 
     @Test
-    void sanitizeFilenamePreserveExtension_handlesNull() {
-        assertEquals("", FileNameUtil.sanitizeFilenamePreserveExtension(null));
+    void sanitizeToken_handlesNull() {
+        assertEquals("", FileNameUtil.sanitizeToken(null));
     }
 
     @Test
-    void sanitizeFilenamePreserveExtension_handlesBlank() {
-        assertEquals("", FileNameUtil.sanitizeFilenamePreserveExtension("   "));
+    void sanitizeToken_handlesBlank() {
+        assertEquals("", FileNameUtil.sanitizeToken("   "));
     }
 
     @Test
-    void sanitizeFilenamePreserveExtension_keepsDotsInExtensionOnly() {
-        String input = "26.51.510012.xml";
-        String result = FileNameUtil.sanitizeFilenamePreserveExtension(input);
+    void sanitizeToken_preservesAllowedCharacters() {
+        String input = "ABC_123-test";
+        String result = FileNameUtil.sanitizeToken(input);
 
-        // only last dot is extension separator
-        assertEquals("26_51_510012.xml", result);
+        assertEquals("ABC_123-test", result);
     }
 }
+```
+
+---
+
+# 🎯 What This Covers
+
+✔ Accent removal
+✔ Lowercase accents
+✔ Spaces
+✔ Ampersand
+✔ Dots
+✔ Unsafe characters
+✔ Null
+✔ Blank
+✔ Already-safe strings
+
+This gives you full branch coverage and Sonar-safe tests.
+
+---
+
+If you want, I can also provide:
+
+* JUnit for `sanitizeFilenamePreserveExtension` with accent handling
+* A test ensuring invoiceId appears only once in final filename
+* A combined integration-style test for your XML writer flow
