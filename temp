@@ -1,119 +1,113 @@
-Perfect 👍 — here is a clean JUnit 5 test class for the **accent-stripping sanitizeToken method**.
+Yes — **use `sanitizeFilenamePreserveExtension(...)` for “actual file names”** (things that include `.xml/.pdf/.csv/.jpeg`), because it solves the exact problem you called out:
 
-This assumes your implementation is:
+* It **sanitizes the base name**
+* It **keeps the extension untouched**
+* It avoids “dot replacement” breaking `.xml/.pdf`
+
+### When to use it
+
+Use it anywhere you sanitize something that is **already a filename** or will become one:
+
+✅ incoming ZIP entry names (before writing to disk)
+✅ supplier/party names when you append them into a filename
+✅ invoice/credit-note output file names **when you already have `... + ".xml"`** and don’t want to destroy the extension
+
+### When *not* to use it
+
+Don’t use it for **tokens/IDs** that are *not a filename*, like:
+
+* invoiceId (e.g. `26.51.510012`)
+* contract numbers
+* registry IDs
+
+For those, use a “token sanitize” (no extension logic) so you don’t accidentally treat dots as an extension split.
+
+---
+
+## One improvement you asked for: strip accents (È → E) without turning into `_`
+
+Here’s a minimal upgrade of your method that **strips accents**, preserves extension, and still uses your existing `UNSAFE_FILE_CHARS` replacement.
 
 ```java
-public static String sanitizeToken(String value) {
-    if (value == null) return "";
+import java.text.Normalizer;
 
-    String trimmed = value.trim();
+public static String sanitizeFilenamePreserveExtension(String filename) {
+    if (filename == null) return "";
+
+    String trimmed = filename.trim();
     if (trimmed.isEmpty()) return "";
 
+    // strip accents (È -> E), keep other chars for pattern to handle
     String normalized = Normalizer.normalize(trimmed, Normalizer.Form.NFD)
-            .replaceAll("\\p{M}", "");
+            .replaceAll("\\p{M}+", ""); // remove diacritics
 
-    return UNSAFE_FILE_CHARS.matcher(normalized).replaceAll("_");
+    int lastDot = normalized.lastIndexOf('.');
+
+    // No extension (or ".bashrc"-like) -> sanitize whole thing
+    if (lastDot <= 0 || lastDot == normalized.length() - 1) {
+        return UNSAFE_FILE_CHARS.matcher(normalized).replaceAll("_");
+    }
+
+    String base = normalized.substring(0, lastDot);
+    String ext  = normalized.substring(lastDot); // includes the dot
+
+    String safeBase = UNSAFE_FILE_CHARS.matcher(base).replaceAll("_");
+
+    // (optional) you can also harden extension if you want:
+    // ext = ext.replaceAll("[^A-Za-z0-9.]+", "");
+
+    return safeBase + ext;
 }
 ```
 
-Where:
+This will turn:
 
-```java
-private static final Pattern UNSAFE_FILE_CHARS =
-        Pattern.compile("[^a-zA-Z0-9_-]+");
-```
+* `"HUITRIÈRE & EOLE.pdf"` → `"HUITRIERE_&_EOLE.pdf"` (with your current blacklist pattern)
+* If you want `&` removed too, you’d need the whitelist pattern (different choice).
 
 ---
 
-# ✅ JUnit Test Class
+# JUnit 5: parameterized tests (fixes the Sonar “replace these 6 tests” issue)
+
+Here’s a single parameterized test covering multiple cases, including accents + extension preservation:
 
 ```java
-import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
-import static org.junit.jupiter.api.Assertions.*;
+import java.util.stream.Stream;
 
-class FileNameUtilTest {
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
-    @Test
-    void sanitizeToken_stripsAccents() {
-        String input = "HUITRIÈRE";
-        String result = FileNameUtil.sanitizeToken(input);
+class InvoiceBatchUtilTest {
 
-        assertEquals("HUITRIERE", result);
+    @ParameterizedTest(name = "[{index}] \"{0}\" -> \"{1}\"")
+    @MethodSource("sanitizeFilenamePreserveExtensionCases")
+    void sanitizeFilenamePreserveExtension_parameterized(String input, String expected) {
+        assertEquals(expected, InvoiceBatchUtil.sanitizeFilenamePreserveExtension(input));
     }
 
-    @Test
-    void sanitizeToken_stripsLowercaseAccents() {
-        String input = "Crème brûlée";
-        String result = FileNameUtil.sanitizeToken(input);
-
-        assertEquals("Creme_brulee", result);
-    }
-
-    @Test
-    void sanitizeToken_replacesSpacesAndSpecialCharacters() {
-        String input = "HUITRIÈRE & EOLe";
-        String result = FileNameUtil.sanitizeToken(input);
-
-        assertEquals("HUITRIERE_EOLe", result);
-    }
-
-    @Test
-    void sanitizeToken_replacesDots() {
-        String input = "26.51.510012";
-        String result = FileNameUtil.sanitizeToken(input);
-
-        assertEquals("26_51_510012", result);
-    }
-
-    @Test
-    void sanitizeToken_handlesMixedUnsafeCharacters() {
-        String input = "Test/Name:File*Here?";
-        String result = FileNameUtil.sanitizeToken(input);
-
-        assertEquals("Test_Name_File_Here_", result);
-    }
-
-    @Test
-    void sanitizeToken_handlesNull() {
-        assertEquals("", FileNameUtil.sanitizeToken(null));
-    }
-
-    @Test
-    void sanitizeToken_handlesBlank() {
-        assertEquals("", FileNameUtil.sanitizeToken("   "));
-    }
-
-    @Test
-    void sanitizeToken_preservesAllowedCharacters() {
-        String input = "ABC_123-test";
-        String result = FileNameUtil.sanitizeToken(input);
-
-        assertEquals("ABC_123-test", result);
+    private static Stream<Arguments> sanitizeFilenamePreserveExtensionCases() {
+        return Stream.of(
+                Arguments.of(null, ""),
+                Arguments.of("", ""),
+                Arguments.of("   ", ""),
+                Arguments.of("invoice test?.xml", "invoice_test_.xml"),
+                Arguments.of("my file name.pdf", "my_file_name.pdf"),
+                Arguments.of("bad:name*file?.xml", "bad_name_file_.xml"),
+                Arguments.of("HUITRIÈRE & EOLE.pdf", "HUITRIERE_&_EOLE.pdf"),
+                Arguments.of(".bashrc", "_bashrc"),              // no extension case
+                Arguments.of("noext", "noext"),                 // no extension case
+                Arguments.of("trailingdot.", "trailingdot.")    // treated as no extension (kept dot), then sanitized if pattern hits
+        );
     }
 }
 ```
 
----
-
-# 🎯 What This Covers
-
-✔ Accent removal
-✔ Lowercase accents
-✔ Spaces
-✔ Ampersand
-✔ Dots
-✔ Unsafe characters
-✔ Null
-✔ Blank
-✔ Already-safe strings
-
-This gives you full branch coverage and Sonar-safe tests.
+> Note: expected outputs assume your **current blacklist** pattern: `[\\s\\\\/:*?"<>|]+`.
+> If you switch to a whitelist pattern, some expected strings change (e.g., `&` would become `_`).
 
 ---
 
-If you want, I can also provide:
-
-* JUnit for `sanitizeFilenamePreserveExtension` with accent handling
-* A test ensuring invoiceId appears only once in final filename
-* A combined integration-style test for your XML writer flow
+If you paste your exact current `UNSAFE_FILE_CHARS` (and whether you want to keep `&` or not), I can adjust the expected outputs so your tests match your production behavior perfectly.
