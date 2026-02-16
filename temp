@@ -1,3 +1,153 @@
+Yes 👍 you should absolutely sanitize the party name before using it in your output filename.
+
+From your XML:
+
+HUITRIÈRE & EOLe
+
+That contains:
+	•	È (accented char)
+	•	&
+	•	space
+	•	possibly mixed casing
+
+If you directly use that in filenames, you risk:
+	•	Encoding issues
+	•	COS object key inconsistencies
+	•	Cross-platform filesystem problems
+	•	Attachment matching mismatch
+
+⸻
+
+✅ Correct Way To Sanitize Party Name for Filenames
+
+You already have:
+
+sanitizeForFileName(String value)
+
+But that only replaces unsafe characters like:
+
+[\\/:*?"<>|]
+
+It does NOT:
+	•	Normalize accents
+	•	Replace &
+	•	Replace spaces
+	•	Remove diacritics
+
+We should improve it slightly — safely.
+
+⸻
+
+🎯 Upgrade sanitizeForFileName (Fortify-safe)
+
+Add Unicode normalization and safe character filtering.
+
+Replace your current method with this:
+
+import java.text.Normalizer;
+import java.util.Locale;
+
+private static final Pattern UNSAFE_FILE_CHARS =
+        Pattern.compile("[^a-zA-Z0-9_\\-]+");
+
+public static String sanitizeForFileName(String value) {
+
+    if (value == null) {
+        return "";
+    }
+
+    String trimmed = value.trim();
+    if (trimmed.isEmpty()) {
+        return "";
+    }
+
+    // 1. Normalize accents (È → E)
+    String normalized = Normalizer.normalize(trimmed, Normalizer.Form.NFD)
+            .replaceAll("\\p{M}", "");
+
+    // 2. Replace & explicitly
+    normalized = normalized.replace("&", "AND");
+
+    // 3. Replace spaces with underscore
+    normalized = normalized.replace(" ", "_");
+
+    // 4. Remove remaining unsafe characters
+    normalized = UNSAFE_FILE_CHARS.matcher(normalized).replaceAll("_");
+
+    // 5. Lowercase for consistency (optional)
+    return normalized.toLowerCase(Locale.ROOT);
+}
+
+
+⸻
+
+🎯 What This Produces
+
+Input:
+
+HUITRIÈRE & EOLe
+
+Output:
+
+huitriere_and_eole
+
+Clean.
+Portable.
+Safe for COS.
+Safe for zip.
+Safe for Windows.
+Safe for Linux.
+
+⸻
+
+✅ How To Use It In Your Writer
+
+In your finance branch you already do:
+
+String supplierPartyRaw = invoiceBucketResolver.getSupplierName(...);
+String supplierParty = sanitizeForFileName(supplierPartyRaw);
+
+That’s correct.
+
+Just ensure you use the improved sanitizer above.
+
+⸻
+
+⚠️ Important: Do NOT Sanitize XML Content
+
+Only sanitize when building filenames.
+
+Your XML must still contain:
+
+HUITRIÈRE &amp; EOLe
+
+That is correct XML encoding.
+
+⸻
+
+🧠 Final Recommended Filename Pattern
+
+Your final structure should be something like:
+
+<contract>_INV_<timestamp>_<sanitizedInvoiceId>_<sanitizedPartyName>_<seq>.xml
+
+or whichever order you choose — just ensure:
+	•	invoiceId appears once
+	•	partyName is sanitized
+	•	sequence suffix preserved
+	•	same name passed to attachmentMover
+
+⸻
+
+If you’d like, I can now give:
+	•	A shared utility class for:
+	•	sanitizeForFileName
+	•	appendInvoiceIdOnce
+	•	extractTrailingSequenceSuffix
+	•	So both XmlInvoiceWriter and XmlCreditNoteWriter reuse identical logic and never drift again.
+
+
+
 What version of apache did we just install on the cluster using the helm chart?
 
 
