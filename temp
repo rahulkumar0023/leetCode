@@ -1,3 +1,64 @@
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+import java.util.stream.Stream;
+
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+
+class InvoiceBatchUtilTest {
+
+    @ParameterizedTest(name = "[{index}] input=\"{0}\" -> \"{1}\"")
+    @MethodSource("sanitizeTokenCases")
+    void sanitizeToken_shouldSanitizeAndStripAccents(String input, String expected) {
+        // Act
+        String actual = InvoiceBatchUtil.sanitizeToken(input);
+
+        // Assert
+        assertEquals(expected, actual);
+    }
+
+    private static Stream<Arguments> sanitizeTokenCases() {
+        return Stream.of(
+                // null/blank handling (adjust expected if your implementation differs)
+                Arguments.of(null, ""),
+                Arguments.of("", ""),
+                Arguments.of("   ", ""),
+
+                // preserves dots/underscores/hyphens (allowed by your pattern)
+                Arguments.of("26.51.510012", "26.51.510012"),
+                Arguments.of("INV_20260212-01", "INV_20260212-01"),
+                Arguments.of("a_b-c.d", "a_b-c.d"),
+
+                // spaces -> underscore (space is not allowed)
+                Arguments.of("invoice test", "invoice_test"),
+                Arguments.of("invoice   test", "invoice_test"),
+
+                // special characters -> underscore (collapsed)
+                Arguments.of("bad:name*file?<>|", "bad_name_file_"),
+                Arguments.of("abc@#def", "abc_def"),
+
+                // accents stripped, then kept (letters remain letters)
+                Arguments.of("HUITRIÈRE", "HUITRIERE"),
+                Arguments.of("Crème brûlée", "Creme_brulee"),
+
+                // mixed: accents + symbols + whitespace
+                Arguments.of("HUITRIÈRE & EOLE", "HUITRIERE_EOLE"),
+
+                // slashes/backslashes -> underscore
+                Arguments.of("a/b\\c", "a_b_c"),
+
+                // leading/trailing whitespace trimmed before processing
+                Arguments.of("  Crème  ", "Creme"),
+
+                // multiple unsafe segments collapse into one underscore
+                Arguments.of("a@@@b###c", "a_b_c")
+        );
+    }
+}
+
+
+
 Yes — **use `sanitizeFilenamePreserveExtension(...)` for “actual file names”** (things that include `.xml/.pdf/.csv/.jpeg`), because it solves the exact problem you called out:
 
 * It **sanitizes the base name**
