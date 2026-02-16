@@ -1,3 +1,7 @@
+What version of apache did we just install on the cluster using the helm chart?
+
+
+
 Dear Dimitrik,
 
 To complete the Dremio DB2 connector build, access to the **dremio/public** Maven repository is required.
