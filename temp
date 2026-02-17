@@ -1,3 +1,16 @@
+Dear Dimitrik,
+
+All dependencies for the Dremio DB2 connector are resolved through our internal Artifactory proxy. The Dremio repository is accessed via this controlled setup, ensuring secure retrieval and internal scanning.
+
+There is no direct developer access to external repositories, and this does not impact the runtime environment.
+
+Please let me know if you need any further details.
+
+Regards,
+Rahul
+
+
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.util.stream.Stream;
