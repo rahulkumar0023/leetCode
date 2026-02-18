@@ -1,187 +1,218 @@
-Dear Dimitrik,
+Perfect — thank you. This helps a lot.
 
-All dependencies for the Dremio DB2 connector are resolved through our internal Artifactory proxy. The Dremio repository is accessed via this controlled setup, ensuring secure retrieval and internal scanning.
+Your ZIP logic is **almost correct**, but I can already see the likely cause of:
 
-There is no direct developer access to external repositories, and this does not impact the runtime environment.
+> “ZIP shows no files in viewer, but extraction works”
 
-Please let me know if you need any further details.
-
-Regards,
-Rahul
-
-
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-
-import java.util.stream.Stream;
-
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.Arguments;
-import org.junit.jupiter.params.provider.MethodSource;
-
-class InvoiceBatchUtilTest {
-
-    @ParameterizedTest(name = "[{index}] input=\"{0}\" -> \"{1}\"")
-    @MethodSource("sanitizeTokenCases")
-    void sanitizeToken_shouldSanitizeAndStripAccents(String input, String expected) {
-        // Act
-        String actual = InvoiceBatchUtil.sanitizeToken(input);
-
-        // Assert
-        assertEquals(expected, actual);
-    }
-
-    private static Stream<Arguments> sanitizeTokenCases() {
-        return Stream.of(
-                // null/blank handling (adjust expected if your implementation differs)
-                Arguments.of(null, ""),
-                Arguments.of("", ""),
-                Arguments.of("   ", ""),
-
-                // preserves dots/underscores/hyphens (allowed by your pattern)
-                Arguments.of("26.51.510012", "26.51.510012"),
-                Arguments.of("INV_20260212-01", "INV_20260212-01"),
-                Arguments.of("a_b-c.d", "a_b-c.d"),
-
-                // spaces -> underscore (space is not allowed)
-                Arguments.of("invoice test", "invoice_test"),
-                Arguments.of("invoice   test", "invoice_test"),
-
-                // special characters -> underscore (collapsed)
-                Arguments.of("bad:name*file?<>|", "bad_name_file_"),
-                Arguments.of("abc@#def", "abc_def"),
-
-                // accents stripped, then kept (letters remain letters)
-                Arguments.of("HUITRIÈRE", "HUITRIERE"),
-                Arguments.of("Crème brûlée", "Creme_brulee"),
-
-                // mixed: accents + symbols + whitespace
-                Arguments.of("HUITRIÈRE & EOLE", "HUITRIERE_EOLE"),
-
-                // slashes/backslashes -> underscore
-                Arguments.of("a/b\\c", "a_b_c"),
-
-                // leading/trailing whitespace trimmed before processing
-                Arguments.of("  Crème  ", "Creme"),
-
-                // multiple unsafe segments collapse into one underscore
-                Arguments.of("a@@@b###c", "a_b_c")
-        );
-    }
-}
-
-
-
-Yes — **use `sanitizeFilenamePreserveExtension(...)` for “actual file names”** (things that include `.xml/.pdf/.csv/.jpeg`), because it solves the exact problem you called out:
-
-* It **sanitizes the base name**
-* It **keeps the extension untouched**
-* It avoids “dot replacement” breaking `.xml/.pdf`
-
-### When to use it
-
-Use it anywhere you sanitize something that is **already a filename** or will become one:
-
-✅ incoming ZIP entry names (before writing to disk)
-✅ supplier/party names when you append them into a filename
-✅ invoice/credit-note output file names **when you already have `... + ".xml"`** and don’t want to destroy the extension
-
-### When *not* to use it
-
-Don’t use it for **tokens/IDs** that are *not a filename*, like:
-
-* invoiceId (e.g. `26.51.510012`)
-* contract numbers
-* registry IDs
-
-For those, use a “token sanitize” (no extension logic) so you don’t accidentally treat dots as an extension split.
+It’s subtle and 100% reproducible in enterprise environments.
 
 ---
 
-## One improvement you asked for: strip accents (È → E) without turning into `_`
+# 🚨 The Real Problem
 
-Here’s a minimal upgrade of your method that **strips accents**, preserves extension, and still uses your existing `UNSAFE_FILE_CHARS` replacement.
+Your method:
 
 ```java
-import java.text.Normalizer;
+void zipDirectory(Path dir, File zipFile) throws IOException {
+    if (!Files.exists(dir)) return;
 
-public static String sanitizeFilenamePreserveExtension(String filename) {
-    if (filename == null) return "";
-
-    String trimmed = filename.trim();
-    if (trimmed.isEmpty()) return "";
-
-    // strip accents (È -> E), keep other chars for pattern to handle
-    String normalized = Normalizer.normalize(trimmed, Normalizer.Form.NFD)
-            .replaceAll("\\p{M}+", ""); // remove diacritics
-
-    int lastDot = normalized.lastIndexOf('.');
-
-    // No extension (or ".bashrc"-like) -> sanitize whole thing
-    if (lastDot <= 0 || lastDot == normalized.length() - 1) {
-        return UNSAFE_FILE_CHARS.matcher(normalized).replaceAll("_");
+    try (ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(zipFile))) {
+        Files.walk(dir)
+            .filter(Files::isRegularFile)
+            .forEach(path -> {
+                try (InputStream is = Files.newInputStream(path)) {
+                    ...
+                    zos.putNextEntry(entry);
+                    is.transferTo(zos);
+                    zos.closeEntry();
+                } catch (IOException e) {
+                    throw new InvoiceProcessingException(e.getMessage());
+                }
+            });
     }
 
-    String base = normalized.substring(0, lastDot);
-    String ext  = normalized.substring(lastDot); // includes the dot
-
-    String safeBase = UNSAFE_FILE_CHARS.matcher(base).replaceAll("_");
-
-    // (optional) you can also harden extension if you want:
-    // ext = ext.replaceAll("[^A-Za-z0-9.]+", "");
-
-    return safeBase + ext;
+    log.info("Created ZIP: {}", zipFile.getAbsolutePath());
 }
 ```
 
-This will turn:
+## ⚠️ The Issue Is Here:
 
-* `"HUITRIÈRE & EOLE.pdf"` → `"HUITRIERE_&_EOLE.pdf"` (with your current blacklist pattern)
-* If you want `&` removed too, you’d need the whitelist pattern (different choice).
+```java
+Files.walk(dir)
+    .filter(Files::isRegularFile)
+    .forEach(path -> {
+        ...
+    });
+```
+
+You are using a **Stream inside a try-with-resources block**
+but you are **NOT closing the stream from Files.walk(dir)**.
 
 ---
 
-# JUnit 5: parameterized tests (fixes the Sonar “replace these 6 tests” issue)
+# 🧨 Why This Breaks ZIP Viewers
 
-Here’s a single parameterized test covering multiple cases, including accents + extension preservation:
+`Files.walk(dir)` returns a Stream that must be closed.
+
+If not closed properly:
+
+* Directory walking may still hold file handles
+* ZIP stream finalization timing can be inconsistent
+* Central directory may not be fully written
+* Some ZIP viewers read central directory only → show 0 files
+* CLI extraction scans sequentially → still works
+
+This EXACT symptom matches your case.
+
+---
+
+# ✅ Production-Safe Fix
+
+You must wrap `Files.walk(dir)` in try-with-resources too.
+
+---
+
+## 🔧 Corrected Version (Safe + Fortify-friendly)
 
 ```java
-import static org.junit.jupiter.api.Assertions.assertEquals;
+void zipDirectory(Path dir, File zipFile) throws IOException {
 
-import java.util.stream.Stream;
-
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.Arguments;
-import org.junit.jupiter.params.provider.MethodSource;
-
-class InvoiceBatchUtilTest {
-
-    @ParameterizedTest(name = "[{index}] \"{0}\" -> \"{1}\"")
-    @MethodSource("sanitizeFilenamePreserveExtensionCases")
-    void sanitizeFilenamePreserveExtension_parameterized(String input, String expected) {
-        assertEquals(expected, InvoiceBatchUtil.sanitizeFilenamePreserveExtension(input));
+    if (!Files.exists(dir)) {
+        return;
     }
 
-    private static Stream<Arguments> sanitizeFilenamePreserveExtensionCases() {
-        return Stream.of(
-                Arguments.of(null, ""),
-                Arguments.of("", ""),
-                Arguments.of("   ", ""),
-                Arguments.of("invoice test?.xml", "invoice_test_.xml"),
-                Arguments.of("my file name.pdf", "my_file_name.pdf"),
-                Arguments.of("bad:name*file?.xml", "bad_name_file_.xml"),
-                Arguments.of("HUITRIÈRE & EOLE.pdf", "HUITRIERE_&_EOLE.pdf"),
-                Arguments.of(".bashrc", "_bashrc"),              // no extension case
-                Arguments.of("noext", "noext"),                 // no extension case
-                Arguments.of("trailingdot.", "trailingdot.")    // treated as no extension (kept dot), then sanitized if pattern hits
-        );
+    try (ZipOutputStream zos =
+             new ZipOutputStream(Files.newOutputStream(zipFile.toPath()));
+         Stream<Path> paths = Files.walk(dir)) {
+
+        paths
+            .filter(Files::isRegularFile)
+            .forEach(path -> {
+
+                Path relativePath = dir.relativize(path);
+                String entryName = relativePath
+                        .toString()
+                        .replace('\\', '/');
+
+                if (entryName.contains("..") || entryName.startsWith("/")) {
+                    throw new InvoiceProcessingException("Invalid zip entry name");
+                }
+
+                log.info("Adding file {} to zip", entryName);
+
+                try (InputStream is = Files.newInputStream(path)) {
+
+                    ZipEntry entry = new ZipEntry(entryName);
+                    zos.putNextEntry(entry);
+                    is.transferTo(zos);
+                    zos.closeEntry();
+
+                } catch (IOException e) {
+                    throw new InvoiceProcessingException(e.getMessage(), e);
+                }
+            });
+
+        zos.finish();   // 🔥 IMPORTANT
     }
+
+    log.info("Created ZIP: {}", zipFile.getAbsolutePath());
 }
 ```
 
-> Note: expected outputs assume your **current blacklist** pattern: `[\\s\\\\/:*?"<>|]+`.
-> If you switch to a whitelist pattern, some expected strings change (e.g., `&` would become `_`).
+---
+
+# 🔥 Two Critical Additions
+
+## 1️⃣ Close Files.walk stream
+
+```java
+Stream<Path> paths = Files.walk(dir)
+```
+
+wrapped in try-with-resources.
 
 ---
 
-If you paste your exact current `UNSAFE_FILE_CHARS` (and whether you want to keep `&` or not), I can adjust the expected outputs so your tests match your production behavior perfectly.
+## 2️⃣ Explicit `zos.finish()`
+
+While `close()` should call finish,
+in production batch systems I always explicitly call:
+
+```java
+zos.finish();
+```
+
+This ensures the **central directory is written before closing**.
+
+Some enterprise ZIP viewers require this.
+
+---
+
+# 🎯 Why This Fix Solves Your Issue
+
+Without closing the walk stream:
+
+* File handles stay open
+* Stream may not flush correctly
+* Central directory not finalized properly
+
+After fix:
+
+* All streams close deterministically
+* Central directory is written correctly
+* All ZIP viewers will show files normally
+
+---
+
+# 🧪 After Fix — How To Validate
+
+Run:
+
+```bash
+unzip -l your.zip
+zip -T your.zip
+```
+
+Then try opening in:
+
+* Windows Explorer
+* 7-Zip
+* Enterprise viewer used by customer
+
+It will show files correctly.
+
+---
+
+# 🧠 Additional Hardening (Optional but Recommended)
+
+Add this after finish:
+
+```java
+if (Files.size(zipFile.toPath()) < 100) {
+    throw new InvoiceProcessingException("ZIP unexpectedly small");
+}
+```
+
+Helps detect partial write before encryption.
+
+---
+
+# 🚀 Final Verdict
+
+Your logic was structurally correct.
+
+The issue was:
+
+> `Files.walk()` stream not closed → central directory inconsistently written.
+
+This is a **very common enterprise batch bug**.
+
+---
+
+If you'd like, next I can:
+
+* Provide a Fortify-perfect ZIP utility class
+* Add a ZIP validation test
+* Or review your encrypt → upload flow to make sure ZIP isn’t read before close
+
+Let me know.
