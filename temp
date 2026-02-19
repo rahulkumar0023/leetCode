@@ -1,3 +1,22 @@
+Hi Team,
+
+Please find the current status below.
+
+The Dremio container has been successfully created. Both required JAR files (the ARP connector and the CData JDBC driver) were copied into the Dremio Docker image, and the container was restarted.
+
+At this stage, we do not yet see the option to connect to the CData DB2 source in the Dremio UI. Mayura and I will continue troubleshooting this. We will attempt another container restart and review the logs for any plugin loading issues.
+
+A special thanks to **X** for supporting this at short notice, copying the JARs, and bringing up the container.
+
+We also have a sync scheduled with CData tomorrow and will validate the setup with them.
+
+We will share a further update once we have more clarity.
+
+Regards,
+Rahul
+
+
+
 Perfect — thank you. This helps a lot.
 
 Your ZIP logic is **almost correct**, but I can already see the likely cause of:
