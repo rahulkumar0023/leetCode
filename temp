@@ -1,19 +1,25 @@
 Hi CData Team,
 
+A few notes on recent developments and requirements ahead of our meeting today.
+
 We have successfully downloaded and deployed the trial version of the CData JDBC Driver for IBM DB2 in our Dremio environment. The CData DB2 data source option is now visible in the Dremio UI, and we are ready to proceed with configuring the connection.
 
 To complete the setup, we understand that a valid Runtime Key (RTK) and corresponding license (trial or full) are required for use within Dremio.
 
-As referenced in your documentation (https://www.cdata.com/kb/tech/db2-jdbc-dremio.rst), the JDBC URL must include the RTK parameter, for example:
+As referenced in your documentation:
+https://www.cdata.com/kb/tech/db2-jdbc-dremio.rst
 
-jdbc:db2=5246...;Server=10.0.1.2;Port=50000;User=admin;Password=admin;Database=test;
+The JDBC URL must include the RTK parameter, for example:
 
-Could you please provide the appropriate RTK and any trial license details needed to enable the JDBC driver for this integration?
+jdbc:db2:RTK=5246...;Server=10.0.1.2;Port=50000;User=admin;Password=admin;Database=test;
 
-Please let us know if you require any additional information from our side.
+Could you please provide the appropriate RTK and any trial license details required to enable the driver for this integration?
+
+Please let us know if you need any additional information from our side.
 
 Kind regards,
 Rahul
+
 
 Perfect — thank you. This helps a lot.
 
