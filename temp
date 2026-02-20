@@ -1,21 +1,19 @@
-Hi Team,
+Hi CData Team,
 
-Please find the current status below.
+We have successfully downloaded and deployed the trial version of the CData JDBC Driver for IBM DB2 in our Dremio environment. The CData DB2 data source option is now visible in the Dremio UI, and we are ready to proceed with configuring the connection.
 
-The Dremio container has been successfully created. Both required JAR files (the ARP connector and the CData JDBC driver) were copied into the Dremio Docker image, and the container was restarted.
+To complete the setup, we understand that a valid Runtime Key (RTK) and corresponding license (trial or full) are required for use within Dremio.
 
-At this stage, we do not yet see the option to connect to the CData DB2 source in the Dremio UI. Mayura and I will continue troubleshooting this. We will attempt another container restart and review the logs for any plugin loading issues.
+As referenced in your documentation (https://www.cdata.com/kb/tech/db2-jdbc-dremio.rst), the JDBC URL must include the RTK parameter, for example:
 
-A special thanks to **X** for supporting this at short notice, copying the JARs, and bringing up the container.
+jdbc:db2=5246...;Server=10.0.1.2;Port=50000;User=admin;Password=admin;Database=test;
 
-We also have a sync scheduled with CData tomorrow and will validate the setup with them.
+Could you please provide the appropriate RTK and any trial license details needed to enable the JDBC driver for this integration?
 
-We will share a further update once we have more clarity.
+Please let us know if you require any additional information from our side.
 
-Regards,
+Kind regards,
 Rahul
-
-
 
 Perfect — thank you. This helps a lot.
 
