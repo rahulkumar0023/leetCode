@@ -1,19 +1,248 @@
-Hi CData Team,
+Perfect 👍
+Let’s focus on **S3, IAM, EC2, CodePipeline, CodeBuild, and CloudFormation** — practical questions suitable for a Senior Java Developer in banking.
 
-Thank you for sharing the RTK key earlier. We were able to validate the connection successfully on our side.
+I’ll give you:
 
-However, we are observing an issue with metadata loading. The connection appears to be very slow, and currently only a single table is visible through the CData DB2 source.
+* ❓ Question
+* ✅ What a strong answer should include
 
-For comparison, when we configure the same DB2 instance using the native IBM DB2 driver in Dremio, we see 500+ tables load almost immediately. With the CData driver, only one table is shown under the same database.
+---
 
-We have attached screenshots below for reference.
+# 🟢 S3 QUESTIONS
 
-Have you encountered this behavior before? Are there any specific driver properties or configuration steps you would recommend to ensure full schema and table visibility and improve metadata loading performance?
+---
 
-Please let us know if you require any logs or additional details from our side.
+### 1️⃣ What is the difference between S3 standard and S3 Glacier?
 
-Kind regards,
-Rahul
+**Expected:**
+
+* Standard → frequent access.
+* Glacier → archival storage, cheaper, slower retrieval.
+* Lifecycle rules can move objects automatically.
+
+---
+
+### 2️⃣ What is S3 versioning?
+
+**Expected:**
+
+* Keeps multiple versions of objects.
+* Protects against accidental deletion.
+* Useful for backups.
+
+---
+
+### 3️⃣ How do you secure an S3 bucket?
+
+**Expected:**
+
+* IAM policies
+* Bucket policies
+* Block public access
+* Encryption (SSE-S3 or SSE-KMS)
+* Restrict via VPC endpoint
+
+If they mention:
+
+* Avoid public buckets
+  → strong.
+
+---
+
+### 4️⃣ What is the difference between SSE-S3 and SSE-KMS?
+
+**Expected:**
+
+* SSE-S3 → managed by AWS.
+* SSE-KMS → uses AWS KMS keys, more control, audit logging.
+
+Banking → KMS preferred.
+
+---
+
+# 🟣 IAM QUESTIONS
+
+---
+
+### 5️⃣ What is the difference between IAM User and IAM Role?
+
+**Expected:**
+
+* User → long-term credentials.
+* Role → temporary credentials.
+* Roles used by EC2, Lambda.
+
+If they mention:
+“Never store credentials in code”
+→ strong.
+
+---
+
+### 6️⃣ What is the principle of least privilege?
+
+**Expected:**
+
+* Grant minimum required permissions.
+* Reduce attack surface.
+
+---
+
+### 7️⃣ What happens if two policies conflict?
+
+**Expected:**
+
+* Explicit deny overrides allow.
+
+This is a good tricky IAM question.
+
+---
+
+# 🔵 EC2 QUESTIONS
+
+---
+
+### 8️⃣ What is the difference between Security Group and NACL?
+
+**Expected:**
+
+* SG → Stateful.
+* NACL → Stateless.
+* SG at instance level.
+* NACL at subnet level.
+
+---
+
+### 9️⃣ What is an AMI?
+
+**Expected:**
+
+* Amazon Machine Image.
+* Template to launch EC2 instances.
+
+---
+
+### 🔟 What is the difference between horizontal and vertical scaling?
+
+**Expected:**
+
+* Vertical → increase instance size.
+* Horizontal → add more instances.
+* Horizontal preferred for high availability.
+
+---
+
+# 🟠 CODEPIPELINE QUESTIONS
+
+---
+
+### 1️⃣1️⃣ What is CodePipeline?
+
+**Expected:**
+
+* CI/CD orchestration service.
+* Automates build, test, deploy.
+* Integrates with CodeBuild, CodeDeploy.
+
+---
+
+### 1️⃣2️⃣ What are stages in CodePipeline?
+
+**Expected:**
+
+* Source
+* Build
+* Test
+* Deploy
+
+Should understand flow.
+
+---
+
+# 🟡 CODEBUILD QUESTIONS
+
+---
+
+### 1️⃣3️⃣ What is CodeBuild?
+
+**Expected:**
+
+* Managed build service.
+* Compiles code.
+* Runs tests.
+* Produces artifacts.
+
+---
+
+### 1️⃣4️⃣ What is buildspec.yml?
+
+**Expected:**
+
+* Defines build commands.
+* Phases: install, pre_build, build, post_build.
+* Specifies artifacts.
+
+If they know buildspec phases → strong.
+
+---
+
+# 🔴 CLOUDFORMATION QUESTIONS
+
+---
+
+### 1️⃣5️⃣ What is CloudFormation?
+
+**Expected:**
+
+* Infrastructure as Code (IaC).
+* Templates define AWS resources.
+* JSON or YAML.
+
+---
+
+### 1️⃣6️⃣ What is a stack?
+
+**Expected:**
+
+* Collection of AWS resources managed together.
+* Created from template.
+
+---
+
+### 1️⃣7️⃣ What happens if stack creation fails?
+
+**Expected:**
+
+* Rolls back automatically (if enabled).
+* Resources deleted.
+
+Good for testing real experience.
+
+---
+
+# ⭐ Bonus Strong Question
+
+### How would you deploy a Spring Boot app using AWS CI/CD?
+
+Strong answer:
+
+* CodePipeline
+* CodeBuild (build jar)
+* Store artifact in S3
+* Deploy to EC2 or ECS
+* Use CloudFormation for infra
+
+---
+
+# 🎯 If You Want
+
+I can now give you:
+
+* 5 tricky IAM questions
+* 5 scenario-based AWS production questions
+* or a 10-minute rapid-fire AWS round
+
+Tell me what level you want 👌
+
 
 
 
