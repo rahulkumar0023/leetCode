@@ -1,3 +1,22 @@
+Hi CData Team,
+
+Thank you for sharing the RTK key earlier. We were able to validate the connection successfully on our side.
+
+However, we are observing an issue with metadata loading. The connection appears to be very slow, and currently only a single table is visible through the CData DB2 source.
+
+For comparison, when we configure the same DB2 instance using the native IBM DB2 driver in Dremio, we see 500+ tables load almost immediately. With the CData driver, only one table is shown under the same database.
+
+We have attached screenshots below for reference.
+
+Have you encountered this behavior before? Are there any specific driver properties or configuration steps you would recommend to ensure full schema and table visibility and improve metadata loading performance?
+
+Please let us know if you require any logs or additional details from our side.
+
+Kind regards,
+Rahul
+
+
+
 Perfect 👍
 Here’s a **clean 12-question flow** for a **Senior Java Developer – Banking** interview.
 
