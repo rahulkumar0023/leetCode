@@ -1,5 +1,1 @@
-find / -type d -name "log" 2>/dev/null
-
-Or search for server.log directly:
-
-find / -name "server.log" 2>/dev/null
+Hi team, unfortunately I won’t be able to join the celebration today. Congratulations to everyone on getting the project live—it's a great achievement and I’m glad I could be part of it. Hope you all have a great time celebrating, and good luck with the aftercare phase! 🎉
