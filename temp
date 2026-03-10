@@ -1,3 +1,17 @@
+Hello,
+
+I was able to install the dependent LSP4IJ plugin, and after that the Liberty Tools plugin worked successfully.
+
+The steps shared in the attached email were helpful for resolving the issue. Once the prerequisite plugin was installed, the remaining setup completed successfully.
+
+For the Liberty Tools plugin, I also tried downloading it from the IntelliJ website, but that did not work in my case. The installation worked only when I downloaded the plugin ZIP directly from the GitHub releases page and installed it from disk.
+
+Please let me know if you would like me to share the exact installation steps and links.
+
+Kind regards,  
+Rahul
+
+
 Hi team, unfortunately I won’t be able to join the celebration today. Congratulations to everyone on getting the project live—it's a great achievement and I’m glad I could be part of it. Hope you all have a great time celebrating, and good luck with the aftercare phase! 🎉
 
 
