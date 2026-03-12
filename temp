@@ -1,37 +1,163 @@
-Hello,
+Got it 👍 — your requirement is **different from the earlier bundle suggestion**.
 
-I was able to install the dependent LSP4IJ plugin, and after that the Liberty Tools plugin worked successfully.
+You want **independent failure handling**, meaning:
 
-The steps shared in the attached email were helpful for resolving the issue. Once the prerequisite plugin was installed, the remaining setup completed successfully.
+| Scenario                       | Result                              |
+| ------------------------------ | ----------------------------------- |
+| Miles success, Finance timeout | Miles → processed, Finance → failed |
+| Finance success, Miles timeout | Finance → processed, Miles → failed |
+| Both timeout                   | both → failed                       |
+| Both success                   | both → processed                    |
 
-For the Liberty Tools plugin, I also tried downloading it from the IntelliJ website, but that did not work in my case. The installation worked only when I downloaded the plugin ZIP directly from the GitHub releases page and installed it from disk.
+So **each file is responsible for its own lifecycle**.
 
-Please let me know if you would like me to share the exact installation steps and links.
+The problem you described earlier (“finance lost”) happens because **the exception aborts the loop before finance cleanup runs**.
 
-Kind regards,  
-Rahul
+The fix is simply: **handle failure inside `zipEncryptUploadFiles()` instead of letting the exception escape**.
 
+---
 
-Hi team, unfortunately I won’t be able to join the celebration today. Congratulations to everyone on getting the project live—it's a great achievement and I’m glad I could be part of it. Hope you all have a great time celebrating, and good luck with the aftercare phase! 🎉
+# The clean fix (minimal changes)
 
+Wrap the **CFT notify + move logic** in a `try/catch` and move the failed file to `/failed`.
 
-Hello,
+### Change this part of your code
 
-I was able to access and install the dependent LSP4IJ plugin, and after adding it, the Liberty Tools plugin worked successfully.
+Current:
 
-The steps shared in the attached email were helpful, especially for completing the prerequisite setup. I have included the working steps below for reference.
+```java
+cftApiClient.notifyAndWaitForCompletion(key, encryptedFileName, maxWait);
 
-1. Install the LSP4IJ prerequisite plugin
-   1. Download the ZIP file.
-   2. In IntelliJ, go to Preferences > Plugins > Install Plugin from Disk.
-   3. Select the downloaded ZIP file, confirm the installation, and restart the IDE.
+addProcessedKey(stepExecution, encryptedFileName);
 
-2. Install the Liberty Tools plugin
-   1. Download the latest ZIP file from the GitHub releases page.
-   2. In IntelliJ, go to Preferences > Plugins > Install Plugin from Disk.
-   3. Select the downloaded ZIP file, confirm the installation, and restart the IDE.
+if (moveEnabled) {
+    moveToProcessed(encryptedFileName, key);
+}
+```
 
-Please let me know if needed, and I can share the download links as well.
+---
 
-Kind regards,  
-Rahul
+### Replace with
+
+```java
+try {
+
+    cftApiClient.notifyAndWaitForCompletion(key, encryptedFileName, maxWait);
+
+    addProcessedKey(stepExecution, encryptedFileName);
+
+    if (moveEnabled) {
+        moveToProcessed(encryptedFileName, key);
+    }
+
+} catch (Exception ex) {
+
+    log.error("CFT transfer failed for file {}", encryptedFileName, ex);
+
+    moveToFailed(encryptedFileName, key);
+
+}
+```
+
+---
+
+# Add a new helper
+
+```java
+private void moveToFailed(String encryptedFileName, String key) {
+
+    try {
+
+        String failedKey = "failed/" + encryptedFileName;
+
+        cosStorageService.moveFile(key, failedKey);
+
+        log.info("Moved outgoing COS file {} to failed location {}", key, failedKey);
+
+    } catch (Exception e) {
+
+        log.warn("Failed moving {} to failed location: {}", key, e.getMessage());
+
+    }
+
+}
+```
+
+---
+
+# Why this works
+
+Your loop in `findTargetAndPgpUpload()` continues:
+
+```
+Miles → processed
+Finance → timeout → moved to failed
+Loop continues
+```
+
+No file is lost.
+
+---
+
+# Important improvement (recommended)
+
+Your `notifyAndWaitForCompletion()` throws **IllegalStateException** on timeout.
+
+That’s fine — but **never let it propagate outside `zipEncryptUploadFiles()`**, otherwise it will abort the batch step.
+
+So your method should **not rethrow** after moving to failed.
+
+---
+
+# Final flow after fix
+
+Inside `zipEncryptUploadFiles()`:
+
+```
+zip
+encrypt
+upload
+try
+    notify CFT
+    move → processed
+catch
+    move → failed
+continue
+```
+
+Batch continues safely.
+
+---
+
+# One small bug I noticed in your code
+
+You log:
+
+```java
+log.info("XML file Successfully uploaded to COS: {}", key);
+```
+
+But you are uploading a **.zip.pgp**, not an XML.
+
+Better:
+
+```java
+log.info("Encrypted package uploaded to COS: {}", key);
+```
+
+Just avoids confusion in operations.
+
+---
+
+# Result
+
+Your batch becomes **failure-tolerant**:
+
+* timeouts handled per file
+* no lost files
+* no need for bundle objects
+* retry batch can simply read `/failed`
+
+---
+
+✅ If you'd like, I can also show **one small 5-line improvement to your CFT polling logic** that will reduce the number of timeouts you are seeing right now.
