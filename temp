@@ -35,29 +35,6 @@ Features:
 
 Steps:
 
-1. Download **ACS** from IBM.
-2. Launch **Run SQL Scripts**.
-3. Connect using the same credentials as the Spring app.
-4. Run something like:
-
-```sql
-SELECT * FROM QSYS2.SYSTABLES FETCH FIRST 1 ROW ONLY
-```
-
-If that works → DB connection is fine.
-
-Then test data area access using:
-
-```sql
-SELECT * 
-FROM QSYS2.DATA_AREA_INFO
-WHERE DATA_AREA_NAME='YOUR_DATA_AREA'
-```
-
-If this fails → it confirms your suspicion about **data area access**.
-
----
-
 # 2. Test with a Simple Java Program (Same Driver as Spring)
 
 If the Spring app uses the **IBM Toolbox JDBC driver (`jt400.jar`)**, replicate the exact driver behavior.
