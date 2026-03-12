@@ -1,163 +1,230 @@
-Got it 👍 — your requirement is **different from the earlier bundle suggestion**.
+Yes — using a **standalone test program** is actually one of the best ways to isolate where the failure occurs. Since your setup involves **AS/400 (IBM i) + Spring + WebSphere**, and it **works in VDI but not directly on macOS**, a small standalone test will help determine whether the issue is:
 
-You want **independent failure handling**, meaning:
+* network / firewall
+* IBM i driver behavior
+* authentication
+* library / data area access
+* environment differences between VDI and macOS
 
-| Scenario                       | Result                              |
-| ------------------------------ | ----------------------------------- |
-| Miles success, Finance timeout | Miles → processed, Finance → failed |
-| Finance success, Miles timeout | Finance → processed, Miles → failed |
-| Both timeout                   | both → failed                       |
-| Both success                   | both → processed                    |
-
-So **each file is responsible for its own lifecycle**.
-
-The problem you described earlier (“finance lost”) happens because **the exception aborts the loop before finance cleanup runs**.
-
-The fix is simply: **handle failure inside `zipEncryptUploadFiles()` instead of letting the exception escape**.
+Below are the most useful ways to test it.
 
 ---
 
-# The clean fix (minimal changes)
+# 1. Best Quick Test: IBM i ACS (Access Client Solutions)
 
-Wrap the **CFT notify + move logic** in a `try/catch` and move the failed file to `/failed`.
+![Image](https://developer.ibm.com/developer/default/articles/i-access_client_solutions/images/Figure1.jpg)
 
-### Change this part of your code
+![Image](https://www.mcpressonline.com/images/stories/ArticleImages/2017/031717RafaelFigure1_compressed.jpg)
 
-Current:
+![Image](https://www.ibm.com/support/pages/system/files/inline-images/image-20190402093150-4.png)
 
-```java
-cftApiClient.notifyAndWaitForCompletion(key, encryptedFileName, maxWait);
+![Image](https://www.ibm.com/support/pages/system/files/inline-images/image-20190402145933-5.png)
 
-addProcessedKey(stepExecution, encryptedFileName);
+The easiest standalone tool is **IBM i Access Client Solutions (ACS)**.
 
-if (moveEnabled) {
-    moveToProcessed(encryptedFileName, key);
-}
+Features:
+
+* runs on **macOS**
+* native support for **IBM i / AS400**
+* can test:
+
+  * database connectivity
+  * library access
+  * commands
+  * data areas
+
+Steps:
+
+1. Download **ACS** from IBM.
+2. Launch **Run SQL Scripts**.
+3. Connect using the same credentials as the Spring app.
+4. Run something like:
+
+```sql
+SELECT * FROM QSYS2.SYSTABLES FETCH FIRST 1 ROW ONLY
 ```
 
+If that works → DB connection is fine.
+
+Then test data area access using:
+
+```sql
+SELECT * 
+FROM QSYS2.DATA_AREA_INFO
+WHERE DATA_AREA_NAME='YOUR_DATA_AREA'
+```
+
+If this fails → it confirms your suspicion about **data area access**.
+
 ---
 
-### Replace with
+# 2. Test with a Simple Java Program (Same Driver as Spring)
+
+If the Spring app uses the **IBM Toolbox JDBC driver (`jt400.jar`)**, replicate the exact driver behavior.
+
+Example minimal program:
 
 ```java
-try {
+import java.sql.*;
 
-    cftApiClient.notifyAndWaitForCompletion(key, encryptedFileName, maxWait);
+public class TestAS400 {
 
-    addProcessedKey(stepExecution, encryptedFileName);
+    public static void main(String[] args) throws Exception {
 
-    if (moveEnabled) {
-        moveToProcessed(encryptedFileName, key);
+        String url = "jdbc:as400://HOSTNAME";
+        String user = "USER";
+        String password = "PASSWORD";
+
+        Connection conn = DriverManager.getConnection(url, user, password);
+
+        System.out.println("Connected!");
+
+        Statement stmt = conn.createStatement();
+        ResultSet rs = stmt.executeQuery(
+            "SELECT * FROM QSYS2.SYSTABLES FETCH FIRST 1 ROW ONLY"
+        );
+
+        while(rs.next()){
+            System.out.println("Success reading table");
+        }
+
+        conn.close();
     }
-
-} catch (Exception ex) {
-
-    log.error("CFT transfer failed for file {}", encryptedFileName, ex);
-
-    moveToFailed(encryptedFileName, key);
-
 }
 ```
 
+Run it on **macOS** with the same driver used by WebSphere.
+
+If this fails while VDI works → the issue is **environmental**.
+
 ---
 
-# Add a new helper
+# 3. Test Direct Data Area Access (Important)
+
+Since you suspect **data area issues**, test using the **JT400 API** instead of JDBC.
+
+Example:
 
 ```java
-private void moveToFailed(String encryptedFileName, String key) {
+import com.ibm.as400.access.*;
 
-    try {
+public class DataAreaTest {
 
-        String failedKey = "failed/" + encryptedFileName;
+    public static void main(String[] args) throws Exception {
 
-        cosStorageService.moveFile(key, failedKey);
+        AS400 system = new AS400("HOST", "USER", "PASSWORD");
 
-        log.info("Moved outgoing COS file {} to failed location {}", key, failedKey);
+        CharacterDataArea area =
+            new CharacterDataArea(system, "/QSYS.LIB/LIBRARY.LIB/DAREA.DTAARA");
 
-    } catch (Exception e) {
+        String value = area.read();
 
-        log.warn("Failed moving {} to failed location: {}", key, e.getMessage());
-
+        System.out.println("Value: " + value);
     }
-
 }
 ```
 
----
-
-# Why this works
-
-Your loop in `findTargetAndPgpUpload()` continues:
-
-```
-Miles → processed
-Finance → timeout → moved to failed
-Loop continues
-```
-
-No file is lost.
+If this fails while JDBC works → the issue is **object access**, not DB.
 
 ---
 
-# Important improvement (recommended)
+# 4. Quick Network Test (Very Important)
 
-Your `notifyAndWaitForCompletion()` throws **IllegalStateException** on timeout.
+VDI environments often have **internal routing**.
 
-That’s fine — but **never let it propagate outside `zipEncryptUploadFiles()`**, otherwise it will abort the batch step.
+From macOS run:
 
-So your method should **not rethrow** after moving to failed.
+```
+nc -zv HOSTNAME 8471
+```
+
+or
+
+```
+telnet HOSTNAME 8471
+```
+
+Important IBM i ports:
+
+| Port | Purpose        |
+| ---- | -------------- |
+| 8471 | database       |
+| 8475 | remote command |
+| 8476 | data queue     |
+| 8470 | signon         |
+
+If these ports fail from mac → it's **network segmentation**.
 
 ---
 
-# Final flow after fix
+# 5. Common Reason It Works in VDI but Not Mac
 
-Inside `zipEncryptUploadFiles()`:
+Typical causes I see during **Citrix decomissions**:
+
+### 1️⃣ Library list not set
+
+VDI sessions often run a login script that sets:
 
 ```
-zip
-encrypt
-upload
-try
-    notify CFT
-    move → processed
-catch
-    move → failed
-continue
+LIBL
 ```
 
-Batch continues safely.
+Without it, the data area path cannot resolve.
+
+Fix:
+
+```
+jdbc:as400://host;naming=system
+```
+
+or specify the library explicitly.
 
 ---
 
-# One small bug I noticed in your code
+### 2️⃣ Host table resolution
 
-You log:
+VDI may resolve hostnames internally.
 
-```java
-log.info("XML file Successfully uploaded to COS: {}", key);
-```
-
-But you are uploading a **.zip.pgp**, not an XML.
-
-Better:
-
-```java
-log.info("Encrypted package uploaded to COS: {}", key);
-```
-
-Just avoids confusion in operations.
+Test using **IP instead of hostname**.
 
 ---
 
-# Result
+### 3️⃣ Kerberos / SSO
 
-Your batch becomes **failure-tolerant**:
+VDI might pass credentials automatically.
 
-* timeouts handled per file
-* no lost files
-* no need for bundle objects
-* retry batch can simply read `/failed`
+Mac requires explicit authentication.
 
 ---
 
-✅ If you'd like, I can also show **one small 5-line improvement to your CFT polling logic** that will reduce the number of timeouts you are seeing right now.
+### 4️⃣ Firewall segmentation
+
+VDI networks often sit **inside the IBM i VLAN**.
+
+Mac does not.
+
+---
+
+# 6. Best Diagnostic Tool for Your Case
+
+If you want the **fastest answer**:
+
+👉 Use **IBM ACS + Run SQL Scripts**.
+
+It immediately tells you if:
+
+* login works
+* DB works
+* library works
+* data area exists
+
+---
+
+✅ **If you want, paste:**
+
+* your **JDBC URL**
+* the **Spring datasource config**
+* the **data area path**
+* the **exact error**
+
+and I can usually pinpoint the exact cause (AS400 integrations are very predictable once you see the config).
