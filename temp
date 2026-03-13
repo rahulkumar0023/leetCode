@@ -1,207 +1,245 @@
-Yes — using a **standalone test program** is actually one of the best ways to isolate where the failure occurs. Since your setup involves **AS/400 (IBM i) + Spring + WebSphere**, and it **works in VDI but not directly on macOS**, a small standalone test will help determine whether the issue is:
+Great idea 👍 — this is a **clean and safe recovery pattern**:
+Your main batch never retries aggressively, and a **separate retry batch** handles `/failed` items.
 
-* network / firewall
-* IBM i driver behavior
-* authentication
-* library / data area access
-* environment differences between VDI and macOS
-
-Below are the most useful ways to test it.
+Let’s design it so it fits your **existing COS + CFT architecture** with minimal changes.
 
 ---
 
-# 1. Best Quick Test: IBM i ACS (Access Client Solutions)
+# 🎯 Retry Batch Goal
 
-![Image](https://developer.ibm.com/developer/default/articles/i-access_client_solutions/images/Figure1.jpg)
+Periodically:
 
-![Image](https://www.mcpressonline.com/images/stories/ArticleImages/2017/031717RafaelFigure1_compressed.jpg)
+1. Scan COS **`failed/`** directory
+2. Find all **`.zip.pgp`** files
+3. For each file:
 
-![Image](https://www.ibm.com/support/pages/system/files/inline-images/image-20190402093150-4.png)
+   * Call **CFT trigger**
+   * If success → **delete file from failed**
+   * If failure → **leave it for next retry**
 
-![Image](https://www.ibm.com/support/pages/system/files/inline-images/image-20190402145933-5.png)
+No movement to `/processed`.
+`failed/` acts as the **retry queue**.
 
-The easiest standalone tool is **IBM i Access Client Solutions (ACS)**.
+---
 
-Features:
+# 🏗 Recommended Batch Structure (Spring Batch)
 
-* runs on **macOS**
-* native support for **IBM i / AS400**
-* can test:
+Simple **Tasklet Job**.
 
-  * database connectivity
-  * library access
-  * commands
-  * data areas
-
-Steps:
-
-# 2. Test with a Simple Java Program (Same Driver as Spring)
-
-If the Spring app uses the **IBM Toolbox JDBC driver (`jt400.jar`)**, replicate the exact driver behavior.
-
-Example minimal program:
-
-```java
-import java.sql.*;
-
-public class TestAS400 {
-
-    public static void main(String[] args) throws Exception {
-
-        String url = "jdbc:as400://HOSTNAME";
-        String user = "USER";
-        String password = "PASSWORD";
-
-        Connection conn = DriverManager.getConnection(url, user, password);
-
-        System.out.println("Connected!");
-
-        Statement stmt = conn.createStatement();
-        ResultSet rs = stmt.executeQuery(
-            "SELECT * FROM QSYS2.SYSTABLES FETCH FIRST 1 ROW ONLY"
-        );
-
-        while(rs.next()){
-            System.out.println("Success reading table");
-        }
-
-        conn.close();
-    }
-}
+```
+RetryFailedTransfersJob
+        │
+        ▼
+RetryFailedTransfersStep
+        │
+        ▼
+RetryFailedTransfersTasklet
 ```
 
-Run it on **macOS** with the same driver used by WebSphere.
+---
 
-If this fails while VDI works → the issue is **environmental**.
+# 📂 COS Layout
+
+Example:
+
+```
+failed/
+   miles_invoices_20260312.zip.pgp
+   finance_invoices_20260312.zip.pgp
+   miles_invoices_20260313.zip.pgp
+```
 
 ---
 
-# 3. Test Direct Data Area Access (Important)
+# 🧠 Retry Logic
 
-Since you suspect **data area issues**, test using the **JT400 API** instead of JDBC.
+For each file:
+
+```
+CFT notify
+     │
+     ├── success → delete file
+     │
+     └── fail → keep file
+```
+
+So the next retry batch will try again.
+
+---
+
+# 🧩 Tasklet Implementation
 
 Example:
 
 ```java
-import com.ibm.as400.access.*;
+@Component
+@RequiredArgsConstructor
+public class RetryFailedTransfersTasklet implements Tasklet {
 
-public class DataAreaTest {
+    private final CosStorageService cosStorageService;
+    private final CftApiClient cftApiClient;
 
-    public static void main(String[] args) throws Exception {
+    @Value("${retry.failed.prefix:failed/}")
+    private String failedPrefix;
 
-        AS400 system = new AS400("HOST", "USER", "PASSWORD");
+    @Value("${retry.wait.time:30}")
+    private int waitTime;
 
-        CharacterDataArea area =
-            new CharacterDataArea(system, "/QSYS.LIB/LIBRARY.LIB/DAREA.DTAARA");
+    @Override
+    public RepeatStatus execute(StepContribution contribution,
+                                ChunkContext chunkContext) throws Exception {
 
-        String value = area.read();
+        List<String> failedFiles = cosStorageService.listFiles(failedPrefix);
 
-        System.out.println("Value: " + value);
+        for (String key : failedFiles) {
+
+            if (!key.endsWith(".zip.pgp")) {
+                continue;
+            }
+
+            String fileName = key.substring(key.lastIndexOf('/') + 1);
+
+            try {
+
+                log.info("Retrying CFT trigger for {}", fileName);
+
+                Duration wait = Duration.ofSeconds(waitTime);
+
+                cftApiClient.notifyAndWaitForCompletion(key, fileName, wait);
+
+                cosStorageService.deleteFile(key);
+
+                log.info("Retry success. Deleted file from failed: {}", key);
+
+            } catch (Exception ex) {
+
+                log.warn("Retry failed for {}. Keeping file for next retry.", key);
+
+            }
+        }
+
+        return RepeatStatus.FINISHED;
     }
 }
 ```
 
-If this fails while JDBC works → the issue is **object access**, not DB.
+---
+
+# ⚙️ Batch Configuration
+
+```java
+@Bean
+public Job retryFailedTransfersJob(JobRepository jobRepository,
+                                   Step retryFailedTransfersStep) {
+
+    return new JobBuilder("retryFailedTransfersJob", jobRepository)
+            .start(retryFailedTransfersStep)
+            .build();
+}
+
+@Bean
+public Step retryFailedTransfersStep(JobRepository jobRepository,
+                                     PlatformTransactionManager transactionManager,
+                                     RetryFailedTransfersTasklet tasklet) {
+
+    return new StepBuilder("retryFailedTransfersStep", jobRepository)
+            .tasklet(tasklet, transactionManager)
+            .build();
+}
+```
 
 ---
 
-# 4. Quick Network Test (Very Important)
+# 🕒 Scheduling
 
-VDI environments often have **internal routing**.
-
-From macOS run:
+Run every **15–30 minutes**:
 
 ```
-nc -zv HOSTNAME 8471
+retryFailedTransfersJob
 ```
 
-or
+Spring example:
 
+```java
+@Scheduled(cron = "0 */30 * * * *")
+public void retryFailedTransfers() {
+    jobLauncher.run(retryFailedTransfersJob,
+        new JobParametersBuilder()
+            .addLong("timestamp", System.currentTimeMillis())
+            .toJobParameters());
+}
 ```
-telnet HOSTNAME 8471
-```
-
-Important IBM i ports:
-
-| Port | Purpose        |
-| ---- | -------------- |
-| 8471 | database       |
-| 8475 | remote command |
-| 8476 | data queue     |
-| 8470 | signon         |
-
-If these ports fail from mac → it's **network segmentation**.
 
 ---
 
-# 5. Common Reason It Works in VDI but Not Mac
+# 🛡 Safety Protections (Recommended)
 
-Typical causes I see during **Citrix decomissions**:
+### Limit retries per run
 
-### 1️⃣ Library list not set
-
-VDI sessions often run a login script that sets:
+Example:
 
 ```
-LIBL
+maxRetriesPerRun = 50
 ```
 
-Without it, the data area path cannot resolve.
+Prevents retry batch from running forever if thousands accumulate.
 
-Fix:
+---
+
+### Skip very old files
+
+Optional:
 
 ```
-jdbc:as400://host;naming=system
+failed/
+   file.zip.pgp
+   file.retry3.zip.pgp
 ```
 
-or specify the library explicitly.
+You could stop retrying after **N attempts** later.
+
+Not necessary initially.
 
 ---
 
-### 2️⃣ Host table resolution
+# 🧾 Logging Example
 
-VDI may resolve hostnames internally.
+```
+Retrying CFT trigger for miles_invoices_20260312.zip.pgp
+Retry success. Deleted file from failed: failed/miles_invoices_20260312.zip.pgp
 
-Test using **IP instead of hostname**.
+Retrying CFT trigger for finance_invoices_20260313.zip.pgp
+Retry failed for finance_invoices_20260313.zip.pgp. Keeping file.
+```
 
----
-
-### 3️⃣ Kerberos / SSO
-
-VDI might pass credentials automatically.
-
-Mac requires explicit authentication.
+Operations team will love this.
 
 ---
 
-### 4️⃣ Firewall segmentation
+# 🚀 Benefits
 
-VDI networks often sit **inside the IBM i VLAN**.
-
-Mac does not.
-
----
-
-# 6. Best Diagnostic Tool for Your Case
-
-If you want the **fastest answer**:
-
-👉 Use **IBM ACS + Run SQL Scripts**.
-
-It immediately tells you if:
-
-* login works
-* DB works
-* library works
-* data area exists
+✅ No lost files
+✅ Simple retry logic
+✅ No database needed
+✅ COS acts as retry queue
+✅ Works with your existing architecture
 
 ---
 
-✅ **If you want, paste:**
+# ⭐ Optional Improvement (later)
 
-* your **JDBC URL**
-* the **Spring datasource config**
-* the **data area path**
-* the **exact error**
+You can add a **retry metadata suffix**:
 
-and I can usually pinpoint the exact cause (AS400 integrations are very predictable once you see the config).
+```
+failed/miles_invoices.retry2.zip.pgp
+```
+
+So you know how many retries happened.
+
+But start simple first.
+
+---
+
+If you want, I can also show you a **very production-grade improvement** used in financial batch systems:
+
+👉 **retry batches that parallelize retries safely without triggering duplicate CFT transfers**.
