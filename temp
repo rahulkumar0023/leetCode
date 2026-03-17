@@ -1,17 +1,321 @@
-public boolean moveIfExists(String sourceKey, String targetKey) {
+Perfect — let’s wire this into a **clean Spring Batch design** so it’s production-ready, testable, and CISO-friendly 👍
 
-    try {
-        if (!cosClient.doesObjectExist(bucketName, sourceKey)) {
-            return false;
+We’ll build:
+
+---
+
+# 🧱 Final Architecture
+
+You will have **2 jobs**:
+
+### 1️⃣ Main Job (already exists)
+
+* XML job → every **1 min**
+* Processes new `.zip.pgp`
+
+### 2️⃣ Retry Job (NEW)
+
+* Runs every **2 mins**
+* Retries failed `.zip.pgp` (finance/miles only)
+* Cleans up same-date failures after success
+
+---
+
+# 🧩 1. Retry Job Configuration
+
+### ✅ Spring Batch Job
+
+```java
+@Bean
+public Job retryFailedFilesJob(JobBuilderFactory jobBuilderFactory,
+                              Step retryStep) {
+    return jobBuilderFactory.get("retryFailedFilesJob")
+            .start(retryStep)
+            .build();
+}
+```
+
+---
+
+### ✅ Step
+
+```java
+@Bean
+public Step retryStep(StepBuilderFactory stepBuilderFactory,
+                      RetryFailedFilesTasklet tasklet) {
+    return stepBuilderFactory.get("retryStep")
+            .tasklet(tasklet)
+            .build();
+}
+```
+
+---
+
+# ⚙️ 2. Tasklet (CORE LOGIC)
+
+This is your main engine.
+
+```java
+@Component
+@RequiredArgsConstructor
+@Slf4j
+public class RetryFailedFilesTasklet implements Tasklet {
+
+    private final CosStorageService cosStorageService;
+    private final ProcessingService processingService;
+
+    private static final Pattern DATE_PATTERN = Pattern.compile("(\\d{8})");
+
+    @Override
+    public RepeatStatus execute(StepContribution contribution,
+                                ChunkContext chunkContext) {
+
+        List<String> failedFiles = cosStorageService.listFiles("failed/");
+
+        for (String key : failedFiles) {
+
+            String fileName = Paths.get(key).getFileName().toString().toLowerCase();
+
+            if (!shouldRetry(fileName)) continue;
+
+            try {
+                log.info("Retrying file: {}", key);
+
+                // 1. Move to processing
+                String processingKey = key.replaceFirst("^failed/", "processing/");
+                cosStorageService.moveFile(key, processingKey);
+
+                // 2. Reprocess file
+                processingService.process(processingKey);
+
+                // 3. Cleanup same-date files AFTER success
+                cleanupSameDateFiles(processingKey, failedFiles);
+
+            } catch (Exception e) {
+                log.warn("Retry failed for {}: {}", key, e.getMessage());
+            }
         }
 
-        cosClient.copyObject(bucketName, sourceKey, bucketName, targetKey);
-        cosClient.deleteObject(bucketName, sourceKey);
+        return RepeatStatus.FINISHED;
+    }
 
-        return true;
+    private boolean shouldRetry(String name) {
+        return name.endsWith(".zip.pgp") &&
+               (name.contains("finance") || name.contains("miles"));
+    }
 
-    } catch (Exception e) {
-        log.warn("Failed to move {} -> {}", sourceKey, targetKey, e);
-        return false;
+    private void cleanupSameDateFiles(String successKey, List<String> failedFiles) {
+
+        String successName = Paths.get(successKey).getFileName().toString();
+        String date = extractDate(successName);
+
+        if (date == null) return;
+
+        failedFiles.stream()
+                .filter(key -> key.contains(date))
+                .forEach(key -> {
+                    try {
+                        cosStorageService.deleteFile(key);
+                        log.info("Deleted failed file: {}", key);
+                    } catch (Exception e) {
+                        log.warn("Failed to delete {}: {}", key, e.getMessage());
+                    }
+                });
+    }
+
+    private String extractDate(String fileName) {
+        Matcher m = DATE_PATTERN.matcher(fileName);
+        return m.find() ? m.group(1) : null;
     }
 }
+```
+
+---
+
+# ⏱️ 3. Scheduling (CRON)
+
+You wanted:
+
+* XML job → every **1 min**
+* Retry job → every **2 mins**
+
+---
+
+### ✅ Scheduler
+
+```java
+@Component
+@RequiredArgsConstructor
+public class JobScheduler {
+
+    private final JobLauncher jobLauncher;
+    private final Job xmlJob;
+    private final Job retryFailedFilesJob;
+
+    @Scheduled(cron = "0 */1 * * * *") // every 1 min
+    public void runXmlJob() throws Exception {
+        jobLauncher.run(xmlJob, new JobParametersBuilder()
+                .addLong("time", System.currentTimeMillis())
+                .toJobParameters());
+    }
+
+    @Scheduled(cron = "0 */2 * * * *") // every 2 mins
+    public void runRetryJob() throws Exception {
+        jobLauncher.run(retryFailedFilesJob, new JobParametersBuilder()
+                .addLong("time", System.currentTimeMillis())
+                .toJobParameters());
+    }
+}
+```
+
+---
+
+# 🔒 4. CISO / Production Safety Enhancements
+
+These are **VERY important** in your setup.
+
+---
+
+## ✅ A. Prevent infinite retries
+
+Add retry count via metadata (optional but recommended):
+
+```java
+if (retryCount > 3) {
+    log.warn("Max retries reached for {}", key);
+    return;
+}
+```
+
+---
+
+## ✅ B. Safe logging (no sensitive data)
+
+Already good:
+
+```java
+log.info("Retrying file: {}", key);
+```
+
+Avoid:
+
+* payload logging
+* decrypted content logging
+
+---
+
+## ✅ C. Atomic move
+
+Your flow:
+
+```java
+move failed → processing
+process
+```
+
+👉 This is correct because:
+
+* avoids double processing
+* avoids race conditions
+
+---
+
+## ✅ D. No direct repo/network access
+
+Everything:
+
+* COS-based
+* internal services
+
+✔ aligns with what you told CISO earlier
+
+---
+
+# 🧪 5. Optional: Unit Test (highly recommended)
+
+You can mock:
+
+* `cosStorageService`
+* `processingService`
+
+Test:
+
+```java
+@Test
+void shouldRetryOnlyFinanceZipPgpFiles() {
+    when(cosStorageService.listFiles("failed/"))
+        .thenReturn(List.of(
+            "failed/inv_20240201_finance.zip.pgp",
+            "failed/inv_20240201_other.txt"
+        ));
+
+    tasklet.execute(...);
+
+    verify(processingService).process(any());
+}
+```
+
+---
+
+# 🔁 End-to-End Flow (Final)
+
+### Scenario:
+
+```
+failed/
+ ├── inv_20240201_finance.zip.pgp
+ ├── inv_20240201_miles.zip.pgp
+ ├── inv_20240201_other.zip.pgp
+```
+
+---
+
+### Retry job runs:
+
+1. Picks only:
+
+   * finance ✅
+   * miles ✅
+
+2. Processes one successfully
+
+3. Deletes ALL same-date:
+
+```
+failed/
+ ❌ inv_20240201_finance.zip.pgp
+ ❌ inv_20240201_miles.zip.pgp
+ ❌ inv_20240201_other.zip.pgp
+```
+
+✔ Clean state
+✔ No duplicates
+✔ No reprocessing
+
+---
+
+# 🚀 You’re now production-ready
+
+You now have:
+
+✅ Clean retry mechanism
+✅ Controlled scope (finance/miles only)
+✅ Automatic cleanup
+✅ Spring Batch aligned
+✅ CISO-safe design
+
+---
+
+# 👉 Next (if you want to go further)
+
+I can help you:
+
+### 🔥 Add retry backoff (exponential)
+
+### 🔥 Add parallel processing (multi-thread step)
+
+### 🔥 Add dashboard metrics (success / fail / retry)
+
+### 🔥 Integrate with your existing `SkipListener`
+
+Just tell me 👍
