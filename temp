@@ -1,65 +1,24 @@
-Good — this is your **baseline retry logic**, and it’s clean 👍
-Now let’s adapt it **exactly to your new requirements + naming changes**, without breaking anything.
+Perfect — let’s implement this cleanly and completely based on your requirements:
+
+### ✅ What we are adding
+
+1. **Retry only `.zip.pgp` files containing `finance` or `miles`**
+2. **If retry succeeds → delete ALL failed files from same date (including current)**
+3. **Cleanup becomes date-based (not name-based)**
+4. **JUnit tests for all logic**
+5. **Cron update → 23:45**
 
 ---
 
-# 🎯 Your NEW requirements (recap)
+# ✅ 1. Updated Tasklet (Final Production Code)
 
-You said you want:
+Here’s your **clean, Java 8+ version** with:
 
-✅ Retry only files:
-
-* `.zip.pgp`
-* AND name contains **"finance" OR "miles"**
-
-✅ If retry **succeeds**:
-
-* Delete:
-
-  * current `.zip.pgp`
-  * **all other files with same date** in `failed/` (including `.zip`, etc.)
-
-✅ Use Java 8+ (streams, etc.)
-
----
-
-# 🚨 What’s missing in your current logic
-
-Your original code:
+* filtering
+* date-based cleanup
+* safe handling
 
 ```java
-if (!failedKey.endsWith(".zip.pgp")) {
-    continue;
-}
-```
-
-👉 Missing:
-
-* ❌ No filtering for finance/miles
-* ❌ No grouping by date
-* ❌ No cleanup of related files after success
-
----
-
-# ✅ Final Updated Tasklet (FULL CODE)
-
-Here’s the **production-safe version** with everything included:
-
-```java
-package com.yourcompany.batch.retry;
-
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.batch.core.StepContribution;
-import org.springframework.batch.core.scope.context.ChunkContext;
-import org.springframework.batch.core.step.tasklet.Tasklet;
-import org.springframework.batch.repeat.RepeatStatus;
-
-import java.nio.file.Paths;
-import java.time.Duration;
-import java.util.List;
-import java.util.stream.Collectors;
-
 @Slf4j
 @RequiredArgsConstructor
 public class RetryFailedTransfersTasklet implements Tasklet {
@@ -78,216 +37,245 @@ public class RetryFailedTransfersTasklet implements Tasklet {
 
         List<String> failedFiles = cosStorageService.listFiles(FAILED_PREFIX);
 
-        // ✅ Filter only relevant retry candidates
-        List<String> retryCandidates = failedFiles.stream()
-                .filter(key -> key.endsWith(".zip.pgp"))
-                .filter(key -> {
-                    String name = Paths.get(key).getFileName().toString().toLowerCase();
-                    return name.contains("finance") || name.contains("miles");
-                })
-                .collect(Collectors.toList());
-
-        for (String failedKey : retryCandidates) {
-
-            String retryKey = failedKey.replaceFirst(FAILED_PREFIX, RETRYING_PREFIX);
-
-            boolean claimed = cosStorageService.moveIfExists(failedKey, retryKey);
-
-            if (!claimed) {
-                continue;
-            }
-
-            try {
-
-                String fileName = Paths.get(retryKey).getFileName().toString();
-
-                log.info("Retrying transfer for {}", fileName);
-
-                cftApiClient.notifyAndWaitForCompletion(
-                        retryKey,
-                        fileName,
-                        Duration.ofSeconds(30)
-                );
-
-                // ✅ SUCCESS → cleanup all related files
-                cleanupRelatedFailedFiles(failedFiles, failedKey);
-
-                // delete retry file
-                cosStorageService.deleteFile(retryKey);
-
-                log.info("Retry successful for {}", fileName);
-
-            } catch (Exception ex) {
-
-                log.warn("Retry failed for {}", retryKey, ex);
-
-                String failedAgain = retryKey.replaceFirst(RETRYING_PREFIX, FAILED_PREFIX);
-
-                cosStorageService.moveFile(retryKey, failedAgain);
-            }
-        }
+        failedFiles.stream()
+                .filter(this::isEligibleFile)
+                .forEach(this::processRetry);
 
         log.info("Retry job finished");
 
         return RepeatStatus.FINISHED;
     }
 
-    /**
-     * Delete all files with same "date/base" in failed folder
-     */
-    private void cleanupRelatedFailedFiles(List<String> allFailedFiles, String originalFailedKey) {
+    private boolean isEligibleFile(String key) {
+        String lower = key.toLowerCase();
+        return lower.endsWith(".zip.pgp")
+                && (lower.contains("finance") || lower.contains("miles"));
+    }
 
-        String originalName = Paths.get(originalFailedKey).getFileName().toString();
+    private void processRetry(String failedKey) {
 
-        // Example: finance_20240101.zip.pgp → finance_20240101
-        String baseName = extractBaseName(originalName);
+        String retryKey = failedKey.replaceFirst(FAILED_PREFIX, RETRYING_PREFIX);
 
-        List<String> relatedFiles = allFailedFiles.stream()
-                .filter(key -> key.contains(baseName))
-                .collect(Collectors.toList());
+        boolean claimed = cosStorageService.moveIfExists(failedKey, retryKey);
+        if (!claimed) {
+            return;
+        }
 
-        for (String file : relatedFiles) {
-            try {
-                log.info("Deleting related failed file {}", file);
-                cosStorageService.deleteFile(file);
-            } catch (Exception e) {
-                log.warn("Failed to delete {}", file, e);
-            }
+        try {
+            String fileName = Paths.get(retryKey).getFileName().toString();
+
+            log.info("Retrying transfer for {}", fileName);
+
+            cftApiClient.notifyAndWaitForCompletion(
+                    retryKey,
+                    fileName,
+                    Duration.ofSeconds(30)
+            );
+
+            // ✅ SUCCESS → cleanup
+            cleanupByDate(failedKey);
+
+            cosStorageService.deleteFile(retryKey);
+
+            log.info("Retry successful for {}", fileName);
+
+        } catch (Exception ex) {
+
+            log.warn("Retry failed for {}", retryKey, ex);
+
+            String failedAgain = retryKey.replaceFirst(RETRYING_PREFIX, FAILED_PREFIX);
+            cosStorageService.moveFile(retryKey, failedAgain);
         }
     }
 
     /**
-     * Extract base name without extensions
-     * e.g. finance_20240101.zip.pgp → finance_20240101
+     * Cleanup ALL failed files from same date
      */
-    private String extractBaseName(String fileName) {
+    private void cleanupByDate(String referenceKey) {
 
-        if (fileName.endsWith(".zip.pgp")) {
-            return fileName.substring(0, fileName.length() - ".zip.pgp".length());
-        }
+        String date = extractDate(referenceKey);
 
-        if (fileName.endsWith(".zip")) {
-            return fileName.substring(0, fileName.length() - ".zip".length());
-        }
+        List<String> failedFiles = cosStorageService.listFiles(FAILED_PREFIX);
 
-        return fileName;
+        failedFiles.stream()
+                .filter(f -> extractDate(f).equals(date))
+                .forEach(file -> {
+                    log.info("Deleting failed file (same date): {}", file);
+                    cosStorageService.deleteFile(file);
+                });
+    }
+
+    /**
+     * Extract date from filename
+     * Example: finance_20240201_123.zip.pgp → 20240201
+     */
+    private String extractDate(String key) {
+        String fileName = Paths.get(key).getFileName().toString();
+
+        // simple safe split
+        String[] parts = fileName.split("_");
+
+        return parts.length > 1 ? parts[1] : "UNKNOWN";
     }
 }
 ```
 
 ---
 
-# 🧠 Key Improvements Explained
+# ✅ 2. JUnit Test Class
 
-## ✅ 1. Smart filtering (Java 8 stream)
+Covers:
 
-```java
-.filter(key -> key.endsWith(".zip.pgp"))
-.filter(key -> name.contains("finance") || name.contains("miles"))
-```
-
-✔ Only retry relevant business files
-✔ Avoid unnecessary retries
-
----
-
-## ✅ 2. Safe cleanup logic
+* filtering logic
+* success cleanup
+* retry failure
+* date grouping
 
 ```java
-cleanupRelatedFailedFiles(...)
+@ExtendWith(MockitoExtension.class)
+class RetryFailedTransfersTaskletTest {
+
+    @Mock
+    private CosStorageService cosStorageService;
+
+    @Mock
+    private CftApiClient cftApiClient;
+
+    @InjectMocks
+    private RetryFailedTransfersTasklet tasklet;
+
+    @Test
+    void shouldRetryOnlyFinanceAndMilesZipPgpFiles() throws Exception {
+
+        List<String> files = List.of(
+                "failed/finance_20240101_a.zip.pgp",
+                "failed/miles_20240101_b.zip.pgp",
+                "failed/other_20240101_c.zip.pgp",
+                "failed/finance_20240101.txt"
+        );
+
+        when(cosStorageService.listFiles("failed/")).thenReturn(files);
+        when(cosStorageService.moveIfExists(any(), any())).thenReturn(true);
+
+        tasklet.execute(null, null);
+
+        verify(cftApiClient, times(2))
+                .notifyAndWaitForCompletion(any(), any(), any());
+    }
+
+    @Test
+    void shouldCleanupFilesWithSameDateOnSuccess() throws Exception {
+
+        List<String> files = List.of(
+                "failed/finance_20240101_a.zip.pgp",
+                "failed/miles_20240101_b.zip.pgp",
+                "failed/finance_20240102_c.zip.pgp"
+        );
+
+        when(cosStorageService.listFiles("failed/"))
+                .thenReturn(files); // first call
+        when(cosStorageService.moveIfExists(any(), any())).thenReturn(true);
+
+        tasklet.execute(null, null);
+
+        verify(cosStorageService).deleteFile("failed/finance_20240101_a.zip.pgp");
+        verify(cosStorageService).deleteFile("failed/miles_20240101_b.zip.pgp");
+    }
+
+    @Test
+    void shouldMoveBackToFailedOnRetryFailure() throws Exception {
+
+        List<String> files = List.of("failed/finance_20240101_a.zip.pgp");
+
+        when(cosStorageService.listFiles("failed/")).thenReturn(files);
+        when(cosStorageService.moveIfExists(any(), any())).thenReturn(true);
+
+        doThrow(new RuntimeException("CFT error"))
+                .when(cftApiClient)
+                .notifyAndWaitForCompletion(any(), any(), any());
+
+        tasklet.execute(null, null);
+
+        verify(cosStorageService)
+                .moveFile(contains("retrying/"), contains("failed/"));
+    }
+
+    @Test
+    void shouldSkipIfMoveNotClaimed() throws Exception {
+
+        List<String> files = List.of("failed/finance_20240101_a.zip.pgp");
+
+        when(cosStorageService.listFiles("failed/")).thenReturn(files);
+        when(cosStorageService.moveIfExists(any(), any())).thenReturn(false);
+
+        tasklet.execute(null, null);
+
+        verifyNoInteractions(cftApiClient);
+    }
+}
 ```
-
-✔ Deletes:
-
-* `.zip.pgp`
-* `.zip`
-* any same-date duplicates
-
-✔ Keeps logic **isolated + testable**
 
 ---
 
-## ✅ 3. Base name extraction (CRITICAL)
+# ✅ 3. Cron Update (23:45)
+
+In Spring:
 
 ```java
-finance_20240101.zip.pgp → finance_20240101
+@Scheduled(cron = "0 45 23 * * *")
 ```
 
-👉 This ensures:
-
-* correct grouping
-* no accidental deletions
+✔ Runs every day at **23:45**
 
 ---
 
-## ⚠️ Important Edge Case (READ THIS)
+# ✅ 4. Behavior Summary (Final)
 
-Current logic:
+### Retry logic
 
-```java
-.filter(key -> key.contains(baseName))
-```
+* Only `.zip.pgp`
+* Only `finance` or `miles`
 
-👉 This works if your naming is consistent:
+### On success
 
-```
-finance_20240101.zip
-finance_20240101.zip.pgp
-```
+* Delete retry file
+* Delete ALL failed files with same date
 
----
+### On failure
 
-### ⚠️ If your naming changes (because of XML rename)
+* Move back to `failed/`
 
-Then you MUST ensure:
+### Cleanup strategy
 
-👉 ZIP/PGP names still share same base
-
-Otherwise cleanup will fail.
+* Based on **date extracted from filename**
+* NOT name-based anymore
 
 ---
 
-# ✅ Optional (Stronger matching - safer)
+# ✅ 5. Important Production Notes
 
-If you want stricter match:
+* Your date extraction assumes format:
 
-```java
-.filter(key -> Paths.get(key).getFileName().toString().startsWith(baseName))
-```
+  ```
+  name_YYYYMMDD_*.zip.pgp
+  ```
 
----
+  👉 If format differs, we should harden this (regex or metadata)
 
-# 🧪 What you should test
+* Cleanup is **aggressive**:
 
-1. ✅ Only finance/miles retried
-2. ✅ Non-matching files ignored
-3. ✅ Successful retry deletes:
-
-   * `.zip.pgp`
-   * `.zip`
-4. ✅ Failed retry moves back correctly
-5. ✅ No accidental deletion
+  * deletes all same-date files
+  * confirm this matches business expectation
 
 ---
 
-# 🧠 Final verdict
+# 🚀 Optional Next Step (Highly Recommended)
 
-👉 Your original logic was **correct baseline**
-👉 This version makes it:
+I can also help you:
 
-✔ Business-aware (finance/miles)
-✔ Safe cleanup
-✔ Future-proof for your XML rename change
-✔ Java 8 clean
-
----
-
-# 🚀 If you want next
-
-I can also:
-
-✅ Add **JUnit test class for this tasklet**
-✅ Make cleanup **date-based instead of name-based** (more robust)
-✅ Align it with your **COS folder structure (xml_failed, etc.)**
+* ✅ Make date extraction **regex-safe**
+* ✅ Add **idempotency (avoid double deletes)**
+* ✅ Add **parallel retry (multi-threaded)**
+* ✅ Add **metrics/logging for observability**
 
 Just tell me 👍
