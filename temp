@@ -1,40 +1,46 @@
-Perfect — let’s add **clean, production-quality JUnit tests** for your `RetryFailedTransfersTasklet`.
+package com.bnpp.pf.einvoice.connect.batch.tasklet;
 
-These will:
-
-✅ Mock `CosStorageService`
-✅ Mock `CftApiClient`
-✅ Cover success + failure + filtering + cleanup
-✅ Avoid Mockito pitfalls (`eq()` mix etc.)
-✅ Be easy to extend
-
----
-
-# ✅ ✅ FULL JUnit: `RetryFailedTransfersTaskletTest`
-
-```java
-package com.yourcompany.batch.retry;
-
+import com.bnpp.pf.einvoice.connect.cos.service.CosStorageService;
+import com.bnpp.pf.einvoice.connect.notifycft.CFTApiClient;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.*;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.batch.core.StepContribution;
 import org.springframework.batch.core.scope.context.ChunkContext;
+import org.springframework.batch.repeat.RepeatStatus;
 
 import java.time.Duration;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
-import static org.mockito.Mockito.*;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
-@ExtendWith(org.mockito.junit.jupiter.MockitoExtension.class)
+@ExtendWith(MockitoExtension.class)
 class RetryFailedTransfersTaskletTest {
+
+    private static final String FAILED_PREFIX = "failed/";
+    private static final String RETRYING_PREFIX = "retrying/";
 
     @Mock
     private CosStorageService cosStorageService;
 
     @Mock
-    private CftApiClient cftApiClient;
+    private CFTApiClient cftApiClient;
 
     @Mock
     private StepContribution contribution;
@@ -45,176 +51,191 @@ class RetryFailedTransfersTaskletTest {
     @InjectMocks
     private RetryFailedTransfersTasklet tasklet;
 
-    private static final String FAILED_PREFIX = "failed/";
-    private static final String RETRYING_PREFIX = "retrying/";
-
     @BeforeEach
-    void setup() {
+    void setUp() {
         tasklet = new RetryFailedTransfersTasklet(cosStorageService, cftApiClient);
     }
 
-    // =========================================================
-    // ✅ TEST 1: SUCCESS FLOW
-    // =========================================================
-
     @Test
     void shouldRetryAndCleanupOnSuccess() throws Exception {
+        String retryCandidate = "failed/finance_20240101.zip.pgp";
+        String relatedZip = "failed/finance_20240101.zip";
+        String relatedMiles = "failed/miles_20240101.zip.pgp";
+        String otherDate = "failed/finance_20240102.zip.pgp";
 
-        String file1 = "failed/finance_20240101.zip.pgp";
-        String file2 = "failed/finance_20240101_other.zip.pgp";
+        List<String> failedFiles = Arrays.asList(
+                retryCandidate,
+                relatedZip,
+                relatedMiles,
+                otherDate
+        );
 
-        when(cosStorageService.listFiles(FAILED_PREFIX))
-                .thenReturn(List.of(file1, file2));
-
-        when(cosStorageService.moveIfExists(eq(file1), anyString()))
+        when(cosStorageService.listKeys(FAILED_PREFIX)).thenReturn(failedFiles);
+        when(cosStorageService.moveIfExists(eq(retryCandidate), eq("retrying/finance_20240101.zip.pgp")))
                 .thenReturn(true);
 
-        // CFT succeeds (no exception)
         doNothing().when(cftApiClient)
-                .notifyAndWaitForCompletion(anyString(), anyString(), any(Duration.class));
+                .notifyAndWaitForCompletion(
+                        eq("retrying/finance_20240101.zip.pgp"),
+                        eq("finance_20240101.zip.pgp"),
+                        any(Duration.class)
+                );
 
-        tasklet.execute(contribution, chunkContext);
+        RepeatStatus result = tasklet.execute(contribution, chunkContext);
 
-        // ✅ verify retry triggered
-        verify(cftApiClient, times(1))
-                .notifyAndWaitForCompletion(anyString(), anyString(), any(Duration.class));
+        assertThat(result).isEqualTo(RepeatStatus.FINISHED);
 
-        // ✅ verify cleanup (both files deleted)
-        verify(cosStorageService, atLeastOnce()).deleteFile(file1);
-        verify(cosStorageService, atLeastOnce()).deleteFile(file2);
+        verify(cftApiClient)
+                .notifyAndWaitForCompletion(
+                        eq("retrying/finance_20240101.zip.pgp"),
+                        eq("finance_20240101.zip.pgp"),
+                        any(Duration.class)
+                );
+
+        verify(cosStorageService).deleteFile("failed/finance_20240101.zip.pgp");
+        verify(cosStorageService).deleteFile("failed/finance_20240101.zip");
+        verify(cosStorageService).deleteFile("failed/miles_20240101.zip.pgp");
+        verify(cosStorageService, never()).deleteFile("failed/finance_20240102.zip.pgp");
+
+        verify(cosStorageService).deleteFile("retrying/finance_20240101.zip.pgp");
+        verify(cosStorageService, never()).moveFile(anyString(), anyString());
     }
-
-    // =========================================================
-    // ❌ TEST 2: FAILURE FLOW (should NOT delete)
-    // =========================================================
 
     @Test
     void shouldMoveBackToFailedOnCftFailure() throws Exception {
+        String failedKey = "failed/miles_20240101.zip.pgp";
+        String retryKey = "retrying/miles_20240101.zip.pgp";
 
-        String file = "failed/miles_20240101.zip.pgp";
-
-        when(cosStorageService.listFiles(FAILED_PREFIX))
-                .thenReturn(List.of(file));
-
-        when(cosStorageService.moveIfExists(eq(file), anyString()))
-                .thenReturn(true);
+        when(cosStorageService.listKeys(FAILED_PREFIX)).thenReturn(Collections.singletonList(failedKey));
+        when(cosStorageService.moveIfExists(eq(failedKey), eq(retryKey))).thenReturn(true);
 
         doThrow(new RuntimeException("CFT failed"))
                 .when(cftApiClient)
-                .notifyAndWaitForCompletion(anyString(), anyString(), any(Duration.class));
+                .notifyAndWaitForCompletion(
+                        eq(retryKey),
+                        eq("miles_20240101.zip.pgp"),
+                        any(Duration.class)
+                );
 
-        tasklet.execute(contribution, chunkContext);
+        RepeatStatus result = tasklet.execute(contribution, chunkContext);
 
-        // ✅ should NOT delete
+        assertThat(result).isEqualTo(RepeatStatus.FINISHED);
+
+        verify(cftApiClient)
+                .notifyAndWaitForCompletion(
+                        eq(retryKey),
+                        eq("miles_20240101.zip.pgp"),
+                        any(Duration.class)
+                );
+
+        verify(cosStorageService).moveFile(retryKey, failedKey);
         verify(cosStorageService, never()).deleteFile(anyString());
-
-        // ✅ should move back to failed
-        verify(cosStorageService, times(1))
-                .moveFile(contains(RETRYING_PREFIX), contains(FAILED_PREFIX));
     }
 
-    // =========================================================
-    // 🚫 TEST 3: IGNORE NON MATCHING FILES
-    // =========================================================
-
     @Test
-    void shouldIgnoreNonZipOrNonMatchingFiles() throws Exception {
+    void shouldIgnoreNonZipPgpFiles() throws Exception {
+        List<String> failedFiles = Arrays.asList(
+                "failed/finance_20240101.zip",
+                "failed/miles_20240101.xml",
+                "failed/miles_20240101.pdf"
+        );
 
-        String invalid1 = "failed/test.txt";
-        String invalid2 = "failed/random_20240101.zip.pgp"; // no finance/miles
+        when(cosStorageService.listKeys(FAILED_PREFIX)).thenReturn(failedFiles);
 
-        when(cosStorageService.listFiles(FAILED_PREFIX))
-                .thenReturn(List.of(invalid1, invalid2));
+        RepeatStatus result = tasklet.execute(contribution, chunkContext);
 
-        tasklet.execute(contribution, chunkContext);
+        assertThat(result).isEqualTo(RepeatStatus.FINISHED);
 
         verifyNoInteractions(cftApiClient);
         verify(cosStorageService, never()).moveIfExists(anyString(), anyString());
+        verify(cosStorageService, never()).moveFile(anyString(), anyString());
+        verify(cosStorageService, never()).deleteFile(anyString());
     }
 
-    // =========================================================
-    // ⚠️ TEST 4: SKIP FILE WITH NO DATE
-    // =========================================================
+    @Test
+    void shouldIgnoreZipPgpFilesWithoutFinanceOrMilesInName() throws Exception {
+        List<String> failedFiles = Arrays.asList(
+                "failed/random_20240101.zip.pgp",
+                "failed/generix_20240101.zip.pgp"
+        );
+
+        when(cosStorageService.listKeys(FAILED_PREFIX)).thenReturn(failedFiles);
+
+        RepeatStatus result = tasklet.execute(contribution, chunkContext);
+
+        assertThat(result).isEqualTo(RepeatStatus.FINISHED);
+
+        verifyNoInteractions(cftApiClient);
+        verify(cosStorageService, never()).moveIfExists(anyString(), anyString());
+        verify(cosStorageService, never()).moveFile(anyString(), anyString());
+        verify(cosStorageService, never()).deleteFile(anyString());
+    }
 
     @Test
     void shouldSkipFileWithoutDate() throws Exception {
+        String noDateFile = "failed/finance_invalid.zip.pgp";
 
-        String file = "failed/finance_file_without_date.zip.pgp";
+        when(cosStorageService.listKeys(FAILED_PREFIX)).thenReturn(Collections.singletonList(noDateFile));
 
-        when(cosStorageService.listFiles(FAILED_PREFIX))
-                .thenReturn(List.of(file));
+        RepeatStatus result = tasklet.execute(contribution, chunkContext);
 
-        tasklet.execute(contribution, chunkContext);
+        assertThat(result).isEqualTo(RepeatStatus.FINISHED);
 
         verifyNoInteractions(cftApiClient);
+        verify(cosStorageService, never()).moveIfExists(anyString(), anyString());
+        verify(cosStorageService, never()).moveFile(anyString(), anyString());
+        verify(cosStorageService, never()).deleteFile(anyString());
     }
-
-    // =========================================================
-    // 🔁 TEST 5: SKIP IF NOT CLAIMED
-    // =========================================================
 
     @Test
     void shouldSkipIfFileNotClaimed() throws Exception {
+        String failedKey = "failed/finance_20240101.zip.pgp";
+        String retryKey = "retrying/finance_20240101.zip.pgp";
 
-        String file = "failed/finance_20240101.zip.pgp";
+        when(cosStorageService.listKeys(FAILED_PREFIX)).thenReturn(Collections.singletonList(failedKey));
+        when(cosStorageService.moveIfExists(eq(failedKey), eq(retryKey))).thenReturn(false);
 
-        when(cosStorageService.listFiles(FAILED_PREFIX))
-                .thenReturn(List.of(file));
+        RepeatStatus result = tasklet.execute(contribution, chunkContext);
 
-        when(cosStorageService.moveIfExists(eq(file), anyString()))
-                .thenReturn(false); // not claimed
-
-        tasklet.execute(contribution, chunkContext);
+        assertThat(result).isEqualTo(RepeatStatus.FINISHED);
 
         verifyNoInteractions(cftApiClient);
+        verify(cosStorageService, never()).moveFile(anyString(), anyString());
+        verify(cosStorageService, never()).deleteFile(anyString());
+    }
+
+    @Test
+    void shouldCleanupOnlySameDateFilesOnSuccess() throws Exception {
+        String retryCandidate = "failed/finance_20240317.zip.pgp";
+        String sameDateZip = "failed/miles_20240317.zip";
+        String sameDateOther = "failed/finance_20240317_extra.xml";
+        String differentDate = "failed/miles_20240318.zip.pgp";
+
+        when(cosStorageService.listKeys(FAILED_PREFIX)).thenReturn(Arrays.asList(
+                retryCandidate,
+                sameDateZip,
+                sameDateOther,
+                differentDate
+        ));
+        when(cosStorageService.moveIfExists(
+                eq(retryCandidate),
+                eq("retrying/finance_20240317.zip.pgp")
+        )).thenReturn(true);
+
+        doNothing().when(cftApiClient)
+                .notifyAndWaitForCompletion(
+                        eq("retrying/finance_20240317.zip.pgp"),
+                        eq("finance_20240317.zip.pgp"),
+                        any(Duration.class)
+                );
+
+        RepeatStatus result = tasklet.execute(contribution, chunkContext);
+
+        assertThat(result).isEqualTo(RepeatStatus.FINISHED);
+
+        verify(cosStorageService).deleteFile("failed/finance_20240317.zip.pgp");
+        verify(cosStorageService).deleteFile("failed/miles_20240317.zip");
+        verify(cosStorageService).deleteFile("failed/finance_20240317_extra.xml");
+        verify(cosStorageService, never()).deleteFile("failed/miles_20240318.zip.pgp");
     }
 }
-```
-
----
-
-# ✅ What these tests guarantee
-
-### ✔ SUCCESS case
-
-* CFT triggered
-* All same-date files deleted
-
----
-
-### ✔ FAILURE case
-
-* File moved back to `failed/`
-* Nothing deleted
-
----
-
-### ✔ FILTERING
-
-* Only `.zip.pgp`
-* Only `finance` / `miles`
-
----
-
-### ✔ SAFETY
-
-* No date → skip
-* Not claimed → skip
-
----
-
-# 🔥 Optional (Recommended Next Step)
-
-If you want **enterprise-grade robustness**, I can extend this with:
-
-### 🚀 Advanced improvements
-
-* Retry limit (avoid infinite loops)
-* Metrics (success/failure count)
-* Parallel processing
-* Logging audit for CISO
-* Feature toggle (enable/disable retry)
-
----
-
-Just tell me what you want next 👍
