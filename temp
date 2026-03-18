@@ -1,24 +1,5 @@
-The new screenshots show the same root issue:
-
-```text
-Skipping file (no date found): miles_invoices_202401011030.zip.pgp
-Skipping file (no date found): finance_invoices_202401011030.zip.pgp
-```
-
-So your tasklet is still **not matching `202401011030`**.
-
-That means one of these is true:
-
-* the regex still does **not include `\\d{12}`**
-* or the class running in tests is still the old compiled version
-
-## Do this exact change
-
-Use this exact code, with the constant at class level:
-
-```java
 private static final Pattern DATE_PATTERN =
-        Pattern.compile("(\\d{4}-\\d{2}-\\d{2}|\\d{12}|\\d{8})");
+        Pattern.compile("(\\d{4}-\\d{2}-\\d{2}|\\d{8,12})");
 
 private Optional<LocalDate> extractDateFromFileName(String fileName) {
     Matcher matcher = DATE_PATTERN.matcher(fileName);
@@ -27,103 +8,16 @@ private Optional<LocalDate> extractDateFromFileName(String fileName) {
         return Optional.empty();
     }
 
-    String dateStr = matcher.group();
+    String token = matcher.group();
 
     try {
-        if (dateStr.length() == 10) {
-            return Optional.of(LocalDate.parse(dateStr));
+        if (token.contains("-")) {
+            return Optional.of(LocalDate.parse(token));
         }
 
-        if (dateStr.length() == 12) {
-            return Optional.of(
-                    LocalDate.parse(dateStr.substring(0, 8), DateTimeFormatter.BASIC_ISO_DATE)
-            );
-        }
-
-        if (dateStr.length() == 8) {
-            return Optional.of(LocalDate.parse(dateStr, DateTimeFormatter.BASIC_ISO_DATE));
-        }
+        String datePart = token.substring(0, 8);
+        return Optional.of(LocalDate.parse(datePart, DateTimeFormatter.BASIC_ISO_DATE));
     } catch (Exception e) {
         return Optional.empty();
     }
-
-    return Optional.empty();
 }
-```
-
-## Add this temporary test
-
-This will prove immediately whether the extractor is fixed:
-
-```java
-@Test
-void shouldExtractDateFromTimestampFileName() {
-    Optional<LocalDate> result =
-            tasklet.extractDateFromFileName("miles_invoices_202401011030.zip.pgp");
-
-    assertThat(result).contains(LocalDate.of(2024, 1, 1));
-}
-```
-
-To run that test, make the method package-private instead of `private` temporarily:
-
-```java
-Optional<LocalDate> extractDateFromFileName(String fileName) {
-```
-
-## Also add one debug line
-
-Inside the method:
-
-```java
-log.info("Matched date token: {}", dateStr);
-```
-
-You should see:
-
-```text
-Matched date token: 202401011030
-```
-
-If you do **not** see that, then the regex in the running code is still old.
-
-## Very likely what’s happening
-
-Your earlier screenshot of the code showed:
-
-```java
-Pattern.compile("(\\d{4}-\\d{2}-\\d{2}|\\d{8})");
-```
-
-That version will never match `202401011030`.
-
-So either:
-
-* the file was not saved
-* tests are running against old compiled code
-* the method was changed in another file, not this one
-
-## After changing it, run this
-
-```bash
-mvn clean test
-```
-
-not just the IDE rerun button.
-
-## Your two failing tests should use these filenames
-
-```java
-"failed/miles_invoices_202401011030.zip.pgp"
-"failed/finance_invoices_202401011030.zip.pgp"
-"failed/finance_invoices_202401021030.zip.pgp"
-```
-
-## Quickest path
-
-1. Replace method exactly as above
-2. Add the extractor unit test
-3. Run `mvn clean test`
-4. Remove the temporary extractor test after it passes
-
-If you paste the exact current `extractDateFromFileName` method as text, I’ll spot the issue immediately.
