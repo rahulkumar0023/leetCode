@@ -1,36 +1,26 @@
-Good — now we’re **very close**. The logs tell us exactly what’s still wrong:
+The new screenshots show the same root issue:
 
 ```text
 Skipping file (no date found): miles_invoices_202401011030.zip.pgp
+Skipping file (no date found): finance_invoices_202401011030.zip.pgp
 ```
 
-👉 That means your **code change for 12-digit timestamps is NOT applied (or not correct)**.
+So your tasklet is still **not matching `202401011030`**.
 
----
+That means one of these is true:
 
-# 🔴 Root cause (confirmed)
+* the regex still does **not include `\\d{12}`**
+* or the class running in tests is still the old compiled version
 
-Even after your changes:
+## Do this exact change
 
-* `202401011030` is still **NOT being parsed**
-* So:
-
-  * `Optional.empty()` → skip
-  * retry never happens
-  * mocks never invoked → tests fail
-
----
-
-# ✅ Fix it properly (FINAL working version)
-
-Replace your entire method with this **exact version**:
+Use this exact code, with the constant at class level:
 
 ```java
 private static final Pattern DATE_PATTERN =
-        Pattern.compile("(\\d{4}-\\d{2}-\\d{2}|\\d{8}|\\d{12})");
+        Pattern.compile("(\\d{4}-\\d{2}-\\d{2}|\\d{12}|\\d{8})");
 
 private Optional<LocalDate> extractDateFromFileName(String fileName) {
-
     Matcher matcher = DATE_PATTERN.matcher(fileName);
 
     if (!matcher.find()) {
@@ -40,147 +30,100 @@ private Optional<LocalDate> extractDateFromFileName(String fileName) {
     String dateStr = matcher.group();
 
     try {
-        // yyyy-MM-dd
-        if (dateStr.contains("-")) {
+        if (dateStr.length() == 10) {
             return Optional.of(LocalDate.parse(dateStr));
         }
 
-        // yyyyMMdd
+        if (dateStr.length() == 12) {
+            return Optional.of(
+                    LocalDate.parse(dateStr.substring(0, 8), DateTimeFormatter.BASIC_ISO_DATE)
+            );
+        }
+
         if (dateStr.length() == 8) {
             return Optional.of(LocalDate.parse(dateStr, DateTimeFormatter.BASIC_ISO_DATE));
         }
-
-        // yyyyMMddHHmm → trim to yyyyMMdd
-        if (dateStr.length() == 12) {
-            String datePart = dateStr.substring(0, 8);
-            return Optional.of(LocalDate.parse(datePart, DateTimeFormatter.BASIC_ISO_DATE));
-        }
-
     } catch (Exception e) {
-        log.warn("Failed to parse date from {}", fileName, e);
+        return Optional.empty();
     }
 
     return Optional.empty();
 }
 ```
 
----
+## Add this temporary test
 
-# ⚠️ Important: what probably went wrong
-
-From your screenshot:
-
-```text
-Skipping file (no date found): miles_invoices_202401011030.zip.pgp
-```
-
-That only happens if:
-
-### ❌ One of these is still true:
-
-1. Regex is still:
+This will prove immediately whether the extractor is fixed:
 
 ```java
-(\\d{4}-\\d{2}-\\d{2}|\\d{8})
+@Test
+void shouldExtractDateFromTimestampFileName() {
+    Optional<LocalDate> result =
+            tasklet.extractDateFromFileName("miles_invoices_202401011030.zip.pgp");
+
+    assertThat(result).contains(LocalDate.of(2024, 1, 1));
+}
 ```
 
-2. OR regex is correct but parsing block does NOT handle `length == 12`
-
----
-
-# ✅ Quick debug (do this once)
-
-Add this log temporarily:
+To run that test, make the method package-private instead of `private` temporarily:
 
 ```java
-log.info("Extracted date string: {}", dateStr);
+Optional<LocalDate> extractDateFromFileName(String fileName) {
 ```
 
-If you don’t see it → regex not matching
-If you see `202401011030` → parsing logic wrong
+## Also add one debug line
 
----
+Inside the method:
 
-# ✅ After fix — what should happen
+```java
+log.info("Matched date token: {}", dateStr);
+```
 
-For:
+You should see:
 
 ```text
-miles_invoices_202401011030.zip.pgp
+Matched date token: 202401011030
 ```
 
-Flow becomes:
+If you do **not** see that, then the regex in the running code is still old.
 
-```
-match → 202401011030
-→ substring → 20240101
-→ LocalDate parsed ✅
-→ retry executed ✅
-→ tests pass ✅
-```
+## Very likely what’s happening
 
----
+Your earlier screenshot of the code showed:
 
-# ✅ Why your tests are failing specifically
-
-### 1. `shouldRetryAndCleanupOnSuccess`
-
-Fails because:
-
-* retry never triggered
-* cleanup never triggered
-
----
-
-### 2. `shouldMoveBackToFailedOnCftFailure`
-
-Fails because:
-
-* CFT never called → exception never thrown → move back never happens
-
----
-
-# 🚀 After this fix
-
-You will see:
-
-```text
-Retrying transfer for miles_invoices_202401011030.zip.pgp
+```java
+Pattern.compile("(\\d{4}-\\d{2}-\\d{2}|\\d{8})");
 ```
 
-instead of:
+That version will never match `202401011030`.
 
-```text
-Skipping file (no date found)
+So either:
+
+* the file was not saved
+* tests are running against old compiled code
+* the method was changed in another file, not this one
+
+## After changing it, run this
+
+```bash
+mvn clean test
 ```
 
----
+not just the IDE rerun button.
 
-# ✅ Final checklist
+## Your two failing tests should use these filenames
 
-Do exactly this:
+```java
+"failed/miles_invoices_202401011030.zip.pgp"
+"failed/finance_invoices_202401011030.zip.pgp"
+"failed/finance_invoices_202401021030.zip.pgp"
+```
 
-1. Replace method with my version
-2. Ensure regex includes `\\d{12}`
-3. Ensure substring logic exists
-4. Clean + rebuild (`mvn clean test`)
-5. Run tests
+## Quickest path
 
----
+1. Replace method exactly as above
+2. Add the extractor unit test
+3. Run `mvn clean test`
+4. Remove the temporary extractor test after it passes
 
-# 💡 If still failing
-
-Then 100% it is one of these:
-
-* old class compiled (IDE cache issue)
-* wrong method version being used
-* regex typo
-
----
-
-If you want, I can:
-✅ Review your exact class (copy-paste)
-✅ Fix only the failing tests (minimal changes)
-✅ Or simplify the whole logic (clean production version)
-
-Just say 👍
+If you paste the exact current `extractDateFromFileName` method as text, I’ll spot the issue immediately.
