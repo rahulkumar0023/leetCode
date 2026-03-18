@@ -1,3 +1,188 @@
+Perfect — now this explains **exactly why everything is failing**.
+
+Your real filenames are:
+
+```
+finance_invoices_202401011030.zip.pgp
+miles_invoices_202401011030.zip.pgp
+```
+
+👉 That is **`yyyyMMddHHmm` (12 digits)**
+👉 But your regex only supports:
+
+* `yyyy-MM-dd`
+* `yyyyMMdd` (8 digits)
+
+So this part fails:
+
+```java
+Optional<LocalDate> fileDateOpt = extractDateFromFileName(fileName);
+```
+
+→ returns `Optional.empty()`
+→ triggers:
+
+```java
+Skipping file (no date found)
+```
+
+→ ALL retry logic is skipped → ALL tests fail
+
+---
+
+# ✅ Fix (this is the real solution)
+
+Update your regex to support timestamps:
+
+### 🔥 Replace this:
+
+```java
+Pattern.compile("(\\d{4}-\\d{2}-\\d{2}|\\d{8})");
+```
+
+### ✅ With this:
+
+```java
+private static final Pattern DATE_PATTERN =
+        Pattern.compile("(\\d{4}-\\d{2}-\\d{2}|\\d{8}|\\d{12})");
+```
+
+---
+
+# ✅ Update parsing logic
+
+Modify your method like this:
+
+```java
+private Optional<LocalDate> extractDateFromFileName(String fileName) {
+    Matcher matcher = DATE_PATTERN.matcher(fileName);
+
+    if (!matcher.find()) {
+        return Optional.empty();
+    }
+
+    String dateStr = matcher.group();
+
+    try {
+        if (dateStr.contains("-")) {
+            return Optional.of(LocalDate.parse(dateStr));
+        }
+
+        if (dateStr.length() == 8) {
+            return Optional.of(LocalDate.parse(dateStr, DateTimeFormatter.BASIC_ISO_DATE));
+        }
+
+        if (dateStr.length() == 12) {
+            // yyyyMMddHHmm → take first 8 chars
+            String datePart = dateStr.substring(0, 8);
+            return Optional.of(LocalDate.parse(datePart, DateTimeFormatter.BASIC_ISO_DATE));
+        }
+
+    } catch (Exception e) {
+        return Optional.empty();
+    }
+
+    return Optional.empty();
+}
+```
+
+---
+
+# ✅ Why this works
+
+For:
+
+```
+finance_invoices_202401011030.zip.pgp
+```
+
+* Regex matches → `202401011030`
+* You extract → `20240101`
+* Parsed → `LocalDate.of(2024, 1, 1)`
+
+✅ Cleanup works
+✅ Retry executes
+✅ Tests pass
+
+---
+
+# ✅ Update your tests (IMPORTANT)
+
+Now your tests should match real filenames:
+
+### ✔ Use:
+
+```java
+"failed/finance_invoices_202401011030.zip.pgp"
+"failed/miles_invoices_202401011030.zip.pgp"
+```
+
+NOT:
+
+```java
+finance_20240101.zip.pgp   ❌ (old assumption)
+```
+
+---
+
+# ✅ Bonus: make your system future-proof
+
+If tomorrow filenames change to:
+
+```
+finance_20240101_1030.zip.pgp
+```
+
+Your regex will break again.
+
+👉 Better version (recommended):
+
+```java
+private static final Pattern DATE_PATTERN =
+        Pattern.compile("(\\d{4}-\\d{2}-\\d{2}|\\d{8})(\\d{4})?");
+```
+
+This supports:
+
+* `20240101`
+* `202401011030`
+
+---
+
+# 🚀 After this change
+
+Your failing tests will fix:
+
+| Error                          | Cause               | Fix             |
+| ------------------------------ | ------------------- | --------------- |
+| `NoSuchElementException`       | Optional empty      | date now parsed |
+| `notifyAndWait... not invoked` | skipped earlier     | retry now runs  |
+| `moveFile not invoked`         | retry never reached | now reached     |
+| `UnnecessaryStubbingException` | stub unused         | now used        |
+
+---
+
+# ⚡ Quick checklist
+
+Do this in order:
+
+1. ✅ Update regex
+2. ✅ Update parsing logic
+3. ✅ Update test filenames
+4. ✅ Run tests
+
+---
+
+If you want, I can:
+
+* Update your **entire Tasklet cleanly (production-ready)**
+* OR fix only your **4 failing test methods exactly**
+
+Just tell me 👍
+
+
+----------
+
 The logs show the real problem now:
 
 ```text
