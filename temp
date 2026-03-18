@@ -1,60 +1,36 @@
-Perfect — now this explains **exactly why everything is failing**.
+Good — now we’re **very close**. The logs tell us exactly what’s still wrong:
 
-Your real filenames are:
-
-```
-finance_invoices_202401011030.zip.pgp
-miles_invoices_202401011030.zip.pgp
+```text
+Skipping file (no date found): miles_invoices_202401011030.zip.pgp
 ```
 
-👉 That is **`yyyyMMddHHmm` (12 digits)**
-👉 But your regex only supports:
-
-* `yyyy-MM-dd`
-* `yyyyMMdd` (8 digits)
-
-So this part fails:
-
-```java
-Optional<LocalDate> fileDateOpt = extractDateFromFileName(fileName);
-```
-
-→ returns `Optional.empty()`
-→ triggers:
-
-```java
-Skipping file (no date found)
-```
-
-→ ALL retry logic is skipped → ALL tests fail
+👉 That means your **code change for 12-digit timestamps is NOT applied (or not correct)**.
 
 ---
 
-# ✅ Fix (this is the real solution)
+# 🔴 Root cause (confirmed)
 
-Update your regex to support timestamps:
+Even after your changes:
 
-### 🔥 Replace this:
+* `202401011030` is still **NOT being parsed**
+* So:
 
-```java
-Pattern.compile("(\\d{4}-\\d{2}-\\d{2}|\\d{8})");
-```
+  * `Optional.empty()` → skip
+  * retry never happens
+  * mocks never invoked → tests fail
 
-### ✅ With this:
+---
+
+# ✅ Fix it properly (FINAL working version)
+
+Replace your entire method with this **exact version**:
 
 ```java
 private static final Pattern DATE_PATTERN =
         Pattern.compile("(\\d{4}-\\d{2}-\\d{2}|\\d{8}|\\d{12})");
-```
 
----
-
-# ✅ Update parsing logic
-
-Modify your method like this:
-
-```java
 private Optional<LocalDate> extractDateFromFileName(String fileName) {
+
     Matcher matcher = DATE_PATTERN.matcher(fileName);
 
     if (!matcher.find()) {
@@ -64,22 +40,24 @@ private Optional<LocalDate> extractDateFromFileName(String fileName) {
     String dateStr = matcher.group();
 
     try {
+        // yyyy-MM-dd
         if (dateStr.contains("-")) {
             return Optional.of(LocalDate.parse(dateStr));
         }
 
+        // yyyyMMdd
         if (dateStr.length() == 8) {
             return Optional.of(LocalDate.parse(dateStr, DateTimeFormatter.BASIC_ISO_DATE));
         }
 
+        // yyyyMMddHHmm → trim to yyyyMMdd
         if (dateStr.length() == 12) {
-            // yyyyMMddHHmm → take first 8 chars
             String datePart = dateStr.substring(0, 8);
             return Optional.of(LocalDate.parse(datePart, DateTimeFormatter.BASIC_ISO_DATE));
         }
 
     } catch (Exception e) {
-        return Optional.empty();
+        log.warn("Failed to parse date from {}", fileName, e);
     }
 
     return Optional.empty();
@@ -88,252 +66,121 @@ private Optional<LocalDate> extractDateFromFileName(String fileName) {
 
 ---
 
-# ✅ Why this works
+# ⚠️ Important: what probably went wrong
+
+From your screenshot:
+
+```text
+Skipping file (no date found): miles_invoices_202401011030.zip.pgp
+```
+
+That only happens if:
+
+### ❌ One of these is still true:
+
+1. Regex is still:
+
+```java
+(\\d{4}-\\d{2}-\\d{2}|\\d{8})
+```
+
+2. OR regex is correct but parsing block does NOT handle `length == 12`
+
+---
+
+# ✅ Quick debug (do this once)
+
+Add this log temporarily:
+
+```java
+log.info("Extracted date string: {}", dateStr);
+```
+
+If you don’t see it → regex not matching
+If you see `202401011030` → parsing logic wrong
+
+---
+
+# ✅ After fix — what should happen
 
 For:
 
-```
-finance_invoices_202401011030.zip.pgp
-```
-
-* Regex matches → `202401011030`
-* You extract → `20240101`
-* Parsed → `LocalDate.of(2024, 1, 1)`
-
-✅ Cleanup works
-✅ Retry executes
-✅ Tests pass
-
----
-
-# ✅ Update your tests (IMPORTANT)
-
-Now your tests should match real filenames:
-
-### ✔ Use:
-
-```java
-"failed/finance_invoices_202401011030.zip.pgp"
-"failed/miles_invoices_202401011030.zip.pgp"
+```text
+miles_invoices_202401011030.zip.pgp
 ```
 
-NOT:
+Flow becomes:
 
-```java
-finance_20240101.zip.pgp   ❌ (old assumption)
+```
+match → 202401011030
+→ substring → 20240101
+→ LocalDate parsed ✅
+→ retry executed ✅
+→ tests pass ✅
 ```
 
 ---
 
-# ✅ Bonus: make your system future-proof
+# ✅ Why your tests are failing specifically
 
-If tomorrow filenames change to:
+### 1. `shouldRetryAndCleanupOnSuccess`
 
-```
-finance_20240101_1030.zip.pgp
-```
+Fails because:
 
-Your regex will break again.
-
-👉 Better version (recommended):
-
-```java
-private static final Pattern DATE_PATTERN =
-        Pattern.compile("(\\d{4}-\\d{2}-\\d{2}|\\d{8})(\\d{4})?");
-```
-
-This supports:
-
-* `20240101`
-* `202401011030`
+* retry never triggered
+* cleanup never triggered
 
 ---
 
-# 🚀 After this change
+### 2. `shouldMoveBackToFailedOnCftFailure`
 
-Your failing tests will fix:
+Fails because:
 
-| Error                          | Cause               | Fix             |
-| ------------------------------ | ------------------- | --------------- |
-| `NoSuchElementException`       | Optional empty      | date now parsed |
-| `notifyAndWait... not invoked` | skipped earlier     | retry now runs  |
-| `moveFile not invoked`         | retry never reached | now reached     |
-| `UnnecessaryStubbingException` | stub unused         | now used        |
+* CFT never called → exception never thrown → move back never happens
 
 ---
 
-# ⚡ Quick checklist
+# 🚀 After this fix
 
-Do this in order:
+You will see:
 
-1. ✅ Update regex
-2. ✅ Update parsing logic
-3. ✅ Update test filenames
-4. ✅ Run tests
+```text
+Retrying transfer for miles_invoices_202401011030.zip.pgp
+```
+
+instead of:
+
+```text
+Skipping file (no date found)
+```
+
+---
+
+# ✅ Final checklist
+
+Do exactly this:
+
+1. Replace method with my version
+2. Ensure regex includes `\\d{12}`
+3. Ensure substring logic exists
+4. Clean + rebuild (`mvn clean test`)
+5. Run tests
+
+---
+
+# 💡 If still failing
+
+Then 100% it is one of these:
+
+* old class compiled (IDE cache issue)
+* wrong method version being used
+* regex typo
 
 ---
 
 If you want, I can:
+✅ Review your exact class (copy-paste)
+✅ Fix only the failing tests (minimal changes)
+✅ Or simplify the whole logic (clean production version)
 
-* Update your **entire Tasklet cleanly (production-ready)**
-* OR fix only your **4 failing test methods exactly**
-
-Just tell me 👍
-
-
-----------
-
-The logs show the real problem now:
-
-```text
-Skipping file (no date found): finance_20240101.zip.pgp
-Skipping file (no date found): miles_20240101.zip.pgp
-```
-
-So the retry path is never reached, which is why:
-
-* `notifyAndWaitForCompletion(...)` is never called
-* `moveFile(retrying -> failed)` is never called
-* the `moveIfExists(...)` stub becomes unnecessary
-
-## Fastest fix
-
-Change the test filenames to use the format your current code is definitely handling:
-
-```java
-failed/finance_2024-01-01.zip.pgp
-failed/miles_2024-01-01.zip.pgp
-failed/finance_2024-01-02.zip.pgp
-```
-
-That should immediately stop the “no date found” skips.
-
-## Why this is happening
-
-Your tasklet is clearly reaching:
-
-```java
-if (!fileDateOpt.isPresent()) {
-    log.warn("Skipping file (no date found): {}", fileName);
-    continue;
-}
-```
-
-So the failure is not Mockito anymore. It is the date extractor.
-
-Even though the regex looks right in the screenshot, the behavior says the compact format `20240101` is not being matched in your current implementation.
-
-## Best practical fix in code
-
-Make the date extraction simpler and more explicit.
-
-Replace your current `extractDateFromFileName(...)` with this:
-
-```java
-private static final Pattern DATE_PATTERN =
-        Pattern.compile("(\\d{4}-\\d{2}-\\d{2}|\\d{8})");
-
-private Optional<LocalDate> extractDateFromFileName(String fileName) {
-    Matcher matcher = DATE_PATTERN.matcher(fileName);
-
-    if (!matcher.find()) {
-        return Optional.empty();
-    }
-
-    String dateStr = matcher.group();
-
-    try {
-        if (dateStr.length() == 10) {
-            return Optional.of(LocalDate.parse(dateStr));
-        }
-
-        if (dateStr.length() == 8) {
-            return Optional.of(LocalDate.parse(dateStr, DateTimeFormatter.BASIC_ISO_DATE));
-        }
-    } catch (Exception e) {
-        return Optional.empty();
-    }
-
-    return Optional.empty();
-}
-```
-
-This removes ambiguity and makes the logic easier to test.
-
-## What to change in your tests right now
-
-Use hyphenated dates first, so you can get green quickly.
-
-### Success test
-
-```java
-String failedKey = "failed/finance_2024-01-01.zip.pgp";
-String sameDateZip = "failed/finance_2024-01-01.zip";
-String sameDateMiles = "failed/miles_2024-01-01.zip.pgp";
-String differentDate = "failed/finance_2024-01-02.zip.pgp";
-```
-
-### Failure test
-
-```java
-String failedKey = "failed/miles_2024-01-01.zip.pgp";
-String retryKey = "retrying/miles_2024-01-01.zip.pgp";
-```
-
-### Not claimed test
-
-```java
-String failedKey = "failed/finance_2024-01-01.zip.pgp";
-String retryKey = "retrying/finance_2024-01-01.zip.pgp";
-```
-
-### No date test
-
-Keep this one without a date:
-
-```java
-String failedKey = "failed/finance_invalid.zip.pgp";
-```
-
-## Fix for the unnecessary stubbing error
-
-That one is happening because the file is skipped before `moveIfExists(...)`.
-
-So in `shouldSkipIfFileNotClaimed()`, once you switch to a valid date filename, the stub will be used and the error should disappear.
-
-If you want to keep the current broken filename for debugging, then remove the stub entirely. But the correct fix is to use a filename that actually reaches the claim step.
-
-## One small test I strongly recommend
-
-Add this to confirm the extractor behavior directly:
-
-```java
-@Test
-void shouldExtractDateFromCompactFormat() {
-    Optional<LocalDate> result =
-            tasklet.extractDateFromFileName("finance_20240101.zip.pgp");
-
-    assertThat(result).contains(LocalDate.of(2024, 1, 1));
-}
-
-@Test
-void shouldExtractDateFromHyphenatedFormat() {
-    Optional<LocalDate> result =
-            tasklet.extractDateFromFileName("finance_2024-01-01.zip.pgp");
-
-    assertThat(result).contains(LocalDate.of(2024, 1, 1));
-}
-```
-
-To do that, make the method package-private instead of private for now.
-
-## Short path to green
-
-1. Change all retry test filenames to `2024-01-01` style.
-2. Re-run tests.
-3. Replace `extractDateFromFileName(...)` with the version above.
-4. Add the two extractor tests.
-
-Your current behavior around skipping files and moving retrying files back to failed matches the earlier retry design we discussed. 
-
-If you paste the current `RetryFailedTransfersTaskletTest.java`, I’ll rewrite only the four failing methods exactly as they should look.
+Just say 👍
