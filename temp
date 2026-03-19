@@ -1,319 +1,97 @@
-Yes — you can close most of these quickly.
+Add three unit tests for `moveIfExists(...)` to cover all branches:
 
-## Sonar fixes
+* source does not exist → returns `false`
+* source exists and move succeeds → returns `true`
+* client throws exception → returns `false`
 
-### 1. Replace duplicated `".zip.pgp"` literal
-
-In tasklet and test:
-
-```java
-private static final String ZIP_PGP_SUFFIX = ".zip.pgp";
-```
-
-Then use:
+Here’s a copy-paste-ready test class:
 
 ```java
-return normalized.endsWith(ZIP_PGP_SUFFIX)
-        && (normalized.contains("finance") || normalized.contains("miles"));
-```
+package com.bnpp.pf.einvoice.connect.cos.service;
+
+import com.amazonaws.services.s3.AmazonS3;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
-and in `extractBaseName`:
-
-```java
-if (fileName.endsWith(ZIP_PGP_SUFFIX)) {
-    return fileName.substring(0, fileName.length() - ZIP_PGP_SUFFIX.length());
-}
-```
-
----
-
-### 2. Reduce `continue` usage in the loop
-
-Sonar is complaining because you have multiple `continue`s.
-Refactor the loop into a single gate.
-
-### Current style
-
-```java
-for (String failedKey : failedFiles) {
-    String fileName = Paths.get(failedKey).getFileName().toString();
-
-    if (!isValidRetryFile(fileName)) {
-        continue;
-    }
-
-    String retryKey = failedKey.replaceFirst(FAILED_PREFIX, RETRYING_PREFIX);
-    boolean claimed = cosStorageService.moveIfExists(failedKey, retryKey);
-
-    if (!claimed) {
-        continue;
-    }
-
-    ...
-}
-```
-
-### Better style
-
-```java
-for (String failedKey : failedFiles) {
-    String fileName = Paths.get(failedKey).getFileName().toString();
-
-    if (isValidRetryFile(fileName)) {
-        processRetryFile(failedFiles, failedKey, fileName);
-    }
-}
-```
-
-Then move the rest into a helper:
-
-```java
-private void processRetryFile(List<String> failedFiles, String failedKey, String fileName) {
-    String retryKey = failedKey.replaceFirst(FAILED_PREFIX, RETRYING_PREFIX);
-    boolean claimed = cosStorageService.moveIfExists(failedKey, retryKey);
-
-    if (claimed) {
-        try {
-            log.info("Retrying transfer for {}", fileName);
-            cftApiClient.notifyAndWaitForCompletion(retryKey, fileName, RETRY_WAIT);
-            cleanupFilesWithSameBase(failedFiles, fileName);
-            cosStorageService.deleteFile(retryKey);
-            log.info("Retry successful for {}", fileName);
-        } catch (Exception ex) {
-            log.warn("Retry failed for {}", retryKey, ex);
-            String failedAgain = retryKey.replaceFirst(RETRYING_PREFIX, FAILED_PREFIX);
-            cosStorageService.moveFile(retryKey, failedAgain);
-        }
-    }
-}
-```
-
-That usually satisfies Sonar and also makes the code cleaner.
-
----
-
-### 3. Remove useless `eq(...)` in tests
-
-If all args are direct values, Sonar is right.
-
-### Instead of
-
-```java
-verify(cftApiClient).notifyAndWaitForCompletion(
-        eq(retryKey),
-        eq("finance_invoices_202401011030.zip.pgp"),
-        eq(Duration.ofSeconds(30))
-);
-```
-
-Use:
-
-```java
-verify(cftApiClient).notifyAndWaitForCompletion(
-        retryKey,
-        "finance_invoices_202401011030.zip.pgp",
-        Duration.ofSeconds(30)
-);
-```
-
-Same for `when(...)` if you are not mixing matchers.
-
----
-
-## Coverage improvements
-
-From your screenshot, the biggest gaps are:
-
-* `CosStorageService`
-* `InvoiceBatchConfiguration`
-* `InvoiceJobScheduler`
-* one branch in `RetryFailedTransfersTasklet`
-
----
-
-# 1. `RetryFailedTransfersTasklet` to 100%
-
-You are already at 94.4%.
-Usually the missing line is one branch in `extractBaseName`.
-
-Add this test:
-
-```java
-@Test
-void shouldExtractBaseNameForPlainFile() {
-    String result = tasklet.extractBaseName("finance_invoices_202401011030.xml");
-    assertThat(result).isEqualTo("finance_invoices_202401011030");
-}
-```
-
-Temporarily make `extractBaseName` package-private instead of private, or cover it indirectly with a cleanup test containing `.xml`.
-
-You likely already cover:
-
-* `.zip.pgp`
-* `.zip`
-
-You are probably missing the plain extension branch.
-
----
-
-# 2. `InvoiceJobScheduler` coverage
-
-Very easy to cover.
-
-You likely have two methods:
-
-* one launching main job
-* one launching retry job
-
-Create a unit test mocking `JobLauncher`, `Job`, maybe `JobExplorer` if used.
-
-Example:
-
-```java
-@ExtendWith(MockitoExtension.class)
-class InvoiceJobSchedulerTest {
-
-    @Mock
-    private JobLauncher jobLauncher;
-
-    @Mock
-    private Job invoiceJob;
-
-    @Mock
-    private Job retryFailedTransfersJob;
-
-    @InjectMocks
-    private InvoiceJobScheduler scheduler;
-
-    @Test
-    void shouldLaunchInvoiceJob() throws Exception {
-        scheduler.runInvoiceJob();
-        verify(jobLauncher).run(eq(invoiceJob), any());
-    }
-
-    @Test
-    void shouldLaunchRetryJob() throws Exception {
-        scheduler.runRetryJob();
-        verify(jobLauncher).run(eq(retryFailedTransfersJob), any());
-    }
-}
-```
-
-If Sonar also wants the “already running” branch, add:
-
-* one test where running executions is empty
-* one where it is not empty
-
----
-
-# 3. `InvoiceBatchConfiguration` coverage
-
-This usually means your `@Bean` methods are not directly tested.
-
-You do not need a full Spring test.
-Just instantiate config and call bean methods.
-
-Example:
-
-```java
-class InvoiceBatchConfigurationTest {
-
-    @Test
-    void shouldCreateRetryStep() {
-        InvoiceBatchConfiguration config = new InvoiceBatchConfiguration();
-        Step step = config.retryFailedTransfersStep(stepBuilderFactory, tasklet);
-        assertThat(step).isNotNull();
-    }
-}
-```
-
-If constructor injection makes this awkward, use `@SpringBootTest` only for config coverage:
-
-```java
-@SpringBootTest
-class InvoiceBatchConfigurationIT {
-
-    @Autowired
-    @Qualifier("retryFailedTransfersJob")
-    private Job retryJob;
-
-    @Autowired
-    @Qualifier("retryFailedTransfersStep")
-    private Step retryStep;
-
-    @Test
-    void shouldLoadRetryBeans() {
-        assertThat(retryJob).isNotNull();
-        assertThat(retryStep).isNotNull();
-    }
-}
-```
-
-That is often enough to lift coverage on configuration classes.
-
----
-
-# 4. `CosStorageService` coverage
-
-This depends on what methods changed recently. From your screenshot it is 0%, so likely new code paths were added.
-
-Most likely you need unit tests for:
-
-* `moveIfExists`
-* `moveFile`
-* `deleteFile`
-* maybe `listKeys`
-
-Mock the COS client and test service behavior.
-
-Example shape:
-
-```java
 @ExtendWith(MockitoExtension.class)
 class CosStorageServiceTest {
 
     @Mock
-    private S3Client cosClient;
+    private AmazonS3 s3Client;
 
     @InjectMocks
-    private CosStorageService service;
+    private CosStorageService cosStorageService;
+
+    @BeforeEach
+    void setUp() {
+        ReflectionTestUtils.setField(cosStorageService, "bucketName", "test-bucket");
+    }
 
     @Test
-    void shouldReturnFalseWhenMoveIfExistsSourceMissing() {
-        // mock source not found
-        boolean result = service.moveIfExists("failed/a.zip.pgp", "retrying/a.zip.pgp");
+    void moveIfExists_shouldReturnFalse_whenSourceDoesNotExist() {
+        String sourceKey = "failed/file.zip.pgp";
+        String targetKey = "retrying/file.zip.pgp";
+
+        when(s3Client.doesObjectExist("test-bucket", sourceKey)).thenReturn(false);
+
+        boolean result = cosStorageService.moveIfExists(sourceKey, targetKey);
+
         assertThat(result).isFalse();
+        verify(s3Client).doesObjectExist("test-bucket", sourceKey);
+        verify(s3Client, never()).copyObject("test-bucket", sourceKey, "test-bucket", targetKey);
+        verify(s3Client, never()).deleteObject("test-bucket", sourceKey);
     }
 
     @Test
-    void shouldMoveFile() {
-        service.moveFile("failed/a.zip.pgp", "retrying/a.zip.pgp");
-        // verify copy + delete
+    void moveIfExists_shouldCopyAndDeleteAndReturnTrue_whenSourceExists() {
+        String sourceKey = "failed/file.zip.pgp";
+        String targetKey = "retrying/file.zip.pgp";
+
+        when(s3Client.doesObjectExist("test-bucket", sourceKey)).thenReturn(true);
+
+        boolean result = cosStorageService.moveIfExists(sourceKey, targetKey);
+
+        assertThat(result).isTrue();
+        verify(s3Client).doesObjectExist("test-bucket", sourceKey);
+        verify(s3Client).copyObject("test-bucket", sourceKey, "test-bucket", targetKey);
+        verify(s3Client).deleteObject("test-bucket", sourceKey);
     }
 
     @Test
-    void shouldDeleteFile() {
-        service.deleteFile("failed/a.zip.pgp");
-        // verify delete call
+    void moveIfExists_shouldReturnFalse_whenExceptionOccurs() {
+        String sourceKey = "failed/file.zip.pgp";
+        String targetKey = "retrying/file.zip.pgp";
+
+        when(s3Client.doesObjectExist("test-bucket", sourceKey)).thenReturn(true);
+        doThrow(new RuntimeException("S3 copy failed"))
+                .when(s3Client)
+                .copyObject("test-bucket", sourceKey, "test-bucket", targetKey);
+
+        boolean result = cosStorageService.moveIfExists(sourceKey, targetKey);
+
+        assertThat(result).isFalse();
+        verify(s3Client).doesObjectExist("test-bucket", sourceKey);
+        verify(s3Client).copyObject("test-bucket", sourceKey, "test-bucket", targetKey);
+        verify(s3Client, never()).deleteObject("test-bucket", sourceKey);
     }
 }
 ```
 
-If you paste that class later, I can make these exact.
+A couple of notes:
 
----
+* I used `AmazonS3` because your code shows `doesObjectExist`, `copyObject`, and `deleteObject`, which matches that client style.
+* If your field name is not exactly `bucketName`, change the `ReflectionTestUtils.setField(...)` line.
+* This should cover the red lines in `moveIfExists(...)` from your screenshot.
 
-## Quick wins in order
-
-1. Replace `eq(...)` in test verifies
-2. Add `ZIP_PGP_SUFFIX` constant
-3. Extract retry loop body into `processRetryFile(...)`
-4. Add 1 missing tasklet test for uncovered branch
-5. Add scheduler unit test
-6. Add light config bean test
-7. Add COS service unit tests
-
-That should clear most Sonar issues and push coverage up fast.
-
-If you want, paste `InvoiceJobScheduler` and `InvoiceBatchConfiguration`, and I’ll write the exact tests for those two first.
+You can also improve Sonar a bit by narrowing the catch to a more specific exception if your S3 client throws one, but for coverage this test class is enough.
