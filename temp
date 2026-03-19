@@ -1,342 +1,319 @@
-Yes — that’s the cleanest move now.
+Yes — you can close most of these quickly.
 
-Since your real goal is:
+## Sonar fixes
 
-* retry only `finance` / `miles` `.zip.pgp`
-* if retry succeeds, delete related failed files
-* if retry fails, move current file back to `failed/`
+### 1. Replace duplicated `".zip.pgp"` literal
 
-and the **date extraction keeps causing noise**, remove it.
-
-## Better approach
-
-Use the **base prefix before `.zip`** instead of parsing dates.
-
-For example:
-
-* `finance_invoices_202401011030.zip.pgp` → base key: `finance_invoices_202401011030`
-* `finance_invoices_202401011030.zip` → same base key
-* `miles_invoices_202401011030.zip.pgp` → different base key
-
-That means cleanup only deletes files that belong to the same retry unit.
-
----
-
-# Updated tasklet
+In tasklet and test:
 
 ```java
-package com.bnpp.pf.einvoice.connect.batch.tasklet;
+private static final String ZIP_PGP_SUFFIX = ".zip.pgp";
+```
 
-import com.bnpp.pf.einvoice.connect.cos.service.CosStorageService;
-import com.bnpp.pf.einvoice.connect.notifycft.CFTApiClient;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.batch.core.StepContribution;
-import org.springframework.batch.core.scope.context.ChunkContext;
-import org.springframework.batch.core.step.tasklet.Tasklet;
-import org.springframework.batch.repeat.RepeatStatus;
-import org.springframework.stereotype.Component;
+Then use:
 
-import java.nio.file.Paths;
-import java.time.Duration;
-import java.util.List;
-import java.util.Locale;
+```java
+return normalized.endsWith(ZIP_PGP_SUFFIX)
+        && (normalized.contains("finance") || normalized.contains("miles"));
+```
 
-@Slf4j
-@RequiredArgsConstructor
-@Component
-public class RetryFailedTransfersTasklet implements Tasklet {
+and in `extractBaseName`:
 
-    private final CosStorageService cosStorageService;
-    private final CFTApiClient cftApiClient;
-
-    private static final String FAILED_PREFIX = "failed/";
-    private static final String RETRYING_PREFIX = "retrying/";
-    private static final Duration RETRY_WAIT = Duration.ofSeconds(30);
-
-    @Override
-    public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext) {
-        log.info("Starting retry of failed transfers");
-
-        List<String> failedFiles = cosStorageService.listKeys(FAILED_PREFIX);
-
-        for (String failedKey : failedFiles) {
-            String fileName = Paths.get(failedKey).getFileName().toString();
-
-            if (!isValidRetryFile(fileName)) {
-                continue;
-            }
-
-            String retryKey = failedKey.replaceFirst(FAILED_PREFIX, RETRYING_PREFIX);
-            boolean claimed = cosStorageService.moveIfExists(failedKey, retryKey);
-
-            if (!claimed) {
-                continue;
-            }
-
-            try {
-                log.info("Retrying transfer for {}", fileName);
-
-                cftApiClient.notifyAndWaitForCompletion(retryKey, fileName, RETRY_WAIT);
-
-                cleanupFilesWithSameBase(failedFiles, fileName);
-                cosStorageService.deleteFile(retryKey);
-
-                log.info("Retry successful for {}", fileName);
-            } catch (Exception ex) {
-                log.warn("Retry failed for {}", retryKey, ex);
-
-                String failedAgain = retryKey.replaceFirst(RETRYING_PREFIX, FAILED_PREFIX);
-                cosStorageService.moveFile(retryKey, failedAgain);
-            }
-        }
-
-        log.info("Retry job finished");
-        return RepeatStatus.FINISHED;
-    }
-
-    private boolean isValidRetryFile(String fileName) {
-        String normalized = fileName.toLowerCase(Locale.ROOT);
-        return normalized.endsWith(".zip.pgp")
-                && (normalized.contains("finance") || normalized.contains("miles"));
-    }
-
-    private void cleanupFilesWithSameBase(List<String> allFiles, String referenceFileName) {
-        String referenceBase = extractBaseName(referenceFileName);
-
-        for (String key : allFiles) {
-            String fileName = Paths.get(key).getFileName().toString();
-            String candidateBase = extractBaseName(fileName);
-
-            if (!referenceBase.equals(candidateBase)) {
-                continue;
-            }
-
-            try {
-                cosStorageService.deleteFile(key);
-                log.info("Deleted related file: {}", key);
-            } catch (Exception e) {
-                log.warn("Failed to delete {}", key, e);
-            }
-        }
-    }
-
-    private String extractBaseName(String fileName) {
-        if (fileName.endsWith(".zip.pgp")) {
-            return fileName.substring(0, fileName.length() - ".zip.pgp".length());
-        }
-
-        if (fileName.endsWith(".zip")) {
-            return fileName.substring(0, fileName.length() - ".zip".length());
-        }
-
-        int lastDot = fileName.lastIndexOf('.');
-        if (lastDot > 0) {
-            return fileName.substring(0, lastDot);
-        }
-
-        return fileName;
-    }
+```java
+if (fileName.endsWith(ZIP_PGP_SUFFIX)) {
+    return fileName.substring(0, fileName.length() - ZIP_PGP_SUFFIX.length());
 }
 ```
 
 ---
 
-# Updated tests
+### 2. Reduce `continue` usage in the loop
 
-These should match the new base-name cleanup logic.
+Sonar is complaining because you have multiple `continue`s.
+Refactor the loop into a single gate.
+
+### Current style
 
 ```java
-package com.bnpp.pf.einvoice.connect.batch.tasklet;
+for (String failedKey : failedFiles) {
+    String fileName = Paths.get(failedKey).getFileName().toString();
 
-import com.bnpp.pf.einvoice.connect.cos.service.CosStorageService;
-import com.bnpp.pf.einvoice.connect.notifycft.CFTApiClient;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.batch.core.StepContribution;
-import org.springframework.batch.core.scope.context.ChunkContext;
-import org.springframework.batch.repeat.RepeatStatus;
+    if (!isValidRetryFile(fileName)) {
+        continue;
+    }
 
-import java.time.Duration;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
+    String retryKey = failedKey.replaceFirst(FAILED_PREFIX, RETRYING_PREFIX);
+    boolean claimed = cosStorageService.moveIfExists(failedKey, retryKey);
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.when;
+    if (!claimed) {
+        continue;
+    }
 
+    ...
+}
+```
+
+### Better style
+
+```java
+for (String failedKey : failedFiles) {
+    String fileName = Paths.get(failedKey).getFileName().toString();
+
+    if (isValidRetryFile(fileName)) {
+        processRetryFile(failedFiles, failedKey, fileName);
+    }
+}
+```
+
+Then move the rest into a helper:
+
+```java
+private void processRetryFile(List<String> failedFiles, String failedKey, String fileName) {
+    String retryKey = failedKey.replaceFirst(FAILED_PREFIX, RETRYING_PREFIX);
+    boolean claimed = cosStorageService.moveIfExists(failedKey, retryKey);
+
+    if (claimed) {
+        try {
+            log.info("Retrying transfer for {}", fileName);
+            cftApiClient.notifyAndWaitForCompletion(retryKey, fileName, RETRY_WAIT);
+            cleanupFilesWithSameBase(failedFiles, fileName);
+            cosStorageService.deleteFile(retryKey);
+            log.info("Retry successful for {}", fileName);
+        } catch (Exception ex) {
+            log.warn("Retry failed for {}", retryKey, ex);
+            String failedAgain = retryKey.replaceFirst(RETRYING_PREFIX, FAILED_PREFIX);
+            cosStorageService.moveFile(retryKey, failedAgain);
+        }
+    }
+}
+```
+
+That usually satisfies Sonar and also makes the code cleaner.
+
+---
+
+### 3. Remove useless `eq(...)` in tests
+
+If all args are direct values, Sonar is right.
+
+### Instead of
+
+```java
+verify(cftApiClient).notifyAndWaitForCompletion(
+        eq(retryKey),
+        eq("finance_invoices_202401011030.zip.pgp"),
+        eq(Duration.ofSeconds(30))
+);
+```
+
+Use:
+
+```java
+verify(cftApiClient).notifyAndWaitForCompletion(
+        retryKey,
+        "finance_invoices_202401011030.zip.pgp",
+        Duration.ofSeconds(30)
+);
+```
+
+Same for `when(...)` if you are not mixing matchers.
+
+---
+
+## Coverage improvements
+
+From your screenshot, the biggest gaps are:
+
+* `CosStorageService`
+* `InvoiceBatchConfiguration`
+* `InvoiceJobScheduler`
+* one branch in `RetryFailedTransfersTasklet`
+
+---
+
+# 1. `RetryFailedTransfersTasklet` to 100%
+
+You are already at 94.4%.
+Usually the missing line is one branch in `extractBaseName`.
+
+Add this test:
+
+```java
+@Test
+void shouldExtractBaseNameForPlainFile() {
+    String result = tasklet.extractBaseName("finance_invoices_202401011030.xml");
+    assertThat(result).isEqualTo("finance_invoices_202401011030");
+}
+```
+
+Temporarily make `extractBaseName` package-private instead of private, or cover it indirectly with a cleanup test containing `.xml`.
+
+You likely already cover:
+
+* `.zip.pgp`
+* `.zip`
+
+You are probably missing the plain extension branch.
+
+---
+
+# 2. `InvoiceJobScheduler` coverage
+
+Very easy to cover.
+
+You likely have two methods:
+
+* one launching main job
+* one launching retry job
+
+Create a unit test mocking `JobLauncher`, `Job`, maybe `JobExplorer` if used.
+
+Example:
+
+```java
 @ExtendWith(MockitoExtension.class)
-class RetryFailedTransfersTaskletTest {
-
-    private static final String FAILED_PREFIX = "failed/";
+class InvoiceJobSchedulerTest {
 
     @Mock
-    private CosStorageService cosStorageService;
+    private JobLauncher jobLauncher;
 
     @Mock
-    private CFTApiClient cftApiClient;
+    private Job invoiceJob;
 
     @Mock
-    private StepContribution contribution;
-
-    @Mock
-    private ChunkContext chunkContext;
+    private Job retryFailedTransfersJob;
 
     @InjectMocks
-    private RetryFailedTransfersTasklet tasklet;
+    private InvoiceJobScheduler scheduler;
 
-    @BeforeEach
-    void setUp() {
-        tasklet = new RetryFailedTransfersTasklet(cosStorageService, cftApiClient);
+    @Test
+    void shouldLaunchInvoiceJob() throws Exception {
+        scheduler.runInvoiceJob();
+        verify(jobLauncher).run(eq(invoiceJob), any());
     }
 
     @Test
-    void shouldRetryAndCleanupOnSuccess() {
-        String failedKey = "failed/finance_invoices_202401011030.zip.pgp";
-        String sameBaseZip = "failed/finance_invoices_202401011030.zip";
-        String sameBaseXml = "failed/finance_invoices_202401011030.xml";
-        String differentBase = "failed/finance_invoices_202401021030.zip.pgp";
-
-        List<String> failedFiles = Arrays.asList(
-                failedKey,
-                sameBaseZip,
-                sameBaseXml,
-                differentBase
-        );
-
-        String retryKey = "retrying/finance_invoices_202401011030.zip.pgp";
-
-        when(cosStorageService.listKeys(FAILED_PREFIX)).thenReturn(failedFiles);
-        when(cosStorageService.moveIfExists(failedKey, retryKey)).thenReturn(true);
-
-        RepeatStatus result = tasklet.execute(contribution, chunkContext);
-
-        assertThat(result).isEqualTo(RepeatStatus.FINISHED);
-
-        verify(cftApiClient).notifyAndWaitForCompletion(
-                eq(retryKey),
-                eq("finance_invoices_202401011030.zip.pgp"),
-                eq(Duration.ofSeconds(30))
-        );
-
-        verify(cosStorageService).deleteFile(failedKey);
-        verify(cosStorageService).deleteFile(sameBaseZip);
-        verify(cosStorageService).deleteFile(sameBaseXml);
-        verify(cosStorageService, never()).deleteFile(differentBase);
-        verify(cosStorageService).deleteFile(retryKey);
-        verify(cosStorageService, never()).moveFile(anyString(), anyString());
-    }
-
-    @Test
-    void shouldMoveBackToFailedOnCftFailure() {
-        String failedKey = "failed/miles_invoices_202401011030.zip.pgp";
-        String retryKey = "retrying/miles_invoices_202401011030.zip.pgp";
-
-        when(cosStorageService.listKeys(FAILED_PREFIX))
-                .thenReturn(Collections.singletonList(failedKey));
-        when(cosStorageService.moveIfExists(failedKey, retryKey)).thenReturn(true);
-
-        doThrow(new RuntimeException("CFT failed"))
-                .when(cftApiClient)
-                .notifyAndWaitForCompletion(
-                        eq(retryKey),
-                        eq("miles_invoices_202401011030.zip.pgp"),
-                        eq(Duration.ofSeconds(30))
-                );
-
-        RepeatStatus result = tasklet.execute(contribution, chunkContext);
-
-        assertThat(result).isEqualTo(RepeatStatus.FINISHED);
-
-        verify(cftApiClient).notifyAndWaitForCompletion(
-                eq(retryKey),
-                eq("miles_invoices_202401011030.zip.pgp"),
-                eq(Duration.ofSeconds(30))
-        );
-
-        verify(cosStorageService).moveFile(retryKey, failedKey);
-        verify(cosStorageService, never()).deleteFile(anyString());
-    }
-
-    @Test
-    void shouldIgnoreNonZipPgpFiles() {
-        List<String> failedFiles = Arrays.asList(
-                "failed/finance_invoices_202401011030.zip",
-                "failed/miles_invoices_202401011030.xml",
-                "failed/miles_invoices_202401011030.pdf"
-        );
-
-        when(cosStorageService.listKeys(FAILED_PREFIX)).thenReturn(failedFiles);
-
-        RepeatStatus result = tasklet.execute(contribution, chunkContext);
-
-        assertThat(result).isEqualTo(RepeatStatus.FINISHED);
-
-        verifyNoInteractions(cftApiClient);
-        verify(cosStorageService, never()).moveIfExists(anyString(), anyString());
-        verify(cosStorageService, never()).moveFile(anyString(), anyString());
-        verify(cosStorageService, never()).deleteFile(anyString());
-    }
-
-    @Test
-    void shouldIgnoreZipPgpFilesWithoutFinanceOrMilesInName() {
-        List<String> failedFiles = Arrays.asList(
-                "failed/generix_invoices_202401011030.zip.pgp",
-                "failed/random_file.zip.pgp"
-        );
-
-        when(cosStorageService.listKeys(FAILED_PREFIX)).thenReturn(failedFiles);
-
-        RepeatStatus result = tasklet.execute(contribution, chunkContext);
-
-        assertThat(result).isEqualTo(RepeatStatus.FINISHED);
-
-        verifyNoInteractions(cftApiClient);
-        verify(cosStorageService, never()).moveIfExists(anyString(), anyString());
-        verify(cosStorageService, never()).moveFile(anyString(), anyString());
-        verify(cosStorageService, never()).deleteFile(anyString());
-    }
-
-    @Test
-    void shouldSkipIfFileNotClaimed() {
-        String failedKey = "failed/finance_invoices_202401011030.zip.pgp";
-        String retryKey = "retrying/finance_invoices_202401011030.zip.pgp";
-
-        when(cosStorageService.listKeys(FAILED_PREFIX))
-                .thenReturn(Collections.singletonList(failedKey));
-        when(cosStorageService.moveIfExists(failedKey, retryKey)).thenReturn(false);
-
-        RepeatStatus result = tasklet.execute(contribution, chunkContext);
-
-        assertThat(result).isEqualTo(RepeatStatus.FINISHED);
-
-        verifyNoInteractions(cftApiClient);
-        verify(cosStorageService, never()).moveFile(anyString(), anyString());
-        verify(cosStorageService, never()).deleteFile(anyString());
+    void shouldLaunchRetryJob() throws Exception {
+        scheduler.runRetryJob();
+        verify(jobLauncher).run(eq(retryFailedTransfersJob), any());
     }
 }
 ```
 
+If Sonar also wants the “already running” branch, add:
+
+* one test where running executions is empty
+* one where it is not empty
+
 ---
 
-## Why this is better
+# 3. `InvoiceBatchConfiguration` coverage
 
-It removes the fragile date parsing completely and matches your actual filenames better.
+This usually means your `@Bean` methods are not directly tested.
 
-Your recent errors were all caused by the tasklet skipping before retry because the date extractor kept returning empty. The screenshots clearly showed that exact skip path. 
+You do not need a full Spring test.
+Just instantiate config and call bean methods.
 
-## One note on cleanup behavior
+Example:
 
-With this version, cleanup deletes files that share the same base name only, not everything from the same date. That is usually safer too. It also fits your retry flow better than date matching when names look like `finance_invoices_202401011030.zip.pgp`.
+```java
+class InvoiceBatchConfigurationTest {
 
-If you want, I can also give you the smallest possible diff version instead of the full replacement.
+    @Test
+    void shouldCreateRetryStep() {
+        InvoiceBatchConfiguration config = new InvoiceBatchConfiguration();
+        Step step = config.retryFailedTransfersStep(stepBuilderFactory, tasklet);
+        assertThat(step).isNotNull();
+    }
+}
+```
+
+If constructor injection makes this awkward, use `@SpringBootTest` only for config coverage:
+
+```java
+@SpringBootTest
+class InvoiceBatchConfigurationIT {
+
+    @Autowired
+    @Qualifier("retryFailedTransfersJob")
+    private Job retryJob;
+
+    @Autowired
+    @Qualifier("retryFailedTransfersStep")
+    private Step retryStep;
+
+    @Test
+    void shouldLoadRetryBeans() {
+        assertThat(retryJob).isNotNull();
+        assertThat(retryStep).isNotNull();
+    }
+}
+```
+
+That is often enough to lift coverage on configuration classes.
+
+---
+
+# 4. `CosStorageService` coverage
+
+This depends on what methods changed recently. From your screenshot it is 0%, so likely new code paths were added.
+
+Most likely you need unit tests for:
+
+* `moveIfExists`
+* `moveFile`
+* `deleteFile`
+* maybe `listKeys`
+
+Mock the COS client and test service behavior.
+
+Example shape:
+
+```java
+@ExtendWith(MockitoExtension.class)
+class CosStorageServiceTest {
+
+    @Mock
+    private S3Client cosClient;
+
+    @InjectMocks
+    private CosStorageService service;
+
+    @Test
+    void shouldReturnFalseWhenMoveIfExistsSourceMissing() {
+        // mock source not found
+        boolean result = service.moveIfExists("failed/a.zip.pgp", "retrying/a.zip.pgp");
+        assertThat(result).isFalse();
+    }
+
+    @Test
+    void shouldMoveFile() {
+        service.moveFile("failed/a.zip.pgp", "retrying/a.zip.pgp");
+        // verify copy + delete
+    }
+
+    @Test
+    void shouldDeleteFile() {
+        service.deleteFile("failed/a.zip.pgp");
+        // verify delete call
+    }
+}
+```
+
+If you paste that class later, I can make these exact.
+
+---
+
+## Quick wins in order
+
+1. Replace `eq(...)` in test verifies
+2. Add `ZIP_PGP_SUFFIX` constant
+3. Extract retry loop body into `processRetryFile(...)`
+4. Add 1 missing tasklet test for uncovered branch
+5. Add scheduler unit test
+6. Add light config bean test
+7. Add COS service unit tests
+
+That should clear most Sonar issues and push coverage up fast.
+
+If you want, paste `InvoiceJobScheduler` and `InvoiceBatchConfiguration`, and I’ll write the exact tests for those two first.
