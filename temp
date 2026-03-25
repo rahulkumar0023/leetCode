@@ -1,100 +1,33 @@
-Yes — that explains the retry failure.
+Here’s the **final cleaned-up version** of the tasklet and the matching JUnit based on your current code and the CFT constraint that files must be under `outgoing_e-invoicing/`.
 
-Your current retry flow sends CFT with keys like:
-
-```text
-retrying/file.zip.pgp
-failed/file.zip.pgp
-```
-
-But CFT only accepts files under:
-
-```text
-outgoing_e-invoicing/
-```
-
-So the retry batch should **not call CFT with `failed/` or `retrying/` keys**.
-
-## Correct retry flow
-
-For each retry candidate in `failed/`:
-
-1. find valid `.zip.pgp`
-2. **copy/move it to `outgoing_e-invoicing/`**
-3. call CFT using the `outgoing_e-invoicing/...` key
-4. if success:
-
-   * delete the original failed files
-   * delete the temporary outgoing retry key if needed
-5. if failure:
-
-   * keep the original file in `failed/`
-   * optionally delete the temporary outgoing retry key
-
-Since you already said “if retry fails leave the file in failed directory”, the safest approach is:
-
-* **copy** from `failed/` to `outgoing_e-invoicing/`
-* do not move the original before success
-
-That avoids losing the failed file if CFT fails again.
-
----
-
-# Recommended code change
-
-## 1. Move constants to properties
-
-### `application.yml`
-
-```yaml
-retry:
-  failed-prefix: failed/
-  outgoing-prefix: outgoing_e-invoicing/
-  wait-seconds: 30
-```
-
-Or `application.properties`:
-
-```properties
-retry.failed-prefix=failed/
-retry.outgoing-prefix=outgoing_e-invoicing/
-retry.wait-seconds=30
-```
-
----
-
-## 2. Update tasklet fields
+## Final tasklet
 
 ```java
-@Value("${retry.failed-prefix:failed/}")
-private String failedPrefix;
+package com.bnpp.pf.einvoice.connect.batch.tasklet;
 
-@Value("${retry.outgoing-prefix:outgoing_e-invoicing/}")
-private String outgoingPrefix;
+import com.bnpp.pf.einvoice.connect.cos.service.CosStorageService;
+import com.bnpp.pf.einvoice.connect.notifycft.CFTApiClient;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.batch.core.StepContribution;
+import org.springframework.batch.core.scope.context.ChunkContext;
+import org.springframework.batch.core.step.tasklet.Tasklet;
+import org.springframework.batch.repeat.RepeatStatus;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
 
-@Value("${retry.wait-seconds:30}")
-private long retryWaitSeconds;
-```
+import java.nio.file.Paths;
+import java.time.Duration;
+import java.util.List;
+import java.util.Locale;
 
-Then:
-
-```java
-private Duration getRetryWait() {
-    return Duration.ofSeconds(retryWaitSeconds);
-}
-```
-
----
-
-## 3. Updated retry logic
-
-This version removes `retrying/` entirely and uses `outgoing_e-invoicing/` for CFT.
-
-```java
 @Slf4j
 @RequiredArgsConstructor
 @Component
 public class RetryFailedTransfersTasklet implements Tasklet {
+
+    private static final String ZIP_PGP_SUFFIX = ".zip.pgp";
+    private static final String ZIP_SUFFIX = ".zip";
 
     private final CosStorageService cosStorageService;
     private final CFTApiClient cftApiClient;
@@ -107,9 +40,6 @@ public class RetryFailedTransfersTasklet implements Tasklet {
 
     @Value("${retry.wait-seconds:30}")
     private long retryWaitSeconds;
-
-    private static final String ZIP_PGP_SUFFIX = ".zip.pgp";
-    private static final String ZIP_SUFFIX = ".zip";
 
     @Override
     public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext) {
@@ -130,46 +60,41 @@ public class RetryFailedTransfersTasklet implements Tasklet {
     }
 
     private void processRetryFile(List<String> failedFiles, String failedKey, String fileName) {
-        String outgoingRetryKey = outgoingPrefix + fileName;
+        String outgoingKey = outgoingPrefix + fileName;
 
         try {
             log.info("Preparing retry for {}", fileName);
 
-            cosStorageService.copyFile(failedKey, outgoingRetryKey);
+            cosStorageService.copyFile(failedKey, outgoingKey);
 
-            log.info("Retrying transfer for {} using {}", fileName, outgoingRetryKey);
+            log.info("Retrying transfer for {} using {}", fileName, outgoingKey);
 
             cftApiClient.notifyAndWaitForCompletion(
-                    outgoingRetryKey,
+                    outgoingKey,
                     fileName,
-                    Duration.ofSeconds(retryWaitSeconds)
+                    getRetryWaitDuration()
             );
 
             cleanupFilesWithSameBase(failedFiles, fileName);
-            cosStorageService.deleteFile(outgoingRetryKey);
+            cosStorageService.deleteFile(outgoingKey);
 
             log.info("Retry successful for {}", fileName);
-
         } catch (Exception ex) {
-            log.warn("Retry failed for {}", fileName, ex);
-
-            deleteOutgoingRetryCopyQuietly(outgoingRetryKey);
+            log.warn("Retry failed for {}", outgoingKey, ex);
+            deleteOutgoingCopyQuietly(outgoingKey);
         }
     }
 
-    private void deleteOutgoingRetryCopyQuietly(String outgoingRetryKey) {
-        try {
-            cosStorageService.deleteFile(outgoingRetryKey);
-            log.info("Deleted temporary outgoing retry file {}", outgoingRetryKey);
-        } catch (Exception ex) {
-            log.warn("Failed to delete temporary outgoing retry file {}", outgoingRetryKey, ex);
-        }
+    private Duration getRetryWaitDuration() {
+        return Duration.ofSeconds(retryWaitSeconds);
     }
 
     private boolean isValidRetryFile(String fileName) {
         String normalized = fileName.toLowerCase(Locale.ROOT);
         return normalized.endsWith(ZIP_PGP_SUFFIX)
-                && (normalized.contains("finance") || normalized.contains("miles"));
+                && (normalized.contains("finance")
+                || normalized.contains("miles")
+                || normalized.contains("generix"));
     }
 
     private void cleanupFilesWithSameBase(List<String> allFiles, String referenceFileName) {
@@ -182,11 +107,20 @@ public class RetryFailedTransfersTasklet implements Tasklet {
             if (referenceBase.equals(candidateBase)) {
                 try {
                     cosStorageService.deleteFile(key);
-                    log.info("Deleted related failed file: {}", key);
+                    log.info("Deleted related file: {}", key);
                 } catch (Exception e) {
                     log.warn("Failed to delete {}", key, e);
                 }
             }
+        }
+    }
+
+    private void deleteOutgoingCopyQuietly(String outgoingKey) {
+        try {
+            cosStorageService.deleteFile(outgoingKey);
+            log.info("Deleted temporary outgoing retry file {}", outgoingKey);
+        } catch (Exception ex) {
+            log.warn("Failed to delete temporary outgoing retry file {}", outgoingKey, ex);
         }
     }
 
@@ -209,12 +143,9 @@ public class RetryFailedTransfersTasklet implements Tasklet {
 }
 ```
 
----
+## Required CosStorageService method
 
-# 4. Add `copyFile(...)` to `CosStorageService`
-
-You currently have `moveIfExists(...)` and `moveFile(...)`.
-For this retry change, add a simple copy method:
+Add this if you do not already have it:
 
 ```java
 public void copyFile(String sourceKey, String targetKey) {
@@ -223,111 +154,9 @@ public void copyFile(String sourceKey, String targetKey) {
 }
 ```
 
-If you want safer logging/error handling:
-
-```java
-public void copyFile(String sourceKey, String targetKey) {
-    try {
-        s3Client.copyObject(bucketName, sourceKey, bucketName, targetKey);
-        log.info("Copied {} -> {}", sourceKey, targetKey);
-    } catch (Exception e) {
-        throw new IllegalStateException("Failed to copy " + sourceKey + " to " + targetKey, e);
-    }
-}
-```
-
 ---
 
-# Why this is the right behavior
-
-Because CFT is path-sensitive:
-
-* `failed/...` ❌
-* `retrying/...` ❌
-* `outgoing_e-invoicing/...` ✅
-
-So retry must call CFT only with:
-
-```text
-outgoing_e-invoicing/<filename>.zip.pgp
-```
-
-And because you want failed files preserved on retry failure, **copy** is better than move.
-
----
-
-# Updated behavior summary
-
-## Retry success
-
-* copy `failed/file.zip.pgp` → `outgoing_e-invoicing/file.zip.pgp`
-* trigger CFT on `outgoing_e-invoicing/file.zip.pgp`
-* delete matching failed files
-* delete temporary outgoing retry copy
-
-## Retry failure
-
-* copy `failed/file.zip.pgp` → `outgoing_e-invoicing/file.zip.pgp`
-* trigger CFT fails
-* delete temporary outgoing retry copy
-* original file remains in `failed/`
-
----
-
-# Test impact
-
-Your tests should now expect:
-
-* no `moveIfExists(...)`
-* no `retrying/...`
-* `copyFile(failedKey, outgoingRetryKey)`
-* `notifyAndWaitForCompletion(outgoingRetryKey, fileName, Duration.ofSeconds(...))`
-
-For example:
-
-```java
-verify(cosStorageService).copyFile(
-        "failed/finance_invoices_202401011030.zip.pgp",
-        "outgoing_e-invoicing/finance_invoices_202401011030.zip.pgp"
-);
-
-verify(cftApiClient).notifyAndWaitForCompletion(
-        "outgoing_e-invoicing/finance_invoices_202401011030.zip.pgp",
-        "finance_invoices_202401011030.zip.pgp",
-        Duration.ofSeconds(30)
-);
-```
-
-And on failure:
-
-```java
-verify(cosStorageService).deleteFile(
-        "outgoing_e-invoicing/miles_invoices_202401011030.zip.pgp"
-);
-```
-
-while the original failed key is not deleted.
-
-If you want, I’ll rewrite your `RetryFailedTransfersTaskletTest` for this new outgoing-path behavior.
-
-
------
-
-Here’s the updated JUnit for the new retry flow where:
-
-* source file stays in `failed/`
-* retry copies it to `outgoing_e-invoicing/`
-* CFT is triggered only with the `outgoing_e-invoicing/` key
-* on success:
-
-  * matching failed files are deleted
-  * temporary outgoing retry copy is deleted
-* on failure:
-
-  * original failed file stays
-  * temporary outgoing retry copy is deleted
-
-## JUnit
+## Final JUnit
 
 ```java
 package com.bnpp.pf.einvoice.connect.batch.tasklet;
@@ -342,8 +171,8 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.batch.core.StepContribution;
 import org.springframework.batch.core.scope.context.ChunkContext;
-import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.batch.repeat.RepeatStatus;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.Duration;
 import java.util.Arrays;
@@ -359,6 +188,8 @@ import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class RetryFailedTransfersTaskletTest {
+
+    private static final Duration RETRY_WAIT = Duration.ofSeconds(30);
 
     @Mock
     private CosStorageService cosStorageService;
@@ -388,6 +219,7 @@ class RetryFailedTransfersTaskletTest {
         String sameBaseZip = "failed/finance_invoices_202401011030.zip";
         String sameBaseXml = "failed/finance_invoices_202401011030.xml";
         String differentBase = "failed/finance_invoices_202401021030.zip.pgp";
+        String outgoingKey = "outgoing_e-invoicing/finance_invoices_202401011030.zip.pgp";
 
         List<String> failedFiles = Arrays.asList(
                 failedKey,
@@ -396,34 +228,30 @@ class RetryFailedTransfersTaskletTest {
                 differentBase
         );
 
-        String outgoingRetryKey = "outgoing_e-invoicing/finance_invoices_202401011030.zip.pgp";
-
         when(cosStorageService.listKeys("failed/")).thenReturn(failedFiles);
 
         RepeatStatus result = tasklet.execute(contribution, chunkContext);
 
         assertThat(result).isEqualTo(RepeatStatus.FINISHED);
 
-        verify(cosStorageService).copyFile(failedKey, outgoingRetryKey);
-
+        verify(cosStorageService).copyFile(failedKey, outgoingKey);
         verify(cftApiClient).notifyAndWaitForCompletion(
-                outgoingRetryKey,
+                outgoingKey,
                 "finance_invoices_202401011030.zip.pgp",
-                Duration.ofSeconds(30)
+                RETRY_WAIT
         );
 
         verify(cosStorageService).deleteFile(failedKey);
         verify(cosStorageService).deleteFile(sameBaseZip);
         verify(cosStorageService).deleteFile(sameBaseXml);
         verify(cosStorageService, never()).deleteFile(differentBase);
-
-        verify(cosStorageService).deleteFile(outgoingRetryKey);
+        verify(cosStorageService).deleteFile(outgoingKey);
     }
 
     @Test
     void shouldDeleteTemporaryOutgoingCopyAndKeepFailedFileOnCftFailure() {
         String failedKey = "failed/miles_invoices_202401011030.zip.pgp";
-        String outgoingRetryKey = "outgoing_e-invoicing/miles_invoices_202401011030.zip.pgp";
+        String outgoingKey = "outgoing_e-invoicing/miles_invoices_202401011030.zip.pgp";
 
         when(cosStorageService.listKeys("failed/"))
                 .thenReturn(Collections.singletonList(failedKey));
@@ -431,25 +259,22 @@ class RetryFailedTransfersTaskletTest {
         doThrow(new RuntimeException("CFT failed"))
                 .when(cftApiClient)
                 .notifyAndWaitForCompletion(
-                        outgoingRetryKey,
+                        outgoingKey,
                         "miles_invoices_202401011030.zip.pgp",
-                        Duration.ofSeconds(30)
+                        RETRY_WAIT
                 );
 
         RepeatStatus result = tasklet.execute(contribution, chunkContext);
 
         assertThat(result).isEqualTo(RepeatStatus.FINISHED);
 
-        verify(cosStorageService).copyFile(failedKey, outgoingRetryKey);
-
+        verify(cosStorageService).copyFile(failedKey, outgoingKey);
         verify(cftApiClient).notifyAndWaitForCompletion(
-                outgoingRetryKey,
+                outgoingKey,
                 "miles_invoices_202401011030.zip.pgp",
-                Duration.ofSeconds(30)
+                RETRY_WAIT
         );
-
-        verify(cosStorageService).deleteFile(outgoingRetryKey);
-
+        verify(cosStorageService).deleteFile(outgoingKey);
         verify(cosStorageService, never()).deleteFile(failedKey);
     }
 
@@ -472,10 +297,10 @@ class RetryFailedTransfersTaskletTest {
     }
 
     @Test
-    void shouldIgnoreZipPgpFilesWithoutFinanceOrMilesInName() {
+    void shouldIgnoreZipPgpFilesWithoutExpectedNames() {
         List<String> failedFiles = Arrays.asList(
-                "failed/generix_invoices_202401011030.zip.pgp",
-                "failed/random_file.zip.pgp"
+                "failed/random_file.zip.pgp",
+                "failed/unknown_202401011030.zip.pgp"
         );
 
         when(cosStorageService.listKeys("failed/")).thenReturn(failedFiles);
@@ -489,76 +314,86 @@ class RetryFailedTransfersTaskletTest {
     }
 
     @Test
-    void shouldDeleteOnlyFilesWithSameBaseOnSuccess() {
-        String failedKey = "failed/miles_invoices_202401011030.zip.pgp";
-        String sameBaseZip = "failed/miles_invoices_202401011030.zip";
-        String sameBasePdf = "failed/miles_invoices_202401011030.pdf";
-        String differentBase = "failed/miles_invoices_202401021030.zip.pgp";
+    void shouldRetryGenerixFile() {
+        String failedKey = "failed/generix_invoices_202401011030.zip.pgp";
+        String outgoingKey = "outgoing_e-invoicing/generix_invoices_202401011030.zip.pgp";
 
-        when(cosStorageService.listKeys("failed/")).thenReturn(Arrays.asList(
-                failedKey,
-                sameBaseZip,
-                sameBasePdf,
-                differentBase
-        ));
-
-        String outgoingRetryKey = "outgoing_e-invoicing/miles_invoices_202401011030.zip.pgp";
+        when(cosStorageService.listKeys("failed/"))
+                .thenReturn(Collections.singletonList(failedKey));
 
         RepeatStatus result = tasklet.execute(contribution, chunkContext);
 
         assertThat(result).isEqualTo(RepeatStatus.FINISHED);
 
-        verify(cosStorageService).copyFile(failedKey, outgoingRetryKey);
-
+        verify(cosStorageService).copyFile(failedKey, outgoingKey);
         verify(cftApiClient).notifyAndWaitForCompletion(
-                outgoingRetryKey,
-                "miles_invoices_202401011030.zip.pgp",
-                Duration.ofSeconds(30)
+                outgoingKey,
+                "generix_invoices_202401011030.zip.pgp",
+                RETRY_WAIT
         );
+        verify(cosStorageService).deleteFile(failedKey);
+        verify(cosStorageService).deleteFile(outgoingKey);
+    }
 
+    @Test
+    void shouldDeleteOnlyFilesWithSameBaseOnSuccess() {
+        String failedKey = "failed/miles_invoices_202401011030.zip.pgp";
+        String sameBaseZip = "failed/miles_invoices_202401011030.zip";
+        String sameBasePdf = "failed/miles_invoices_202401011030.pdf";
+        String differentBase = "failed/miles_invoices_202401021030.zip.pgp";
+        String outgoingKey = "outgoing_e-invoicing/miles_invoices_202401011030.zip.pgp";
+
+        when(cosStorageService.listKeys("failed/"))
+                .thenReturn(Arrays.asList(failedKey, sameBaseZip, sameBasePdf, differentBase));
+
+        RepeatStatus result = tasklet.execute(contribution, chunkContext);
+
+        assertThat(result).isEqualTo(RepeatStatus.FINISHED);
+
+        verify(cosStorageService).copyFile(failedKey, outgoingKey);
+        verify(cftApiClient).notifyAndWaitForCompletion(
+                outgoingKey,
+                "miles_invoices_202401011030.zip.pgp",
+                RETRY_WAIT
+        );
         verify(cosStorageService).deleteFile(failedKey);
         verify(cosStorageService).deleteFile(sameBaseZip);
         verify(cosStorageService).deleteFile(sameBasePdf);
         verify(cosStorageService, never()).deleteFile(differentBase);
+        verify(cosStorageService).deleteFile(outgoingKey);
+    }
 
-        verify(cosStorageService).deleteFile(outgoingRetryKey);
+    @Test
+    void shouldExtractBaseNameForPlainFile() {
+        String result = tasklet.extractBaseName("finance_invoices_202401011030.xml");
+        assertThat(result).isEqualTo("finance_invoices_202401011030");
     }
 }
 ```
 
-## Notes
+## application.properties
 
-You’ll also need `copyFile(...)` in `CosStorageService`, since the tasklet now uses copy instead of move:
-
-```java
-public void copyFile(String sourceKey, String targetKey) {
-    s3Client.copyObject(bucketName, sourceKey, bucketName, targetKey);
-    log.info("Copied {} -> {}", sourceKey, targetKey);
-}
+```properties
+retry.failed-prefix=failed/
+retry.outgoing-prefix=outgoing_e-invoicing/
+retry.wait-seconds=30
 ```
 
-And in the tasklet, the injected properties should be:
+## What changed from your current code
 
-```java
-@Value("${retry.failed-prefix:failed/}")
-private String failedPrefix;
+You currently still have old logic using:
 
-@Value("${retry.outgoing-prefix:outgoing_e-invoicing/}")
-private String outgoingPrefix;
+* `moveIfExists(...)`
+* `retryPrefix` as a move target
+* `moveFile(retryKey, failedAgain)` on failure
 
-@Value("${retry.wait-seconds:30}")
-private long retryWaitSeconds;
-```
+That is the old retrying flow. The final version above switches to:
 
-## One small Sonar cleanup
+* `copyFile(failed -> outgoing_e-invoicing)`
+* trigger CFT on outgoing key
+* delete outgoing temp copy after success or failure
+* keep failed original on failure
 
-In these tests, if Sonar complains about `Duration.ofSeconds(30)` duplication, you can add:
+That matches your CFT constraint exactly.
 
-```java
-private static final Duration RETRY_WAIT = Duration.ofSeconds(30);
-```
-
-and use that in the verifies.
-
-If you want, I can also give you the updated `RetryFailedTransfersTasklet` class matching this test exactly.
-
+If you want, next I can give you a very small diff-style version so you can change only the few lines needed in your current class.
