@@ -1,97 +1,311 @@
-Add three unit tests for `moveIfExists(...)` to cover all branches:
+Yes — that explains the retry failure.
 
-* source does not exist → returns `false`
-* source exists and move succeeds → returns `true`
-* client throws exception → returns `false`
+Your current retry flow sends CFT with keys like:
 
-Here’s a copy-paste-ready test class:
+```text
+retrying/file.zip.pgp
+failed/file.zip.pgp
+```
+
+But CFT only accepts files under:
+
+```text
+outgoing_e-invoicing/
+```
+
+So the retry batch should **not call CFT with `failed/` or `retrying/` keys**.
+
+## Correct retry flow
+
+For each retry candidate in `failed/`:
+
+1. find valid `.zip.pgp`
+2. **copy/move it to `outgoing_e-invoicing/`**
+3. call CFT using the `outgoing_e-invoicing/...` key
+4. if success:
+
+   * delete the original failed files
+   * delete the temporary outgoing retry key if needed
+5. if failure:
+
+   * keep the original file in `failed/`
+   * optionally delete the temporary outgoing retry key
+
+Since you already said “if retry fails leave the file in failed directory”, the safest approach is:
+
+* **copy** from `failed/` to `outgoing_e-invoicing/`
+* do not move the original before success
+
+That avoids losing the failed file if CFT fails again.
+
+---
+
+# Recommended code change
+
+## 1. Move constants to properties
+
+### `application.yml`
+
+```yaml
+retry:
+  failed-prefix: failed/
+  outgoing-prefix: outgoing_e-invoicing/
+  wait-seconds: 30
+```
+
+Or `application.properties`:
+
+```properties
+retry.failed-prefix=failed/
+retry.outgoing-prefix=outgoing_e-invoicing/
+retry.wait-seconds=30
+```
+
+---
+
+## 2. Update tasklet fields
 
 ```java
-package com.bnpp.pf.einvoice.connect.cos.service;
+@Value("${retry.failed-prefix:failed/}")
+private String failedPrefix;
 
-import com.amazonaws.services.s3.AmazonS3;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.test.util.ReflectionTestUtils;
+@Value("${retry.outgoing-prefix:outgoing_e-invoicing/}")
+private String outgoingPrefix;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+@Value("${retry.wait-seconds:30}")
+private long retryWaitSeconds;
+```
 
-@ExtendWith(MockitoExtension.class)
-class CosStorageServiceTest {
+Then:
 
-    @Mock
-    private AmazonS3 s3Client;
+```java
+private Duration getRetryWait() {
+    return Duration.ofSeconds(retryWaitSeconds);
+}
+```
 
-    @InjectMocks
-    private CosStorageService cosStorageService;
+---
 
-    @BeforeEach
-    void setUp() {
-        ReflectionTestUtils.setField(cosStorageService, "bucketName", "test-bucket");
+## 3. Updated retry logic
+
+This version removes `retrying/` entirely and uses `outgoing_e-invoicing/` for CFT.
+
+```java
+@Slf4j
+@RequiredArgsConstructor
+@Component
+public class RetryFailedTransfersTasklet implements Tasklet {
+
+    private final CosStorageService cosStorageService;
+    private final CFTApiClient cftApiClient;
+
+    @Value("${retry.failed-prefix:failed/}")
+    private String failedPrefix;
+
+    @Value("${retry.outgoing-prefix:outgoing_e-invoicing/}")
+    private String outgoingPrefix;
+
+    @Value("${retry.wait-seconds:30}")
+    private long retryWaitSeconds;
+
+    private static final String ZIP_PGP_SUFFIX = ".zip.pgp";
+    private static final String ZIP_SUFFIX = ".zip";
+
+    @Override
+    public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext) {
+        log.info("Starting retry of failed transfers");
+
+        List<String> failedFiles = cosStorageService.listKeys(failedPrefix);
+
+        for (String failedKey : failedFiles) {
+            String fileName = Paths.get(failedKey).getFileName().toString();
+
+            if (isValidRetryFile(fileName)) {
+                processRetryFile(failedFiles, failedKey, fileName);
+            }
+        }
+
+        log.info("Retry job finished");
+        return RepeatStatus.FINISHED;
     }
 
-    @Test
-    void moveIfExists_shouldReturnFalse_whenSourceDoesNotExist() {
-        String sourceKey = "failed/file.zip.pgp";
-        String targetKey = "retrying/file.zip.pgp";
+    private void processRetryFile(List<String> failedFiles, String failedKey, String fileName) {
+        String outgoingRetryKey = outgoingPrefix + fileName;
 
-        when(s3Client.doesObjectExist("test-bucket", sourceKey)).thenReturn(false);
+        try {
+            log.info("Preparing retry for {}", fileName);
 
-        boolean result = cosStorageService.moveIfExists(sourceKey, targetKey);
+            cosStorageService.copyFile(failedKey, outgoingRetryKey);
 
-        assertThat(result).isFalse();
-        verify(s3Client).doesObjectExist("test-bucket", sourceKey);
-        verify(s3Client, never()).copyObject("test-bucket", sourceKey, "test-bucket", targetKey);
-        verify(s3Client, never()).deleteObject("test-bucket", sourceKey);
+            log.info("Retrying transfer for {} using {}", fileName, outgoingRetryKey);
+
+            cftApiClient.notifyAndWaitForCompletion(
+                    outgoingRetryKey,
+                    fileName,
+                    Duration.ofSeconds(retryWaitSeconds)
+            );
+
+            cleanupFilesWithSameBase(failedFiles, fileName);
+            cosStorageService.deleteFile(outgoingRetryKey);
+
+            log.info("Retry successful for {}", fileName);
+
+        } catch (Exception ex) {
+            log.warn("Retry failed for {}", fileName, ex);
+
+            deleteOutgoingRetryCopyQuietly(outgoingRetryKey);
+        }
     }
 
-    @Test
-    void moveIfExists_shouldCopyAndDeleteAndReturnTrue_whenSourceExists() {
-        String sourceKey = "failed/file.zip.pgp";
-        String targetKey = "retrying/file.zip.pgp";
-
-        when(s3Client.doesObjectExist("test-bucket", sourceKey)).thenReturn(true);
-
-        boolean result = cosStorageService.moveIfExists(sourceKey, targetKey);
-
-        assertThat(result).isTrue();
-        verify(s3Client).doesObjectExist("test-bucket", sourceKey);
-        verify(s3Client).copyObject("test-bucket", sourceKey, "test-bucket", targetKey);
-        verify(s3Client).deleteObject("test-bucket", sourceKey);
+    private void deleteOutgoingRetryCopyQuietly(String outgoingRetryKey) {
+        try {
+            cosStorageService.deleteFile(outgoingRetryKey);
+            log.info("Deleted temporary outgoing retry file {}", outgoingRetryKey);
+        } catch (Exception ex) {
+            log.warn("Failed to delete temporary outgoing retry file {}", outgoingRetryKey, ex);
+        }
     }
 
-    @Test
-    void moveIfExists_shouldReturnFalse_whenExceptionOccurs() {
-        String sourceKey = "failed/file.zip.pgp";
-        String targetKey = "retrying/file.zip.pgp";
+    private boolean isValidRetryFile(String fileName) {
+        String normalized = fileName.toLowerCase(Locale.ROOT);
+        return normalized.endsWith(ZIP_PGP_SUFFIX)
+                && (normalized.contains("finance") || normalized.contains("miles"));
+    }
 
-        when(s3Client.doesObjectExist("test-bucket", sourceKey)).thenReturn(true);
-        doThrow(new RuntimeException("S3 copy failed"))
-                .when(s3Client)
-                .copyObject("test-bucket", sourceKey, "test-bucket", targetKey);
+    private void cleanupFilesWithSameBase(List<String> allFiles, String referenceFileName) {
+        String referenceBase = extractBaseName(referenceFileName);
 
-        boolean result = cosStorageService.moveIfExists(sourceKey, targetKey);
+        for (String key : allFiles) {
+            String fileName = Paths.get(key).getFileName().toString();
+            String candidateBase = extractBaseName(fileName);
 
-        assertThat(result).isFalse();
-        verify(s3Client).doesObjectExist("test-bucket", sourceKey);
-        verify(s3Client).copyObject("test-bucket", sourceKey, "test-bucket", targetKey);
-        verify(s3Client, never()).deleteObject("test-bucket", sourceKey);
+            if (referenceBase.equals(candidateBase)) {
+                try {
+                    cosStorageService.deleteFile(key);
+                    log.info("Deleted related failed file: {}", key);
+                } catch (Exception e) {
+                    log.warn("Failed to delete {}", key, e);
+                }
+            }
+        }
+    }
+
+    String extractBaseName(String fileName) {
+        if (fileName.endsWith(ZIP_PGP_SUFFIX)) {
+            return fileName.substring(0, fileName.length() - ZIP_PGP_SUFFIX.length());
+        }
+
+        if (fileName.endsWith(ZIP_SUFFIX)) {
+            return fileName.substring(0, fileName.length() - ZIP_SUFFIX.length());
+        }
+
+        int lastDot = fileName.lastIndexOf('.');
+        if (lastDot > 0) {
+            return fileName.substring(0, lastDot);
+        }
+
+        return fileName;
     }
 }
 ```
 
-A couple of notes:
+---
 
-* I used `AmazonS3` because your code shows `doesObjectExist`, `copyObject`, and `deleteObject`, which matches that client style.
-* If your field name is not exactly `bucketName`, change the `ReflectionTestUtils.setField(...)` line.
-* This should cover the red lines in `moveIfExists(...)` from your screenshot.
+# 4. Add `copyFile(...)` to `CosStorageService`
 
-You can also improve Sonar a bit by narrowing the catch to a more specific exception if your S3 client throws one, but for coverage this test class is enough.
+You currently have `moveIfExists(...)` and `moveFile(...)`.
+For this retry change, add a simple copy method:
+
+```java
+public void copyFile(String sourceKey, String targetKey) {
+    s3Client.copyObject(bucketName, sourceKey, bucketName, targetKey);
+    log.info("Copied {} -> {}", sourceKey, targetKey);
+}
+```
+
+If you want safer logging/error handling:
+
+```java
+public void copyFile(String sourceKey, String targetKey) {
+    try {
+        s3Client.copyObject(bucketName, sourceKey, bucketName, targetKey);
+        log.info("Copied {} -> {}", sourceKey, targetKey);
+    } catch (Exception e) {
+        throw new IllegalStateException("Failed to copy " + sourceKey + " to " + targetKey, e);
+    }
+}
+```
+
+---
+
+# Why this is the right behavior
+
+Because CFT is path-sensitive:
+
+* `failed/...` ❌
+* `retrying/...` ❌
+* `outgoing_e-invoicing/...` ✅
+
+So retry must call CFT only with:
+
+```text
+outgoing_e-invoicing/<filename>.zip.pgp
+```
+
+And because you want failed files preserved on retry failure, **copy** is better than move.
+
+---
+
+# Updated behavior summary
+
+## Retry success
+
+* copy `failed/file.zip.pgp` → `outgoing_e-invoicing/file.zip.pgp`
+* trigger CFT on `outgoing_e-invoicing/file.zip.pgp`
+* delete matching failed files
+* delete temporary outgoing retry copy
+
+## Retry failure
+
+* copy `failed/file.zip.pgp` → `outgoing_e-invoicing/file.zip.pgp`
+* trigger CFT fails
+* delete temporary outgoing retry copy
+* original file remains in `failed/`
+
+---
+
+# Test impact
+
+Your tests should now expect:
+
+* no `moveIfExists(...)`
+* no `retrying/...`
+* `copyFile(failedKey, outgoingRetryKey)`
+* `notifyAndWaitForCompletion(outgoingRetryKey, fileName, Duration.ofSeconds(...))`
+
+For example:
+
+```java
+verify(cosStorageService).copyFile(
+        "failed/finance_invoices_202401011030.zip.pgp",
+        "outgoing_e-invoicing/finance_invoices_202401011030.zip.pgp"
+);
+
+verify(cftApiClient).notifyAndWaitForCompletion(
+        "outgoing_e-invoicing/finance_invoices_202401011030.zip.pgp",
+        "finance_invoices_202401011030.zip.pgp",
+        Duration.ofSeconds(30)
+);
+```
+
+And on failure:
+
+```java
+verify(cosStorageService).deleteFile(
+        "outgoing_e-invoicing/miles_invoices_202401011030.zip.pgp"
+);
+```
+
+while the original failed key is not deleted.
+
+If you want, I’ll rewrite your `RetryFailedTransfersTaskletTest` for this new outgoing-path behavior.
