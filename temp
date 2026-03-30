@@ -1,364 +1,123 @@
-Perfect — this is exactly the **right way to build it step-by-step** 👍
-We’ll keep it **clean, testable, and production-aligned**.
+It’s a good setup overall. I’d use it, with a few adjustments for **your specific architecture**.
 
----
+What’s good about it:
 
-# 🚀 STEP 1 — Hello World: Arthur Core → Lancelot Call
+* It separates Arthur Core from the stub cleanly.
+* It works both locally and in Kubernetes.
+* Using profiles for dev/k8s/prod is the right pattern.
+* WireMock is a strong choice for simulating Ping before real integration.
 
-Goal:
+What I would change for your case:
 
-👉 Arthur Core calls Lancelot
-👉 Lancelot returns simple response
-👉 Validate networking + config (especially important for K8s)
+**1. Don’t use `RestTemplate` in the example**
+For your project, keep the client style consistent with Arthur Core. Use `WebClient` if that’s what you already started with. Mixing client styles early makes the codebase messy.
 
----
+**2. Don’t bind WireMock to port 8080 locally if your apps already use 8080/8081**
+Use something like `9090` for Ping stub to avoid clashes.
 
-## 🟣 1. Lancelot — Hello API
+**3. For Kubernetes, ConfigMap is fine for simple stubs, but not for secrets**
+If you later stub OIDC token responses with realistic fields, keep sensitive-like values out of ConfigMaps if they start resembling real credentials.
 
-### `LancelotController.java`
+**4. For Ping specifically, stub the OIDC endpoints you actually need**
+For your flow, the useful stubs are not `/api/users/1`, but:
 
-```java
-package com.yourcompany.lancelot.controller;
+* `/authorize`
+* `/token`
+* optionally `/.well-known/openid-configuration`
+* optionally `/userinfo`
+* later maybe `/jwks`
 
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RestController;
+That makes the local flow close to the real design.
 
-@RestController
-public class LancelotController {
+**5. Use profiles exactly as you described**
+That part is strong. I’d do:
 
-    @GetMapping("/hello")
-    public String hello() {
-        return "Hello from Lancelot";
-    }
-}
-```
+* `application-local.yml` → Arthur Core calls local WireMock
+* `application-k8s.yml` → Arthur Core calls `wiremock` service
+* `application-prod.yml` → Arthur Core calls real Ping
 
----
+**6. Prefer one dedicated stub per external dependency**
+For now:
 
-## 🟢 2. Arthur Core — Config (IMPORTANT)
+* `wiremock-ping`
+  Later, if needed:
+* `wiremock-b2boost`
 
-Add to `application.yml`:
+That keeps responsibilities clean.
+
+Here’s how I’d adapt your idea to your system.
+
+For Arthur Core properties:
 
 ```yaml
+stub:
+  ping:
+    base-url: ${PING_BASE_URL:http://localhost:9090}
+
 lancelot:
   base-url: ${LANCELOT_BASE_URL:http://localhost:8081}
 ```
 
-👉 Later this becomes:
-
-```text
-http://lancelot.<namespace>.svc.cluster.local:8080
-```
-
----
-
-## 🔌 3. Arthur Core — WebClient Config
-
-We avoid `RestTemplate` (deprecated style) → use **WebClient (production-ready)**
-
-### `WebClientConfig.java`
-
-```java
-package com.yourcompany.authcore.config;
-
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.web.reactive.function.client.WebClient;
-
-@Configuration
-public class WebClientConfig {
-
-    @Bean
-    public WebClient webClient() {
-        return WebClient.builder().build();
-    }
-}
-```
-
----
-
-## 🔁 4. Arthur Core — LancelotClient
-
-```java
-package com.yourcompany.authcore.client;
-
-import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Component;
-import org.springframework.web.reactive.function.client.WebClient;
-
-@Component
-@RequiredArgsConstructor
-public class LancelotClient {
-
-    private final WebClient webClient;
-
-    @Value("${lancelot.base-url}")
-    private String baseUrl;
-
-    public String hello() {
-        return webClient.get()
-                .uri(baseUrl + "/hello")
-                .retrieve()
-                .bodyToMono(String.class)
-                .block(); // OK for now (POC)
-    }
-}
-```
-
-✔ Sonar note: blocking is OK temporarily — we’ll improve later
-
----
-
-## 🔌 5. Arthur Core — Controller
-
-```java
-package com.yourcompany.authcore.controller;
-
-import com.yourcompany.authcore.client.LancelotClient;
-import lombok.RequiredArgsConstructor;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RestController;
-
-@RestController
-@RequiredArgsConstructor
-public class TestController {
-
-    private final LancelotClient lancelotClient;
-
-    @GetMapping("/test/lancelot")
-    public String testCall() {
-        return lancelotClient.hello();
-    }
-}
-```
-
----
-
-## ✅ 6. Test It
-
-### Run both apps
-
-* Lancelot → `localhost:8081`
-* Arthur Core → `localhost:8080`
-
----
-
-### Call:
+For local Docker:
 
 ```bash
-GET http://localhost:8080/test/lancelot
+docker run -d \
+  --name wiremock-ping \
+  -p 9090:8080 \
+  -v $(pwd)/wiremock-ping:/home/wiremock \
+  wiremock/wiremock:latest
 ```
 
-### Expected:
+Suggested local folder:
 
 ```text
-Hello from Lancelot
+wiremock-ping/
+  mappings/
+    authorize.json
+    token.json
+  __files/
 ```
 
----
-
-# 🧪 7. JUnit Test (Arthur Core)
-
-```java
-package com.yourcompany.authcore.client;
-
-import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
-import org.springframework.web.reactive.function.client.WebClient;
-
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-
-class LancelotClientTest {
-
-    @Test
-    void shouldCallHello() {
-        WebClient webClient = WebClient.builder().build();
-        LancelotClient client = new LancelotClient(webClient);
-
-        // Only verifying object creation (integration test later)
-        assertNotNull(client);
-    }
-}
-```
-
-👉 We’ll add **WireMock later for real API testing**
-
----
-
-# 🚀 STEP 2 — Add `getApp` in Lancelot
-
-Now we evolve from hello → real functionality
-
----
-
-## 🟣 1. Lancelot — App Entity
-
-```java
-package com.yourcompany.lancelot.model;
-
-import lombok.Data;
-
-@Data
-public class AppConfig {
-    private String appId;
-    private String clientId;
-    private String clientSecret;
-    private String authUrl;
-    private String tokenUrl;
-    private String redirectUrl;
-}
-```
-
----
-
-## 🟣 2. Lancelot — Controller
-
-```java
-package com.yourcompany.lancelot.controller;
-
-import com.yourcompany.lancelot.model.AppConfig;
-import org.springframework.web.bind.annotation.*;
-
-@RestController
-@RequestMapping("/apps")
-public class AppController {
-
-    @GetMapping("/{appId}")
-    public AppConfig getApp(@PathVariable String appId) {
-
-        // TEMP: mock response (replace with DB later)
-        AppConfig config = new AppConfig();
-        config.setAppId(appId);
-        config.setClientId("client-" + appId);
-        config.setClientSecret("secret");
-        config.setAuthUrl("http://ping/auth");
-        config.setTokenUrl("http://ping/token");
-        config.setRedirectUrl("http://localhost:8080/callback");
-
-        return config;
-    }
-}
-```
-
----
-
-## 🟢 3. Arthur Core — DTO
-
-```java
-package com.yourcompany.authcore.model;
-
-import lombok.Data;
-
-@Data
-public class AppConfig {
-    private String appId;
-    private String clientId;
-    private String clientSecret;
-    private String authUrl;
-    private String tokenUrl;
-    private String redirectUrl;
-}
-```
-
----
-
-## 🔁 4. Arthur Core — Update LancelotClient
-
-```java
-public AppConfig getApp(String appId) {
-
-    return webClient.get()
-            .uri(baseUrl + "/apps/{appId}", appId)
-            .retrieve()
-            .bodyToMono(AppConfig.class)
-            .block();
-}
-```
-
----
-
-## 🔌 5. Arthur Core — Test Endpoint
-
-```java
-@GetMapping("/test/app/{appId}")
-public AppConfig getApp(@PathVariable String appId) {
-    return lancelotClient.getApp(appId);
-}
-```
-
----
-
-## ✅ Test
-
-```bash
-GET http://localhost:8080/test/app/B2BOOST_BE
-```
-
----
-
-## Expected Response
+Example `authorize.json`:
 
 ```json
 {
-  "appId": "B2BOOST_BE",
-  "clientId": "client-B2BOOST_BE",
-  "clientSecret": "secret",
-  "authUrl": "http://ping/auth",
-  "tokenUrl": "http://ping/token",
-  "redirectUrl": "http://localhost:8080/callback"
+  "request": {
+    "method": "GET",
+    "urlPath": "/authorize"
+  },
+  "response": {
+    "status": 302,
+    "headers": {
+      "Location": "http://localhost:8080/auth/callback?code=dummy-code&state=test-state"
+    }
+  }
 }
 ```
 
----
+Example `token.json`:
 
-# 🧠 What You Achieved
+```json
+{
+  "request": {
+    "method": "POST",
+    "url": "/token"
+  },
+  "response": {
+    "status": 200,
+    "jsonBody": {
+      "access_token": "dummy-access-token",
+      "id_token": "dummy-id-token",
+      "token_type": "Bearer",
+      "expires_in": 3600
+    },
+    "headers": {
+      "Content-Type": "application/json"
+    }
+  }
+}
+```
 
-✔ Service-to-service communication
-✔ Config externalization
-✔ Clean DTO separation
-✔ Foundation for OIDC
+My verdict: **yes, the approach is solid**, and it fits your current phase very well. I’d just tailor it to **OIDC endpoints**, keep the ports clean, and keep Arthur Core using the same HTTP client style throughout.
 
----
-
-# 🔥 Next Step (Recommended Order)
-
-Now we should build:
-
-## 👉 Step 3 (VERY IMPORTANT)
-
-### Add DB (Postgres) in Lancelot
-
-* AppConfig table
-* JPA repository
-* real `getApp`
-
----
-
-Then:
-
-## 👉 Step 4
-
-Arthur Core:
-
-* Redis caching for AppConfig
-
----
-
-Then:
-
-## 👉 Step 5
-
-Auth flow:
-
-* `/auth/start`
-
----
-
-# 👉 Tell me next step:
-
-* "Add Postgres + JPA in Lancelot" ✅ (recommended next)
-* "Add Redis caching in Arthur Core"
-* "Start auth flow"
-
-I’ll guide you step-by-step with production-level code.
+The best next move is to create a **Ping stub with `/authorize` and `/token`**, then wire Arthur Core’s `/auth/start` to it.
