@@ -1,0 +1,568 @@
+Yes — let’s build **Lancelot first** so Arthur Core can consume a real `getApp`.
+
+We’ll create a minimal, clean version with:
+
+* Postgres
+* Liquibase
+* JPA
+* `GET /apps/{appId}`
+
+And we’ll return the shape Arthur Core needs.
+
+---
+
+# 1. What we’ll add in Lancelot
+
+## Package structure
+
+```text
+com.yourcompany.lancelot
+├── controller
+│   └── AppController.java
+├── dto
+│   └── AppConfigResponse.java
+├── entity
+│   └── AppConfigEntity.java
+├── repository
+│   └── AppConfigRepository.java
+├── service
+│   └── AppConfigService.java
+└── LancelotApplication.java
+```
+
+---
+
+# 2. Maven dependencies
+
+In `lancelot/pom.xml`, make sure you have these:
+
+```xml
+<dependencies>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-data-jpa</artifactId>
+    </dependency>
+
+    <dependency>
+        <groupId>org.postgresql</groupId>
+        <artifactId>postgresql</artifactId>
+    </dependency>
+
+    <dependency>
+        <groupId>org.liquibase</groupId>
+        <artifactId>liquibase-core</artifactId>
+    </dependency>
+
+    <dependency>
+        <groupId>org.projectlombok</groupId>
+        <artifactId>lombok</artifactId>
+        <optional>true</optional>
+    </dependency>
+
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-test</artifactId>
+        <scope>test</scope>
+    </dependency>
+</dependencies>
+```
+
+---
+
+# 3. `application.yml`
+
+Use this as a local starting point:
+
+```yaml
+server:
+  port: 8081
+  servlet:
+    context-path: /lancelot
+
+spring:
+  application:
+    name: lancelot
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/lancelot
+    username: postgres
+    password: postgres
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+
+  liquibase:
+    enabled: true
+    change-log: classpath:db/changelog/db.changelog-master.yaml
+
+logging:
+  level:
+    root: INFO
+    com.yourcompany.lancelot: DEBUG
+```
+
+If you do **not** want `/lancelot` context path, remove:
+
+```yaml
+server:
+  servlet:
+    context-path: /lancelot
+```
+
+Then the endpoint will just be `/apps/{appId}`.
+
+---
+
+# 4. Main application class
+
+```java
+package com.yourcompany.lancelot;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class LancelotApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(LancelotApplication.class, args);
+    }
+}
+```
+
+---
+
+# 5. Liquibase master file
+
+Create:
+
+```text
+src/main/resources/db/changelog/db.changelog-master.yaml
+```
+
+```yaml
+databaseChangeLog:
+  - include:
+      file: db/changelog/001-create-app-config.yaml
+```
+
+---
+
+# 6. Liquibase table + seed data
+
+Create:
+
+```text
+src/main/resources/db/changelog/001-create-app-config.yaml
+```
+
+```yaml
+databaseChangeLog:
+  - changeSet:
+      id: 001-create-app-config
+      author: you
+      changes:
+        - createTable:
+            tableName: app_config
+            columns:
+              - column:
+                  name: id
+                  type: BIGSERIAL
+                  constraints:
+                    primaryKey: true
+                    primaryKeyName: pk_app_config
+
+              - column:
+                  name: app_id
+                  type: VARCHAR(100)
+                  constraints:
+                    nullable: false
+                    unique: true
+
+              - column:
+                  name: enabled
+                  type: BOOLEAN
+                  defaultValueBoolean: true
+                  constraints:
+                    nullable: false
+
+              - column:
+                  name: client_id
+                  type: VARCHAR(255)
+                  constraints:
+                    nullable: false
+
+              - column:
+                  name: client_secret
+                  type: VARCHAR(255)
+                  constraints:
+                    nullable: false
+
+              - column:
+                  name: issuer_uri
+                  type: VARCHAR(500)
+                  constraints:
+                    nullable: false
+
+              - column:
+                  name: redirect_uri
+                  type: VARCHAR(500)
+                  constraints:
+                    nullable: false
+
+              - column:
+                  name: scopes
+                  type: VARCHAR(500)
+
+              - column:
+                  name: post_login_redirect_url
+                  type: VARCHAR(500)
+
+              - column:
+                  name: cookie_name
+                  type: VARCHAR(100)
+
+              - column:
+                  name: session_ttl_seconds
+                  type: BIGINT
+
+        - insert:
+            tableName: app_config
+            columns:
+              - column:
+                  name: app_id
+                  value: B2BOOST_BE
+              - column:
+                  name: enabled
+                  valueBoolean: true
+              - column:
+                  name: client_id
+                  value: b2boost-be
+              - column:
+                  name: client_secret
+                  value: your-local-secret
+              - column:
+                  name: issuer_uri
+                  value: http://localhost:8085/realms/arthur-local
+              - column:
+                  name: redirect_uri
+                  value: http://localhost:8080/arthur-core/auth/callback
+              - column:
+                  name: scopes
+                  value: openid,profile,email
+              - column:
+                  name: post_login_redirect_url
+                  value: http://localhost:3000/home
+              - column:
+                  name: cookie_name
+                  value: ARTHUR_SESSION
+              - column:
+                  name: session_ttl_seconds
+                  valueNumeric: 3600
+```
+
+For now, `scopes` is stored as comma-separated text. That keeps the first version simple.
+
+---
+
+# 7. Entity
+
+```java
+package com.yourcompany.lancelot.entity;
+
+import jakarta.persistence.*;
+import lombok.Getter;
+import lombok.Setter;
+
+@Entity
+@Table(name = "app_config")
+@Getter
+@Setter
+public class AppConfigEntity {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(name = "app_id", nullable = false, unique = true)
+    private String appId;
+
+    @Column(name = "enabled", nullable = false)
+    private boolean enabled;
+
+    @Column(name = "client_id", nullable = false)
+    private String clientId;
+
+    @Column(name = "client_secret", nullable = false)
+    private String clientSecret;
+
+    @Column(name = "issuer_uri", nullable = false)
+    private String issuerUri;
+
+    @Column(name = "redirect_uri", nullable = false)
+    private String redirectUri;
+
+    @Column(name = "scopes")
+    private String scopes;
+
+    @Column(name = "post_login_redirect_url")
+    private String postLoginRedirectUrl;
+
+    @Column(name = "cookie_name")
+    private String cookieName;
+
+    @Column(name = "session_ttl_seconds")
+    private Long sessionTtlSeconds;
+}
+```
+
+---
+
+# 8. Repository
+
+```java
+package com.yourcompany.lancelot.repository;
+
+import com.yourcompany.lancelot.entity.AppConfigEntity;
+import java.util.Optional;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface AppConfigRepository extends JpaRepository<AppConfigEntity, Long> {
+
+    Optional<AppConfigEntity> findByAppId(String appId);
+}
+```
+
+---
+
+# 9. Response DTO
+
+This is what Arthur Core will consume.
+
+```java
+package com.yourcompany.lancelot.dto;
+
+import java.util.List;
+import lombok.Getter;
+import lombok.Setter;
+
+@Getter
+@Setter
+public class AppConfigResponse {
+
+    private String appId;
+    private boolean enabled;
+    private String clientId;
+    private String clientSecret;
+    private String issuerUri;
+    private String redirectUri;
+    private List<String> scopes;
+    private String postLoginRedirectUrl;
+    private String cookieName;
+    private Long sessionTtlSeconds;
+}
+```
+
+---
+
+# 10. Service
+
+```java
+package com.yourcompany.lancelot.service;
+
+import com.yourcompany.lancelot.dto.AppConfigResponse;
+import com.yourcompany.lancelot.entity.AppConfigEntity;
+import com.yourcompany.lancelot.repository.AppConfigRepository;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+
+@Service
+@RequiredArgsConstructor
+public class AppConfigService {
+
+    private final AppConfigRepository appConfigRepository;
+
+    public AppConfigResponse getApp(String appId) {
+        validateAppId(appId);
+
+        AppConfigEntity entity = appConfigRepository.findByAppId(appId)
+                .orElseThrow(() -> new IllegalArgumentException("App not found: " + appId));
+
+        return mapToResponse(entity);
+    }
+
+    private AppConfigResponse mapToResponse(AppConfigEntity entity) {
+        AppConfigResponse response = new AppConfigResponse();
+        response.setAppId(entity.getAppId());
+        response.setEnabled(entity.isEnabled());
+        response.setClientId(entity.getClientId());
+        response.setClientSecret(entity.getClientSecret());
+        response.setIssuerUri(entity.getIssuerUri());
+        response.setRedirectUri(entity.getRedirectUri());
+        response.setScopes(parseScopes(entity.getScopes()));
+        response.setPostLoginRedirectUrl(entity.getPostLoginRedirectUrl());
+        response.setCookieName(entity.getCookieName());
+        response.setSessionTtlSeconds(entity.getSessionTtlSeconds());
+        return response;
+    }
+
+    private List<String> parseScopes(String scopes) {
+        if (scopes == null || scopes.isBlank()) {
+            return Collections.emptyList();
+        }
+
+        return Arrays.stream(scopes.split(","))
+                .map(String::trim)
+                .filter(value -> !value.isBlank())
+                .toList();
+    }
+
+    private void validateAppId(String appId) {
+        if (appId == null || appId.isBlank()) {
+            throw new IllegalArgumentException("appId must not be blank");
+        }
+    }
+}
+```
+
+---
+
+# 11. Controller
+
+```java
+package com.yourcompany.lancelot.controller;
+
+import com.yourcompany.lancelot.dto.AppConfigResponse;
+import com.yourcompany.lancelot.service.AppConfigService;
+import lombok.RequiredArgsConstructor;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequiredArgsConstructor
+@RequestMapping("/apps")
+public class AppController {
+
+    private final AppConfigService appConfigService;
+
+    @GetMapping("/{appId}")
+    public AppConfigResponse getApp(@PathVariable String appId) {
+        return appConfigService.getApp(appId);
+    }
+}
+```
+
+If you keep the context path `/lancelot`, then your full local URL becomes:
+
+```text
+http://localhost:8081/lancelot/apps/B2BOOST_BE
+```
+
+If you remove that context path, then it becomes:
+
+```text
+http://localhost:8081/apps/B2BOOST_BE
+```
+
+---
+
+# 12. Optional exception handler
+
+This makes bad requests cleaner.
+
+```java
+package com.yourcompany.lancelot.controller;
+
+import java.util.Map;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.*;
+
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+    @ExceptionHandler(IllegalArgumentException.class)
+    @ResponseStatus(HttpStatus.NOT_FOUND)
+    public Map<String, String> handleIllegalArgumentException(IllegalArgumentException exception) {
+        return Map.of("message", exception.getMessage());
+    }
+}
+```
+
+---
+
+# 13. What you should be able to test
+
+Start Postgres, then start Lancelot.
+
+Call:
+
+```bash
+curl http://localhost:8081/lancelot/apps/B2BOOST_BE
+```
+
+or, without context path:
+
+```bash
+curl http://localhost:8081/apps/B2BOOST_BE
+```
+
+Expected response:
+
+```json
+{
+  "appId": "B2BOOST_BE",
+  "enabled": true,
+  "clientId": "b2boost-be",
+  "clientSecret": "your-local-secret",
+  "issuerUri": "http://localhost:8085/realms/arthur-local",
+  "redirectUri": "http://localhost:8080/arthur-core/auth/callback",
+  "scopes": ["openid", "profile", "email"],
+  "postLoginRedirectUrl": "http://localhost:3000/home",
+  "cookieName": "ARTHUR_SESSION",
+  "sessionTtlSeconds": 3600
+}
+```
+
+---
+
+# 14. Important note for later
+
+For **POC/local**, returning `clientSecret` from DB is fine.
+
+Later for production, we’ll likely change that to:
+
+* `clientSecretRef`
+* or secret-manager lookup
+* or encrypted storage
+
+But for now, this is the fastest clean path.
+
+---
+
+# 15. Best next step
+
+Once this works, we connect Arthur Core `/arthur-core/auth/start` to this endpoint and build the Keycloak authorize redirect.
+
+If you want, I’ll give you the **matching Arthur Core classes next**, exactly aligned to this Lancelot response shape.
