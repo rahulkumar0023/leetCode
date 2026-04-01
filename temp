@@ -1,697 +1,156 @@
-Yes — let’s start with **Arthur Core** in the refined shape you described.
-
-We’ll keep:
-
-* **Lancelot URL exactly as configured earlier**
-* **context path = `/arthur-core`**
-* **roles from Lancelot**
-* **dynamic app config from Lancelot**
-* **issuer discovery**
-* **PKCE**
-* **separate Redis records for auth transaction and user session**
+Good — this is a classic Spring Boot issue 👍
+You’re very close, just missing **RedisTemplate configuration**.
 
 ---
 
-# Step 1: Arthur Core shape
+# 🚨 The Error Meaning
 
-## Endpoints we build first
+> *“No qualifying bean of type RedisTemplate…”*
 
-```text
-POST /arthur-core/auth/start
-GET  /arthur-core/auth/callback
+👉 Spring is telling you:
+
+> “You are injecting `RedisTemplate`, but I don’t know how to create it.”
+
+Even though you added:
+
+```xml
+spring-boot-starter-data-redis
 ```
 
----
-
-# Step 2: `application.yml`
-
-Only platform-level config goes here.
-
-```yaml
-server:
-  port: 8080
-  servlet:
-    context-path: /arthur-core
-
-spring:
-  application:
-    name: arthur-core
-  redis:
-    host: localhost
-    port: 6379
-    timeout: 2000ms
-
-lancelot:
-  base-url: http://lancelot-backend.ns-lancelot.svc.cluster.local
-
-auth:
-  state:
-    ttl-seconds: 300
-  session:
-    ttl-seconds: 3600
-  cookie:
-    name: ARTHUR_SESSION
-    secure: false
-    http-only: true
-    same-site: Lax
-
-http:
-  client:
-    connect-timeout-ms: 5000
-    read-timeout-ms: 5000
-```
-
-For local-only testing, you can override `lancelot.base-url` to localhost if needed.
+👉 Spring Boot **does NOT always auto-create a usable `RedisTemplate<Object, Object>`**
 
 ---
 
-# Step 3: Classes to create in Arthur Core
+# ✅ FIX — Add RedisConfig
 
-## Package structure
-
-```text
-com.yourcompany.arthurcore
-├── client
-│   ├── LancelotClient.java
-│   └── OidcDiscoveryClient.java
-├── config
-│   ├── HttpClientConfig.java
-│   └── RedisConfig.java
-├── controller
-│   └── AuthController.java
-├── model
-│   ├── AppConfigResponse.java
-│   ├── AuthStartResponse.java
-│   ├── AuthTransaction.java
-│   ├── OidcMetadata.java
-│   ├── TokenResponse.java
-│   ├── UserInfoResponse.java
-│   └── UserSession.java
-├── service
-│   ├── AuthService.java
-│   ├── PkceService.java
-│   ├── RedisAuthTransactionService.java
-│   └── RedisSessionService.java
-└── util
-    └── RandomValueGenerator.java
-```
-
----
-
-# Step 4: Data models
-
-## `AppConfigResponse`
-
-This is what Arthur Core receives from Lancelot.
+Create this class in Arthur Core:
 
 ```java
-package com.yourcompany.arthurcore.model;
-
-import java.util.List;
-import lombok.Getter;
-import lombok.Setter;
-
-@Getter
-@Setter
-public class AppConfigResponse {
-
-    private String appId;
-    private boolean enabled;
-    private String clientId;
-    private String clientSecret;
-    private String issuerUri;
-    private String redirectUri;
-    private List<String> scopes;
-    private String postLoginRedirectUrl;
-    private String cookieName;
-    private Long sessionTtlSeconds;
-}
-```
-
----
-
-## `AuthTransaction`
-
-Short-lived Redis record keyed by `state`.
-
-```java
-package com.yourcompany.arthurcore.model;
-
-import java.io.Serializable;
-import java.time.Instant;
-import lombok.Getter;
-import lombok.Setter;
-
-@Getter
-@Setter
-public class AuthTransaction implements Serializable {
-
-    private String state;
-    private String nonce;
-    private String codeVerifier;
-    private String appId;
-    private String redirectUri;
-    private String postLoginRedirectUrl;
-    private Instant createdAt;
-}
-```
-
----
-
-## `UserSession`
-
-Longer-lived Redis record keyed by session id.
-
-```java
-package com.yourcompany.arthurcore.model;
-
-import java.io.Serializable;
-import java.time.Instant;
-import java.util.List;
-import lombok.Getter;
-import lombok.Setter;
-
-@Getter
-@Setter
-public class UserSession implements Serializable {
-
-    private String sessionId;
-    private String userId;
-    private String appId;
-    private String tenant;
-    private List<String> roles;
-    private String accessToken;
-    private String idToken;
-    private Instant expiresAt;
-}
-```
-
----
-
-## `OidcMetadata`
-
-```java
-package com.yourcompany.arthurcore.model;
-
-import com.fasterxml.jackson.annotation.JsonProperty;
-import lombok.Getter;
-import lombok.Setter;
-
-@Getter
-@Setter
-public class OidcMetadata {
-
-    private String issuer;
-
-    @JsonProperty("authorization_endpoint")
-    private String authorizationEndpoint;
-
-    @JsonProperty("token_endpoint")
-    private String tokenEndpoint;
-
-    @JsonProperty("jwks_uri")
-    private String jwksUri;
-}
-```
-
----
-
-## `TokenResponse`
-
-```java
-package com.yourcompany.arthurcore.model;
-
-import com.fasterxml.jackson.annotation.JsonProperty;
-import lombok.Getter;
-import lombok.Setter;
-
-@Getter
-@Setter
-public class TokenResponse {
-
-    @JsonProperty("access_token")
-    private String accessToken;
-
-    @JsonProperty("id_token")
-    private String idToken;
-
-    @JsonProperty("token_type")
-    private String tokenType;
-
-    @JsonProperty("expires_in")
-    private Long expiresIn;
-
-    @JsonProperty("refresh_token")
-    private String refreshToken;
-}
-```
-
----
-
-# Step 5: Lancelot client
-
-Keep the previously configured URL.
-
-```java
-package com.yourcompany.arthurcore.client;
-
-import com.yourcompany.arthurcore.model.AppConfigResponse;
-import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Component;
-import org.springframework.web.reactive.function.client.WebClient;
-
-@Component
-@RequiredArgsConstructor
-public class LancelotClient {
-
-    private final WebClient webClient;
-
-    @Value("${lancelot.base-url}")
-    private String baseUrl;
-
-    public AppConfigResponse getApp(String appId) {
-        validateAppId(appId);
-
-        return webClient.get()
-                .uri(baseUrl + "/apps/{appId}", appId)
-                .retrieve()
-                .bodyToMono(AppConfigResponse.class)
-                .block();
-    }
-
-    private void validateAppId(String appId) {
-        if (appId == null || appId.isBlank()) {
-            throw new IllegalArgumentException("appId must not be blank");
-        }
-    }
-}
-```
-
----
-
-# Step 6: OIDC discovery client
-
-We use `issuerUri` instead of storing all endpoints in DB.
-
-```java
-package com.yourcompany.arthurcore.client;
-
-import com.yourcompany.arthurcore.model.OidcMetadata;
-import lombok.RequiredArgsConstructor;
-import org.springframework.stereotype.Component;
-import org.springframework.web.reactive.function.client.WebClient;
-
-@Component
-@RequiredArgsConstructor
-public class OidcDiscoveryClient {
-
-    private final WebClient webClient;
-
-    public OidcMetadata loadMetadata(String issuerUri) {
-        validateIssuerUri(issuerUri);
-
-        return webClient.get()
-                .uri(issuerUri + "/.well-known/openid-configuration")
-                .retrieve()
-                .bodyToMono(OidcMetadata.class)
-                .block();
-    }
-
-    private void validateIssuerUri(String issuerUri) {
-        if (issuerUri == null || issuerUri.isBlank()) {
-            throw new IllegalArgumentException("issuerUri must not be blank");
-        }
-    }
-}
-```
-
----
-
-# Step 7: PKCE service
-
-```java
-package com.yourcompany.arthurcore.service;
-
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.Base64;
-import org.springframework.stereotype.Service;
-
-@Service
-public class PkceService {
-
-    public String generateCodeChallenge(String codeVerifier) {
-        if (codeVerifier == null || codeVerifier.isBlank()) {
-            throw new IllegalArgumentException("codeVerifier must not be blank");
-        }
-
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hashed = digest.digest(codeVerifier.getBytes(StandardCharsets.US_ASCII));
-            return Base64.getUrlEncoder().withoutPadding().encodeToString(hashed);
-        } catch (NoSuchAlgorithmException exception) {
-            throw new IllegalStateException("SHA-256 algorithm not available", exception);
-        }
-    }
-}
-```
-
----
-
-# Step 8: random generator util
-
-```java
-package com.yourcompany.arthurcore.util;
-
-import java.security.SecureRandom;
-import java.util.Base64;
-import org.springframework.stereotype.Component;
-
-@Component
-public class RandomValueGenerator {
-
-    private static final int DEFAULT_SIZE = 32;
-    private final SecureRandom secureRandom = new SecureRandom();
-
-    public String generate() {
-        byte[] value = new byte[DEFAULT_SIZE];
-        secureRandom.nextBytes(value);
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(value);
-    }
-}
-```
-
----
-
-# Step 9: Redis services
-
-## Auth transaction service
-
-```java
-package com.yourcompany.arthurcore.service;
-
-import com.yourcompany.arthurcore.model.AuthTransaction;
-import java.util.concurrent.TimeUnit;
-import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.annotation.Value;
+package com.yourcompany.arthurcore.config;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.stereotype.Service;
+import org.springframework.data.redis.serializer.*;
 
-@Service
-@RequiredArgsConstructor
-public class RedisAuthTransactionService {
+@Configuration
+public class RedisConfig {
 
-    private static final String PREFIX = "auth:state:";
-    private final RedisTemplate<String, Object> redisTemplate;
+    @Bean
+    public RedisTemplate<String, Object> redisTemplate(RedisConnectionFactory connectionFactory) {
 
-    @Value("${auth.state.ttl-seconds}")
-    private long ttlSeconds;
+        RedisTemplate<String, Object> template = new RedisTemplate<>();
+        template.setConnectionFactory(connectionFactory);
 
-    public void save(AuthTransaction transaction) {
-        redisTemplate.opsForValue()
-                .set(PREFIX + transaction.getState(), transaction, ttlSeconds, TimeUnit.SECONDS);
-    }
+        // Key serializer
+        template.setKeySerializer(new StringRedisSerializer());
+        template.setHashKeySerializer(new StringRedisSerializer());
 
-    public AuthTransaction findByState(String state) {
-        Object value = redisTemplate.opsForValue().get(PREFIX + state);
-        if (value instanceof AuthTransaction transaction) {
-            return transaction;
-        }
-        return null;
-    }
+        // Value serializer (JSON)
+        ObjectMapper objectMapper = new ObjectMapper();
+        objectMapper.registerModule(new JavaTimeModule());
 
-    public void delete(String state) {
-        redisTemplate.delete(PREFIX + state);
-    }
-}
-```
+        GenericJackson2JsonRedisSerializer serializer =
+                new GenericJackson2JsonRedisSerializer(objectMapper);
 
-## Session service
+        template.setValueSerializer(serializer);
+        template.setHashValueSerializer(serializer);
 
-```java
-package com.yourcompany.arthurcore.service;
-
-import com.yourcompany.arthurcore.model.UserSession;
-import java.util.concurrent.TimeUnit;
-import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.stereotype.Service;
-
-@Service
-@RequiredArgsConstructor
-public class RedisSessionService {
-
-    private static final String PREFIX = "session:";
-    private final RedisTemplate<String, Object> redisTemplate;
-
-    @Value("${auth.session.ttl-seconds}")
-    private long ttlSeconds;
-
-    public void save(UserSession session) {
-        redisTemplate.opsForValue()
-                .set(PREFIX + session.getSessionId(), session, ttlSeconds, TimeUnit.SECONDS);
-    }
-
-    public UserSession findBySessionId(String sessionId) {
-        Object value = redisTemplate.opsForValue().get(PREFIX + sessionId);
-        if (value instanceof UserSession session) {
-            return session;
-        }
-        return null;
+        template.afterPropertiesSet();
+        return template;
     }
 }
 ```
 
 ---
 
-# Step 10: Auth service for `/auth/start`
+# 🧠 Why this is IMPORTANT
 
-This is the first functionality we implement now.
+Without this:
 
-```java
-package com.yourcompany.arthurcore.service;
+* Redis stores binary junk ❌
+* Serialization breaks ❌
+* Dates (Instant) fail ❌
+* Debugging becomes painful ❌
 
-import com.yourcompany.arthurcore.client.LancelotClient;
-import com.yourcompany.arthurcore.client.OidcDiscoveryClient;
-import com.yourcompany.arthurcore.model.AppConfigResponse;
-import com.yourcompany.arthurcore.model.AuthTransaction;
-import com.yourcompany.arthurcore.model.OidcMetadata;
-import com.yourcompany.arthurcore.util.RandomValueGenerator;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
-import java.time.Instant;
-import java.util.List;
-import lombok.RequiredArgsConstructor;
-import org.springframework.stereotype.Service;
+With this:
 
-@Service
-@RequiredArgsConstructor
-public class AuthService {
+✔ JSON stored in Redis
+✔ readable
+✔ safe for your `AuthTransaction` and `UserSession`
+✔ works with `Instant`
 
-    private final LancelotClient lancelotClient;
-    private final OidcDiscoveryClient oidcDiscoveryClient;
-    private final RandomValueGenerator randomValueGenerator;
-    private final PkceService pkceService;
-    private final RedisAuthTransactionService redisAuthTransactionService;
+---
 
-    public String startAuthentication(String appId) {
-        validateAppId(appId);
+# ⚠️ Also verify dependency
 
-        AppConfigResponse appConfig = lancelotClient.getApp(appId);
-        validateAppConfig(appConfig);
+In Arthur Core `pom.xml`:
 
-        OidcMetadata metadata = oidcDiscoveryClient.loadMetadata(appConfig.getIssuerUri());
-
-        String state = randomValueGenerator.generate();
-        String nonce = randomValueGenerator.generate();
-        String codeVerifier = randomValueGenerator.generate();
-        String codeChallenge = pkceService.generateCodeChallenge(codeVerifier);
-
-        AuthTransaction transaction = new AuthTransaction();
-        transaction.setState(state);
-        transaction.setNonce(nonce);
-        transaction.setCodeVerifier(codeVerifier);
-        transaction.setAppId(appConfig.getAppId());
-        transaction.setRedirectUri(appConfig.getRedirectUri());
-        transaction.setPostLoginRedirectUrl(appConfig.getPostLoginRedirectUrl());
-        transaction.setCreatedAt(Instant.now());
-
-        redisAuthTransactionService.save(transaction);
-
-        return buildAuthorizeUrl(metadata, appConfig, state, nonce, codeChallenge);
-    }
-
-    private String buildAuthorizeUrl(
-            OidcMetadata metadata,
-            AppConfigResponse appConfig,
-            String state,
-            String nonce,
-            String codeChallenge) {
-
-        List<String> scopes = appConfig.getScopes();
-        String scopeValue = scopes == null || scopes.isEmpty()
-                ? "openid"
-                : String.join(" ", scopes);
-
-        return metadata.getAuthorizationEndpoint()
-                + "?client_id=" + encode(appConfig.getClientId())
-                + "&response_type=code"
-                + "&scope=" + encode(scopeValue)
-                + "&redirect_uri=" + encode(appConfig.getRedirectUri())
-                + "&state=" + encode(state)
-                + "&nonce=" + encode(nonce)
-                + "&code_challenge=" + encode(codeChallenge)
-                + "&code_challenge_method=S256";
-    }
-
-    private String encode(String value) {
-        return URLEncoder.encode(value, StandardCharsets.UTF_8);
-    }
-
-    private void validateAppId(String appId) {
-        if (appId == null || appId.isBlank()) {
-            throw new IllegalArgumentException("APP_ID must not be blank");
-        }
-    }
-
-    private void validateAppConfig(AppConfigResponse appConfig) {
-        if (appConfig == null) {
-            throw new IllegalStateException("App config not found");
-        }
-        if (!appConfig.isEnabled()) {
-            throw new IllegalStateException("App is disabled");
-        }
-        if (appConfig.getClientId() == null || appConfig.getClientId().isBlank()) {
-            throw new IllegalStateException("Missing clientId");
-        }
-        if (appConfig.getIssuerUri() == null || appConfig.getIssuerUri().isBlank()) {
-            throw new IllegalStateException("Missing issuerUri");
-        }
-        if (appConfig.getRedirectUri() == null || appConfig.getRedirectUri().isBlank()) {
-            throw new IllegalStateException("Missing redirectUri");
-        }
-    }
-}
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-data-redis</artifactId>
+</dependency>
 ```
 
 ---
 
-# Step 11: Controller
+# 🧪 Also ensure Redis is running
 
-For now, start with `GET` for easy browser testing.
+If local:
 
-```java
-package com.yourcompany.arthurcore.controller;
-
-import com.yourcompany.arthurcore.service.AuthService;
-import lombok.RequiredArgsConstructor;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestHeader;
-import org.springframework.web.bind.annotation.RestController;
-
-import java.net.URI;
-
-@RestController
-@RequiredArgsConstructor
-public class AuthController {
-
-    private final AuthService authService;
-
-    @GetMapping("/auth/start")
-    public ResponseEntity<Void> startAuthentication(
-            @RequestHeader("APP_ID") String appId) {
-
-        String redirectUrl = authService.startAuthentication(appId);
-
-        HttpHeaders headers = new HttpHeaders();
-        headers.setLocation(URI.create(redirectUrl));
-        return new ResponseEntity<>(headers, HttpStatus.FOUND);
-    }
-}
+```bash
+docker run -p 6379:6379 redis
 ```
 
 ---
 
-# Step 12: What Lancelot `getApp` should return now
+# 🧪 Quick test after fix
 
-For Arthur Core to work with this design, Lancelot should return at least:
+Start Arthur Core again.
 
-```json
-{
-  "appId": "B2BOOST_BE",
-  "enabled": true,
-  "clientId": "b2boost-be",
-  "clientSecret": "your-secret-for-poc",
-  "issuerUri": "http://localhost:8085/realms/arthur-local",
-  "redirectUri": "http://localhost:8080/arthur-core/auth/callback",
-  "scopes": ["openid", "profile", "email"],
-  "postLoginRedirectUrl": "http://localhost:3000/home",
-  "cookieName": "ARTHUR_SESSION",
-  "sessionTtlSeconds": 3600
-}
-```
-
----
-
-# Step 13: what we test first
-
-Call Arthur Core:
+Then hit:
 
 ```bash
 curl -i -H "APP_ID: B2BOOST_BE" http://localhost:8080/arthur-core/auth/start
 ```
 
-Expected:
+---
 
-* HTTP `302`
-* `Location` header pointing to Keycloak authorize URL
+# 🧠 What this unlocks
 
-That proves:
+Now your system can:
 
-* Arthur Core → Lancelot works
-* Arthur Core → OIDC discovery works
-* Redis auth transaction storage works
-* PKCE generation works
+✔ Store auth transaction (`state`, PKCE)
+✔ Store user session later
+✔ Handle TTL correctly
 
 ---
 
-# Step 14: what comes immediately after this
+# 🚀 Next Step (after this works)
 
-Next we implement:
+👉 Implement `/arthur-core/auth/callback`
 
-## `/arthur-core/auth/callback`
+This is where everything comes together:
 
-That will:
-
-* receive `code` and `state`
-* load auth transaction from Redis
-* exchange code for tokens using `clientSecret` + `codeVerifier`
-* validate token
-* extract stable user id
-* call `Lancelot.getUserById`
-* create user session in Redis
-* set secure session cookie
-* redirect to app landing page
+* token exchange
+* JWT parsing
+* Lancelot user lookup
+* session creation
 
 ---
 
-# Important note on your design
+# 🎯 Summary
 
-Your refined direction is the correct one:
-
-* **Arthur Core** orchestrates
-* **Lancelot** provides app/user data
-* **Keycloak/Ping** authenticates only
-* **roles stay in Lancelot**
-* **dynamic app config** comes from DB
-* **`APP_ID` is okay locally**, later make it infrastructure-trusted
+👉 Error = missing RedisTemplate bean
+👉 Fix = add `RedisConfig`
+👉 Also ensure Redis is running
 
 ---
 
-Send me your current `getApp` response shape in Lancelot, and I’ll adapt the Arthur Core DTO exactly to it, then we can do `/auth/callback` next.
+If you want, next I’ll give you:
+
+👉 **full `/auth/callback` implementation (production-grade)** 🔥
