@@ -1,91 +1,81 @@
-Nice — moving Keycloak to Kubernetes is exactly the right next step 👍
-Let’s do this cleanly and **production-friendly**, while keeping everything in **one YAML file** like you asked.
+Got it — this is a **very common corporate setup issue** 👍
+Your org is blocking `http://keycloak.local` because:
+
+* It’s **not HTTPS**
+* Or it’s using a **self-signed / untrusted certificate**
+
+So we need to fix this by making Keycloak available over **HTTPS with a trusted cert**.
 
 ---
 
-# 🧱 What We’ll Create (Single YAML)
+# 🔐 ✅ Best Approach (Works in Corp Environments)
 
-We’ll include:
+You have 3 realistic options:
 
-1. **Namespace** (optional but clean)
-2. **Deployment** (Keycloak container)
-3. **Service** (ClusterIP → internal access)
-4. **Ingress** (external access URL)
+### 🟢 Option 1 — Use your company’s internal CA (BEST)
+
+If your org provides certificates → use them.
+
+### 🟡 Option 2 — Use your own self-signed cert (quick workaround)
+
+Then manually trust it on your machine.
+
+### 🔴 Option 3 — Use Let’s Encrypt
+
+Only works if your cluster is publicly accessible (usually NOT your case).
 
 ---
 
-# 📦 ✅ Full Kubernetes YAML (Single File)
+# 🧱 Let’s Fix Your Setup (Single YAML, HTTPS)
 
-You can save this as:
+We’ll:
+
+1. Add a **TLS secret**
+2. Update **Ingress to HTTPS**
+
+---
+
+# ✳️ Step 1 — Create Certificate
+
+## Option A (Recommended): Self-signed
 
 ```bash
-keycloak-all.yaml
+openssl req -x509 -nodes -days 365 \
+  -newkey rsa:2048 \
+  -keyout keycloak.key \
+  -out keycloak.crt \
+  -subj "/CN=keycloak.local/O=dev"
 ```
 
+---
+
+# ✳️ Step 2 — Create Kubernetes TLS Secret
+
+```bash
+kubectl create secret tls keycloak-tls \
+  --cert=keycloak.crt \
+  --key=keycloak.key \
+  -n keycloak
+```
+
+---
+
+# ✳️ Step 3 — Update Your Ingress
+
+Replace your Ingress with this:
+
 ```yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: keycloak
-
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: keycloak
-  namespace: keycloak
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: keycloak
-  template:
-    metadata:
-      labels:
-        app: keycloak
-    spec:
-      containers:
-        - name: keycloak
-          image: quay.io/keycloak/keycloak:24.0.2
-          args: ["start-dev"]
-          ports:
-            - containerPort: 8080
-          env:
-            - name: KEYCLOAK_ADMIN
-              value: admin
-            - name: KEYCLOAK_ADMIN_PASSWORD
-              value: admin
-            - name: KC_PROXY
-              value: edge
-            - name: KC_HOSTNAME
-              value: keycloak.local
-            - name: KC_HOSTNAME_STRICT
-              value: "false"
-
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: keycloak
-  namespace: keycloak
-spec:
-  type: ClusterIP
-  selector:
-    app: keycloak
-  ports:
-    - port: 80
-      targetPort: 8080
-
----
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: keycloak
   namespace: keycloak
-  annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /
 spec:
   ingressClassName: nginx
+  tls:
+    - hosts:
+        - keycloak.local
+      secretName: keycloak-tls
   rules:
     - host: keycloak.local
       http:
@@ -101,130 +91,106 @@ spec:
 
 ---
 
-# 🚀 Apply It
+# 🌐 Now Your URL Becomes:
 
-```bash
-kubectl apply -f keycloak-all.yaml
+```
+https://keycloak.local
 ```
 
 ---
 
-# 🌐 How to Access Keycloak (VERY IMPORTANT)
+# ⚠️ You STILL Need One More Step (IMPORTANT)
 
-## ✅ Your Keycloak URL will be:
-
-```
-http://keycloak.local
-```
+Your OS will still block it unless you trust the cert.
 
 ---
 
-## 🛠 But you MUST add this to your machine:
+## 💻 Trust the Certificate
 
-Edit your hosts file:
-
-### Mac / Linux:
+### Mac:
 
 ```bash
-sudo nano /etc/hosts
+sudo security add-trusted-cert -d -r trustRoot \
+  -k /Library/Keychains/System.keychain keycloak.crt
 ```
+
+---
 
 ### Windows:
 
-```
-C:\Windows\System32\drivers\etc\hosts
-```
+1. Double-click `keycloak.crt`
+2. Click **Install Certificate**
+3. Choose:
 
-Add:
-
-```
-127.0.0.1 keycloak.local
-```
+   * Local Machine
+   * Trusted Root Certification Authorities
 
 ---
 
-# ⚠️ Important Requirements
+# 🧠 Why This Fixes Your Problem
 
-## 1. You need an Ingress Controller
+Your org blocks:
 
-If you don’t already have one:
+* ❌ HTTP
+* ❌ Unknown certificates
 
-Install NGINX ingress:
+Now you have:
+
+* ✅ HTTPS
+* ✅ Trusted cert
+
+---
+
+# 🔥 BONUS (Better Corporate-Friendly Setup)
+
+Instead of `keycloak.local`, use something like:
+
+```
+keycloak.dev.internal
+```
+
+Less likely to be blocked.
+
+---
+
+# 🚨 If You Still Get Blocked
+
+Then your org likely:
+
+* Blocks **custom domains**
+* Requires **proxy or VPN routing**
+
+👉 In that case, use:
 
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/cloud/deploy.yaml
+kubectl port-forward svc/keycloak 8080:80 -n keycloak
+```
+
+Then access:
+
+```
+http://localhost:8080
 ```
 
 ---
 
-## 2. Check everything is running
+# 🚀 Next Step (Highly Recommended)
 
-```bash
-kubectl get pods -n keycloak
-kubectl get svc -n keycloak
-kubectl get ingress -n keycloak
-```
+Once this works, we should:
 
----
-
-# 🔐 Keycloak Admin Access
-
-Once it’s up:
-
-👉 Open:
-
-```
-http://keycloak.local
-```
-
-Login:
-
-* username: `admin`
-* password: `admin`
+* Add **cert-manager** (auto TLS)
+* Use **real domain + DNS**
+* Configure **Keycloak hostname properly**
 
 ---
 
-# 🔥 Integration Tip (VERY important for your project)
+# 👉 Tell me this
 
-In your **Arthur Core config**, use:
+What exact error are you seeing?
 
-```
-issuer: http://keycloak.local/realms/<your-realm>
-```
+* “certificate not trusted”
+* “connection blocked”
+* “ERR_CERT_AUTHORITY_INVALID”
+* or something else?
 
-NOT localhost anymore.
-
----
-
-# ⚠️ If It Doesn’t Work
-
-Check:
-
-```bash
-kubectl describe ingress keycloak -n keycloak
-kubectl logs -n keycloak deployment/keycloak
-```
-
----
-
-# 🚀 Next Step (I Recommend)
-
-Once this works, next we should:
-
-👉 Move Keycloak from `start-dev` → **production mode**
-
-* external DB (Postgres)
-* HTTPS
-* proper hostname
-
----
-
-# 👉 Quick Question for You
-
-Are you running:
-
-* Docker Desktop Kubernetes?
-* Minikube?
-* Kind?
-
-Because I can tailor the ingress + URL exactly to your setup (this matters a LOT).
+I’ll pinpoint the exact fix for your environment 🔍
