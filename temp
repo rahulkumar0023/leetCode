@@ -1,156 +1,230 @@
-Good — this is a classic Spring Boot issue 👍
-You’re very close, just missing **RedisTemplate configuration**.
+Nice — moving Keycloak to Kubernetes is exactly the right next step 👍
+Let’s do this cleanly and **production-friendly**, while keeping everything in **one YAML file** like you asked.
 
 ---
 
-# 🚨 The Error Meaning
+# 🧱 What We’ll Create (Single YAML)
 
-> *“No qualifying bean of type RedisTemplate…”*
+We’ll include:
 
-👉 Spring is telling you:
-
-> “You are injecting `RedisTemplate`, but I don’t know how to create it.”
-
-Even though you added:
-
-```xml
-spring-boot-starter-data-redis
-```
-
-👉 Spring Boot **does NOT always auto-create a usable `RedisTemplate<Object, Object>`**
+1. **Namespace** (optional but clean)
+2. **Deployment** (Keycloak container)
+3. **Service** (ClusterIP → internal access)
+4. **Ingress** (external access URL)
 
 ---
 
-# ✅ FIX — Add RedisConfig
+# 📦 ✅ Full Kubernetes YAML (Single File)
 
-Create this class in Arthur Core:
-
-```java
-package com.yourcompany.arthurcore.config;
-
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.data.redis.connection.RedisConnectionFactory;
-import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.data.redis.serializer.*;
-
-@Configuration
-public class RedisConfig {
-
-    @Bean
-    public RedisTemplate<String, Object> redisTemplate(RedisConnectionFactory connectionFactory) {
-
-        RedisTemplate<String, Object> template = new RedisTemplate<>();
-        template.setConnectionFactory(connectionFactory);
-
-        // Key serializer
-        template.setKeySerializer(new StringRedisSerializer());
-        template.setHashKeySerializer(new StringRedisSerializer());
-
-        // Value serializer (JSON)
-        ObjectMapper objectMapper = new ObjectMapper();
-        objectMapper.registerModule(new JavaTimeModule());
-
-        GenericJackson2JsonRedisSerializer serializer =
-                new GenericJackson2JsonRedisSerializer(objectMapper);
-
-        template.setValueSerializer(serializer);
-        template.setHashValueSerializer(serializer);
-
-        template.afterPropertiesSet();
-        return template;
-    }
-}
-```
-
----
-
-# 🧠 Why this is IMPORTANT
-
-Without this:
-
-* Redis stores binary junk ❌
-* Serialization breaks ❌
-* Dates (Instant) fail ❌
-* Debugging becomes painful ❌
-
-With this:
-
-✔ JSON stored in Redis
-✔ readable
-✔ safe for your `AuthTransaction` and `UserSession`
-✔ works with `Instant`
-
----
-
-# ⚠️ Also verify dependency
-
-In Arthur Core `pom.xml`:
-
-```xml
-<dependency>
-    <groupId>org.springframework.boot</groupId>
-    <artifactId>spring-boot-starter-data-redis</artifactId>
-</dependency>
-```
-
----
-
-# 🧪 Also ensure Redis is running
-
-If local:
+You can save this as:
 
 ```bash
-docker run -p 6379:6379 redis
+keycloak-all.yaml
+```
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: keycloak
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: keycloak
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+    spec:
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:24.0.2
+          args: ["start-dev"]
+          ports:
+            - containerPort: 8080
+          env:
+            - name: KEYCLOAK_ADMIN
+              value: admin
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              value: admin
+            - name: KC_PROXY
+              value: edge
+            - name: KC_HOSTNAME
+              value: keycloak.local
+            - name: KC_HOSTNAME_STRICT
+              value: "false"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: keycloak
+spec:
+  type: ClusterIP
+  selector:
+    app: keycloak
+  ports:
+    - port: 80
+      targetPort: 8080
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: keycloak
+  namespace: keycloak
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: keycloak.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: keycloak
+                port:
+                  number: 80
 ```
 
 ---
 
-# 🧪 Quick test after fix
-
-Start Arthur Core again.
-
-Then hit:
+# 🚀 Apply It
 
 ```bash
-curl -i -H "APP_ID: B2BOOST_BE" http://localhost:8080/arthur-core/auth/start
+kubectl apply -f keycloak-all.yaml
 ```
 
 ---
 
-# 🧠 What this unlocks
+# 🌐 How to Access Keycloak (VERY IMPORTANT)
 
-Now your system can:
+## ✅ Your Keycloak URL will be:
 
-✔ Store auth transaction (`state`, PKCE)
-✔ Store user session later
-✔ Handle TTL correctly
-
----
-
-# 🚀 Next Step (after this works)
-
-👉 Implement `/arthur-core/auth/callback`
-
-This is where everything comes together:
-
-* token exchange
-* JWT parsing
-* Lancelot user lookup
-* session creation
+```
+http://keycloak.local
+```
 
 ---
 
-# 🎯 Summary
+## 🛠 But you MUST add this to your machine:
 
-👉 Error = missing RedisTemplate bean
-👉 Fix = add `RedisConfig`
-👉 Also ensure Redis is running
+Edit your hosts file:
+
+### Mac / Linux:
+
+```bash
+sudo nano /etc/hosts
+```
+
+### Windows:
+
+```
+C:\Windows\System32\drivers\etc\hosts
+```
+
+Add:
+
+```
+127.0.0.1 keycloak.local
+```
 
 ---
 
-If you want, next I’ll give you:
+# ⚠️ Important Requirements
 
-👉 **full `/auth/callback` implementation (production-grade)** 🔥
+## 1. You need an Ingress Controller
+
+If you don’t already have one:
+
+Install NGINX ingress:
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/cloud/deploy.yaml
+```
+
+---
+
+## 2. Check everything is running
+
+```bash
+kubectl get pods -n keycloak
+kubectl get svc -n keycloak
+kubectl get ingress -n keycloak
+```
+
+---
+
+# 🔐 Keycloak Admin Access
+
+Once it’s up:
+
+👉 Open:
+
+```
+http://keycloak.local
+```
+
+Login:
+
+* username: `admin`
+* password: `admin`
+
+---
+
+# 🔥 Integration Tip (VERY important for your project)
+
+In your **Arthur Core config**, use:
+
+```
+issuer: http://keycloak.local/realms/<your-realm>
+```
+
+NOT localhost anymore.
+
+---
+
+# ⚠️ If It Doesn’t Work
+
+Check:
+
+```bash
+kubectl describe ingress keycloak -n keycloak
+kubectl logs -n keycloak deployment/keycloak
+```
+
+---
+
+# 🚀 Next Step (I Recommend)
+
+Once this works, next we should:
+
+👉 Move Keycloak from `start-dev` → **production mode**
+
+* external DB (Postgres)
+* HTTPS
+* proper hostname
+
+---
+
+# 👉 Quick Question for You
+
+Are you running:
+
+* Docker Desktop Kubernetes?
+* Minikube?
+* Kind?
+
+Because I can tailor the ingress + URL exactly to your setup (this matters a LOT).
