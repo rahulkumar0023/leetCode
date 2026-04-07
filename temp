@@ -1,196 +1,232 @@
-Got it — this is a **very common corporate setup issue** 👍
-Your org is blocking `http://keycloak.local` because:
-
-* It’s **not HTTPS**
-* Or it’s using a **self-signed / untrusted certificate**
-
-So we need to fix this by making Keycloak available over **HTTPS with a trusted cert**.
+Perfect — this is **exactly the next expected error** 👍
+You’ve officially passed the hardest parts 🎉
 
 ---
 
-# 🔐 ✅ Best Approach (Works in Corp Environments)
+# 🧠 What just happened (good news)
 
-You have 3 realistic options:
+Flow now works:
 
-### 🟢 Option 1 — Use your company’s internal CA (BEST)
+1. ✅ Arthur Core → redirects to Keycloak
+2. ✅ Keycloak → login screen
+3. ✅ Login success
+4. 👉 Redirects back to:
 
-If your org provides certificates → use them.
-
-### 🟡 Option 2 — Use your own self-signed cert (quick workaround)
-
-Then manually trust it on your machine.
-
-### 🔴 Option 3 — Use Let’s Encrypt
-
-Only works if your cluster is publicly accessible (usually NOT your case).
-
----
-
-# 🧱 Let’s Fix Your Setup (Single YAML, HTTPS)
-
-We’ll:
-
-1. Add a **TLS secret**
-2. Update **Ingress to HTTPS**
-
----
-
-# ✳️ Step 1 — Create Certificate
-
-## Option A (Recommended): Self-signed
-
-```bash
-openssl req -x509 -nodes -days 365 \
-  -newkey rsa:2048 \
-  -keyout keycloak.key \
-  -out keycloak.crt \
-  -subj "/CN=keycloak.local/O=dev"
+```text
+/arthur-core/auth/callback?code=...
 ```
 
 ---
 
-# ✳️ Step 2 — Create Kubernetes TLS Secret
+# 🚨 Current Problem
 
-```bash
-kubectl create secret tls keycloak-tls \
-  --cert=keycloak.crt \
-  --key=keycloak.key \
-  -n keycloak
+```text
+404 /arthur-core/auth/callback
+```
+
+👉 This means:
+
+## ❌ You DON’T have a controller endpoint for `/auth/callback`
+
+---
+
+# 🔥 This is expected — now we implement it
+
+You’re now at:
+
+# 🚀 **STEP: Implement OIDC callback handler**
+
+---
+
+# ✅ What `/auth/callback` must do
+
+When Keycloak redirects back:
+
+```text
+GET /auth/callback?code=XYZ&state=ABC
+```
+
+Arthur Core must:
+
+---
+
+## 1. Extract code
+
+```java
+String code = request.getParameter("code");
 ```
 
 ---
 
-# ✳️ Step 3 — Update Your Ingress
+## 2. Exchange code → token (Keycloak)
 
-Replace your Ingress with this:
+Call:
 
-```yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: keycloak
-  namespace: keycloak
-spec:
-  ingressClassName: nginx
-  tls:
-    - hosts:
-        - keycloak.local
-      secretName: keycloak-tls
-  rules:
-    - host: keycloak.local
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: keycloak
-                port:
-                  number: 80
+```text
+POST /realms/{realm}/protocol/openid-connect/token
 ```
 
 ---
 
-# 🌐 Now Your URL Becomes:
+## 3. Parse tokens
 
+* access_token
+* id_token
+* expires_in
+
+---
+
+## 4. Extract user info
+
+From JWT:
+
+* `sub`
+* `preferred_username`
+* roles
+
+---
+
+## 5. Store session (Redis)
+
+---
+
+## 6. Redirect user to app
+
+---
+
+# 🧩 Minimal Implementation (start here)
+
+## Controller
+
+```java
+@RestController
+@RequestMapping("/auth")
+public class AuthController {
+
+    private final AuthService authService;
+
+    public AuthController(AuthService authService) {
+        this.authService = authService;
+    }
+
+    @GetMapping("/callback")
+    public ResponseEntity<String> callback(
+            @RequestParam String code) {
+
+        authService.handleCallback(code);
+
+        return ResponseEntity.ok("Login successful");
+    }
+}
 ```
-https://keycloak.local
+
+---
+
+# 🧩 AuthService (core logic)
+
+```java
+@Service
+public class AuthService {
+
+    private final WebClient webClient;
+
+    public AuthService(WebClient.Builder builder) {
+        this.webClient = builder.build();
+    }
+
+    public void handleCallback(String code) {
+
+        String tokenUrl = "http://keycloak.ns-keycloak/realms/arthur-local/protocol/openid-connect/token";
+
+        Map<String, String> response =
+                webClient.post()
+                        .uri(tokenUrl)
+                        .header("Content-Type", "application/x-www-form-urlencoded")
+                        .bodyValue("grant_type=authorization_code" +
+                                "&client_id=b2boost-be" +
+                                "&client_secret=YOUR_SECRET" +
+                                "&code=" + code +
+                                "&redirect_uri=https://arthur-core.kubernetes.localhost/arthur-core/auth/callback")
+                        .retrieve()
+                        .bodyToMono(Map.class)
+                        .block();
+
+        System.out.println("TOKEN RESPONSE: " + response);
+    }
+}
 ```
 
 ---
 
-# ⚠️ You STILL Need One More Step (IMPORTANT)
+# ⚠️ IMPORTANT
 
-Your OS will still block it unless you trust the cert.
+## redirect_uri MUST match EXACTLY
+
+```text
+https://arthur-core.kubernetes.localhost/arthur-core/auth/callback
+```
+
+Same in:
+
+* Keycloak
+* token request
+* initial auth request
 
 ---
 
-## 💻 Trust the Certificate
+# 🧪 What you should see now
 
-### Mac:
+After login:
 
-```bash
-sudo security add-trusted-cert -d -r trustRoot \
-  -k /Library/Keychains/System.keychain keycloak.crt
+```text
+Login successful
+```
+
+And logs:
+
+```text
+TOKEN RESPONSE: {access_token=..., id_token=...}
 ```
 
 ---
 
-### Windows:
-
-1. Double-click `keycloak.crt`
-2. Click **Install Certificate**
-3. Choose:
-
-   * Local Machine
-   * Trusted Root Certification Authorities
-
----
-
-# 🧠 Why This Fixes Your Problem
-
-Your org blocks:
-
-* ❌ HTTP
-* ❌ Unknown certificates
+# 🔥 You just unlocked the core of your system
 
 Now you have:
 
-* ✅ HTTPS
-* ✅ Trusted cert
+* ✅ Keycloak login
+* ✅ Authorization Code
+* 👉 Next: token exchange
 
 ---
 
-# 🔥 BONUS (Better Corporate-Friendly Setup)
+# 🚀 Next Step (VERY IMPORTANT)
 
-Instead of `keycloak.local`, use something like:
+After this works, we will:
 
-```
-keycloak.dev.internal
-```
+### 🔐 Parse JWT
 
-Less likely to be blocked.
+### 🧠 Extract user ID
 
----
+### 🧱 Store session in Redis
 
-# 🚨 If You Still Get Blocked
-
-Then your org likely:
-
-* Blocks **custom domains**
-* Requires **proxy or VPN routing**
-
-👉 In that case, use:
-
-```bash
-kubectl port-forward svc/keycloak 8080:80 -n keycloak
-```
-
-Then access:
-
-```
-http://localhost:8080
-```
+### 🔗 Call Lancelot (get roles)
 
 ---
 
-# 🚀 Next Step (Highly Recommended)
+# 👉 Tell me when ready
 
-Once this works, we should:
+Say:
 
-* Add **cert-manager** (auto TLS)
-* Use **real domain + DNS**
-* Configure **Keycloak hostname properly**
+👉 **"callback working, got tokens"**
+
+Then I’ll help you:
+
+* decode JWT properly
+* validate signature (JWK)
+* build session model
+* plug Redis
 
 ---
 
-# 👉 Tell me this
-
-What exact error are you seeing?
-
-* “certificate not trusted”
-* “connection blocked”
-* “ERR_CERT_AUTHORITY_INVALID”
-* or something else?
-
-I’ll pinpoint the exact fix for your environment 🔍
+You’re now in the **real auth flow** — this is the heart of your architecture 🔥
