@@ -1,172 +1,225 @@
-This looks much better. You’re now storing state and sending `code_verifier`, so the remaining 400 is likely one of these two things:
+Now the error is back to **state lookup**, not token exchange.
 
-## Most likely issue
+Your log shows:
 
-Your token request is using:
+* `/auth/start` succeeded with `302 Found`
+* callback hit with a real `state`
+* then `handleCallback()` threw:
+  `Invalid or expired state`
 
-```java
-String tokenUrl = "http://keycloak.ns-keycloak/realms/arthur-local/protocol/openid-connect/token";
-```
+So the problem is now:
 
-But in `/start` you discovered metadata from:
-
-```java
-appConfig.getIssuerUri()
-```
-
-and used that to build the authorize URL.
-
-Those two should come from the **same source**. Do not hardcode `tokenUrl`. Use OIDC discovery metadata again in callback.
-
-### Change this
-
-```java
-String tokenUrl = "http://keycloak.ns-keycloak/realms/arthur-local/protocol/openid-connect/token";
-```
-
-### To this
-
-```java
-OidcMetadata metadata = oidcDiscoveryClient.loadMetadata(appConfig.getIssuerUri());
-String tokenUrl = metadata.getTokenEndpoint();
-```
-
-That avoids subtle mismatches between issuer, realm, and token endpoint.
+> the `state` sent to Keycloak is not being found in Redis on the callback path.
 
 ---
 
-## Second likely issue
+# What this means
 
-In callback you are not validating that these values exist before calling Keycloak:
+Your `/start` method is generating and saving an `AuthTransaction`, but one of these is happening:
 
-* `tx.getRedirectUri()`
-* `tx.getCodeVerifier()`
+1. it is **not actually being written to Redis**
+2. it is being written under a **different key** than the one you read
+3. it is being written but **deserialization fails** on read
+4. the callback is hitting a **different pod / different Redis config**
+5. TTL is too short or save is silently failing
 
-Add this before the token call:
+---
+
+# Most likely cause in your case
+
+Because you already had RedisTemplate / serializer issues earlier, the most likely problem is:
+
+## the object is not being read back as `AuthTransaction`
+
+In your `findByState()` you probably do something like:
 
 ```java
-if (redirectUri == null || redirectUri.isBlank()) {
-    throw new IllegalStateException("Missing redirectUri in auth transaction");
+Object value = redisTemplate.opsForValue().get(PREFIX + state);
+if (value instanceof AuthTransaction transaction) {
+    return transaction;
 }
-
-if (codeVerifier == null || codeVerifier.isBlank()) {
-    throw new IllegalStateException("Missing codeVerifier in auth transaction");
-}
+return null;
 ```
+
+With JSON Redis serializers, that `instanceof AuthTransaction` check often fails because the deserialized value may come back as a `LinkedHashMap`, not your class.
+
+So Redis may contain the data, but your code still returns `null`.
 
 ---
 
-## Also add these logs right before token exchange
+# First thing to check
 
-This will tell us immediately what is wrong:
+Add logs in both save and read.
+
+## In `save()`
 
 ```java
-log.info("Callback state={}", state);
-log.info("Callback code={}", code);
-log.info("TX appId={}", tx.getAppId());
-log.info("TX redirectUri={}", tx.getRedirectUri());
-log.info("TX codeVerifier present={}", codeVerifier != null && !codeVerifier.isBlank());
-log.info("App clientId={}", appConfig.getClientId());
-log.info("IssuerUri={}", appConfig.getIssuerUri());
-log.info("TokenUrl={}", tokenUrl);
-```
-
-Do **not** log the client secret or full tokens.
-
----
-
-## One more important check
-
-Make sure the redirect URI in all three places is exactly the same:
-
-1. In Keycloak client config
-2. In `appConfig.getRedirectUri()` from Lancelot
-3. In token request via `tx.getRedirectUri()`
-
-It must be exactly:
-
-```text
-https://arthur-core.kubernetes.localhost/arthur-core/auth/callback
-```
-
-No trailing slash differences, no `/callback` vs `/auth/callback`, no internal cluster URL.
-
----
-
-## Best next version of `handleCallback`
-
-Refactor the top of it like this:
-
-```java
-public void handleCallback(String code, String state) {
-    AuthTransaction tx = redisAuthTransactionService.findByState(state);
-    if (tx == null) {
-        throw new IllegalStateException("Invalid or expired state");
-    }
-
-    AppConfigResponse appConfig = lancelotClient.getApp(tx.getAppId());
-    validateAppConfig(appConfig);
-
-    String redirectUri = tx.getRedirectUri();
-    String codeVerifier = tx.getCodeVerifier();
-
-    if (redirectUri == null || redirectUri.isBlank()) {
-        throw new IllegalStateException("Missing redirectUri in auth transaction");
-    }
-    if (codeVerifier == null || codeVerifier.isBlank()) {
-        throw new IllegalStateException("Missing codeVerifier in auth transaction");
-    }
-
-    OidcMetadata metadata = oidcDiscoveryClient.loadMetadata(appConfig.getIssuerUri());
-    String tokenUrl = metadata.getTokenEndpoint();
-
-    log.info("Callback state={}", state);
-    log.info("TX appId={}", tx.getAppId());
-    log.info("TX redirectUri={}", redirectUri);
-    log.info("TX codeVerifier present={}", true);
-    log.info("TokenUrl={}", tokenUrl);
-
-    Map<String, Object> response = webClient.post()
-            .uri(tokenUrl)
-            .contentType(MediaType.APPLICATION_FORM_URLENCODED)
-            .body(BodyInserters.fromFormData("grant_type", "authorization_code")
-                    .with("client_id", appConfig.getClientId())
-                    .with("client_secret", appConfig.getClientSecret())
-                    .with("code", code)
-                    .with("redirect_uri", redirectUri)
-                    .with("code_verifier", codeVerifier))
-            .retrieve()
-            .onStatus(HttpStatusCode::isError, clientResponse ->
-                    clientResponse.bodyToMono(String.class).flatMap(body -> {
-                        log.error("Token endpoint error body: {}", body);
-                        return Mono.error(new IllegalStateException("Token exchange failed: " + body));
-                    }))
-            .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
-            .block();
-
-    log.info("Token exchange succeeded");
+public void save(AuthTransaction transaction) {
+    String key = PREFIX + transaction.getState();
+    log.info("Saving auth transaction key={}", key);
+    redisTemplate.opsForValue().set(key, transaction, ttlSeconds, TimeUnit.SECONDS);
+    Object stored = redisTemplate.opsForValue().get(key);
+    log.info("Saved auth transaction read-back type={}", stored != null ? stored.getClass().getName() : "null");
 }
 ```
 
+## In `findByState()`
+
+```java
+public AuthTransaction findByState(String state) {
+    String key = PREFIX + state;
+    Object value = redisTemplate.opsForValue().get(key);
+    log.info("Lookup auth transaction key={}, found type={}", key,
+            value != null ? value.getClass().getName() : "null");
+
+    if (value instanceof AuthTransaction transaction) {
+        return transaction;
+    }
+
+    return null;
+}
+```
+
+If you see `java.util.LinkedHashMap`, that is the issue.
+
 ---
 
-## Why I think this is the remaining problem
+# Best fix
 
-Your `/start` method is well-shaped now:
+Use a **typed RedisTemplate** for auth transactions instead of `RedisTemplate<String, Object>`.
 
-* gets app config
-* loads OIDC metadata
-* generates state/nonce/verifier
-* saves transaction
-* builds authorize URL
+## Redis config
 
-So the callback should mirror that by:
+```java
+@Bean
+public RedisTemplate<String, AuthTransaction> authTransactionRedisTemplate(
+        RedisConnectionFactory connectionFactory) {
 
-* loading transaction
-* loading app config
-* loading OIDC metadata
-* using discovered token endpoint
+    RedisTemplate<String, AuthTransaction> template = new RedisTemplate<>();
+    template.setConnectionFactory(connectionFactory);
 
-That matches your architecture where Arthur Core orchestrates auth and Lancelot supplies app config. 
+    template.setKeySerializer(new StringRedisSerializer());
+    template.setHashKeySerializer(new StringRedisSerializer());
 
-After you add the token endpoint error body log, paste that one line. That message will usually make the final issue obvious immediately.
+    Jackson2JsonRedisSerializer<AuthTransaction> serializer =
+            new Jackson2JsonRedisSerializer<>(AuthTransaction.class);
+
+    ObjectMapper objectMapper = new ObjectMapper();
+    objectMapper.registerModule(new JavaTimeModule());
+    objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+    serializer.setObjectMapper(objectMapper);
+
+    template.setValueSerializer(serializer);
+    template.setHashValueSerializer(serializer);
+    template.afterPropertiesSet();
+    return template;
+}
+```
+
+## Service
+
+```java
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class RedisAuthTransactionService {
+
+    private static final String PREFIX = "auth:state:";
+    private final RedisTemplate<String, AuthTransaction> authTransactionRedisTemplate;
+
+    @Value("${auth.state.ttl-seconds}")
+    private long ttlSeconds;
+
+    public void save(AuthTransaction transaction) {
+        String key = PREFIX + transaction.getState();
+        log.info("Saving auth transaction key={}", key);
+        authTransactionRedisTemplate.opsForValue()
+                .set(key, transaction, ttlSeconds, TimeUnit.SECONDS);
+    }
+
+    public AuthTransaction findByState(String state) {
+        String key = PREFIX + state;
+        AuthTransaction tx = authTransactionRedisTemplate.opsForValue().get(key);
+        log.info("Lookup auth transaction key={}, found={}", key, tx != null);
+        return tx;
+    }
+
+    public void delete(String state) {
+        authTransactionRedisTemplate.delete(PREFIX + state);
+    }
+}
+```
+
+---
+
+# Also verify these 3 things
+
+## 1. Log the generated state in `/start`
+
+Right now your logs do not show the generated state before redirect. Add:
+
+```java
+log.info("Generated state={}", state);
+```
+
+Then compare it with the callback state.
+
+They must match exactly.
+
+---
+
+## 2. Check the Redis key directly
+
+Exec into Redis and run:
+
+```bash
+redis-cli KEYS "auth:state:*"
+```
+
+You should see the key created after `/auth/start`.
+
+Then:
+
+```bash
+redis-cli TTL "auth:state:<actual-state>"
+```
+
+Make sure it is not expiring immediately.
+
+---
+
+## 3. Make sure Arthur Core pods share the same Redis
+
+If you have more than one Arthur Core pod and one pod writes while another reads from a different Redis config, you get this exact symptom.
+
+---
+
+# Why I do not think the issue is Keycloak now
+
+Because your log shows the callback is arriving with a valid `state` parameter. So:
+
+* authorize redirect works
+* Keycloak round-trip works
+* callback endpoint works
+
+The failure happens **before token exchange**, during local state correlation.
+
+That matches your architecture too: Arthur Core owns auth transaction state in Redis. 
+
+---
+
+# What I’d do next
+
+Add these logs first:
+
+* generated state in `startAuthentication()`
+* Redis key written in `save()`
+* Redis value type in `findByState()`
+
+My bet is you’ll see one of these:
+
+* state values don’t match
+* Redis returns `LinkedHashMap`
+* Redis returns `null`
+
+Paste those 3 log lines and I’ll tell you the exact next fix.
