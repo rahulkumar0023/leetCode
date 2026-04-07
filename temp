@@ -1,108 +1,119 @@
-Good — this narrows it down exactly.
+Nice — this is real progress.
 
-Your state is now being saved and found:
+You are now past:
+
+* redirect
+* Keycloak login
+* callback hit
+* state save/read from Redis
+
+The new failure is:
 
 ```text
-Saving auth transaction key=auth:state:...
-lookup auth transaction key=auth:state:..., found=true
+appId must not be blank
 ```
 
-But then it fails with:
+And the key line in your log is this:
 
 ```text
-java.util.LinkedHashMap incompatible with com.bnpp.pf.arthur.core.model.AuthTransaction
+lookup auth transaction ... found=true
 ```
 
-So Redis is returning data, but your code is doing a direct cast and getting a `LinkedHashMap` instead of an `AuthTransaction`.
-
-# Why this happens
-
-With your current serializer setup, the stored JSON is being deserialized as a generic map, not your class.
-
-So this line in `findByState()` is the problem:
+So the transaction is there, but when callback does:
 
 ```java
-return (AuthTransaction) value;
+lancelotClient.getApp(tx.getAppId())
 ```
 
-# Fastest fix
+`tx.getAppId()` is blank.
 
-Convert the map into `AuthTransaction` with `ObjectMapper`.
+# Root cause
 
-## Update `RedisAuthTransactionService`
+In your `startAuthentication()` you save:
 
 ```java
-@Service
-@RequiredArgsConstructor
-@Slf4j
-public class RedisAuthTransactionService {
-
-    private static final String PREFIX = "auth:state:";
-
-    private final RedisTemplate<String, Object> redisTemplate;
-    private final ObjectMapper objectMapper;
-
-    public void save(AuthTransaction tx) {
-        String key = PREFIX + tx.getState();
-        log.info("Saving auth transaction key={}", key);
-        redisTemplate.opsForValue().set(key, tx, Duration.ofMinutes(5));
-    }
-
-    public AuthTransaction findByState(String state) {
-        String key = PREFIX + state;
-        Object value = redisTemplate.opsForValue().get(key);
-
-        log.info("lookup auth transaction key={}, found={}", key, value != null);
-
-        if (value == null) {
-            return null;
-        }
-
-        if (value instanceof AuthTransaction tx) {
-            return tx;
-        }
-
-        if (value instanceof Map<?, ?>) {
-            return objectMapper.convertValue(value, AuthTransaction.class);
-        }
-
-        throw new IllegalStateException("Unexpected auth transaction type: " + value.getClass().getName());
-    }
-
-    public void delete(String state) {
-        redisTemplate.delete(PREFIX + state);
-    }
-}
+transaction.setAppId(appConfig.getAppId());
 ```
 
-# Also do this once
+That is likely the problem.
 
-Your Redis may still contain older values from previous serializer attempts. Clear it once:
+Your `appConfig` clearly has values like `clientId`, `issuerUri`, and `redirectUri`, but it may **not** be returning `appId` populated. So you are storing a null/blank appId in Redis.
 
-```bash
-redis-cli FLUSHALL
+# Fix
+
+Change this:
+
+```java
+transaction.setAppId(appConfig.getAppId());
 ```
 
-Or just delete the auth keys:
+to this:
 
-```bash
-redis-cli KEYS "auth:state:*"
-redis-cli DEL auth:state:...
+```java
+transaction.setAppId(appId);
 ```
 
-# Best long-term fix
+Use the original incoming `appId` from the request, because that is the authoritative value.
 
-A cleaner version is to use a dedicated typed serializer/template for `AuthTransaction`, but the `objectMapper.convertValue(...)` fix is the quickest way to unblock you now.
+# Why this is correct
 
-# Why this is progress
+At `/auth/start`, the app is identified by the request:
 
-You have now confirmed:
+```java
+startAuthentication(String appId)
+```
 
-* Keycloak redirect works
-* callback works
-* state is saved in Redis
-* state is found in Redis
+That is the thing you used to call Lancelot in the first place. Even if Lancelot returns extra config, you should still persist the original app ID for the callback round-trip.
 
-So you’re past the hardest state-management issue. This matches your architecture where Arthur Core owns auth/session state in Redis. 
+# What to update
 
-After this fix, the next likely step is the token exchange. If that fails, the error body from Keycloak will tell us exactly what remains.
+In `startAuthentication()`:
+
+```java
+AuthTransaction transaction = new AuthTransaction();
+transaction.setState(state);
+transaction.setNonce(nonce);
+transaction.setCodeVerifier(codeVerifier);
+transaction.setAppId(appId); // <- fix here
+transaction.setRedirectUri(appConfig.getRedirectUri());
+transaction.setPostLoginRedirectUrl(appConfig.getPostLoginRedirectUrl());
+transaction.setCreatedAt(Instant.now());
+```
+
+# Add one useful log
+
+Right before saving:
+
+```java
+log.info("Saving auth transaction state={}, appId={}", state, appId);
+```
+
+And in callback:
+
+```java
+log.info("Loaded auth transaction state={}, appId={}", state, tx.getAppId());
+```
+
+That will confirm immediately that the right value survives the round-trip.
+
+# Why the current behavior happened
+
+Your flow is:
+
+1. `/auth/start` gets `appId=B2BOOST_BE`
+2. calls `lancelotClient.getApp(appId)`
+3. saves transaction
+4. callback loads transaction
+5. callback uses `tx.getAppId()`
+
+If `transaction.setAppId(appConfig.getAppId())` saved null, then callback cannot call Lancelot again.
+
+# After this fix
+
+The next likely step is:
+
+* callback loads transaction successfully
+* `lancelotClient.getApp(tx.getAppId())` works
+* token exchange happens
+
+If token exchange fails after that, the next error will likely be the final OIDC detail to fix.
