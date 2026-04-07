@@ -1,89 +1,75 @@
-This narrows it down a lot.
+Yes — this is the next real issue, and it’s a clean one.
 
-Your Redis value clearly contains `appId`, `codeVerifier`, `redirectUri`, and `createdAt`, but after conversion your log shows they become `null`.
+Your flow is now working up to token exchange. The new failure is:
 
-That means the problem is **not Redis storage** anymore. It is **Map → AuthTransaction conversion**.
-
-## What this usually means
-
-Your `AuthTransaction` class is not shaped in a way Jackson can populate all fields correctly.
-
-The most common causes are:
-
-* missing no-args constructor
-* missing setters
-* field names not matching exactly
-* using a builder-only or custom constructor pattern
-* fields marked `final`
-
-## What the class should look like
-
-Use a plain POJO like this:
-
-```java
-import lombok.Data;
-import lombok.NoArgsConstructor;
-import lombok.AllArgsConstructor;
-
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-public class AuthTransaction {
-    private String state;
-    private String nonce;
-    private String codeVerifier;
-    private String appId;
-    private String redirectUri;
-    private String postLoginRedirectUrl;
-    private Instant createdAt;
-}
+```text
+Failed to resolve 'keycloak.kubernetes.localhost'
 ```
 
-And make sure the JSON names match these field names exactly:
+That means Arthur Core is trying to call the **browser URL** for Keycloak from inside Kubernetes.
 
-* `codeVerifier`
-* `appId`
-* `redirectUri`
-* `postLoginRedirectUrl`
-* `createdAt`
+Inside the cluster, it should not use:
 
-## Very important
-
-If you are using any of these on `AuthTransaction`, remove them for now:
-
-* `@Builder`
-* custom constructors only
-* `final` fields
-* weird field names like `appID`
-
-## Your conversion code should be
-
-```java
-if (value instanceof Map<?, ?>) {
-    AuthTransaction tx = objectMapper.convertValue(value, AuthTransaction.class);
-    log.info("converted tx={}", tx);
-    return tx;
-}
+```text
+http://keycloak.kubernetes.localhost/...
 ```
 
-## Also make your `ObjectMapper` able to handle `Instant`
+It should use the **service DNS** instead:
 
-```java
-@Bean
-public ObjectMapper objectMapper() {
-    ObjectMapper mapper = new ObjectMapper();
-    mapper.registerModule(new JavaTimeModule());
-    mapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
-    return mapper;
-}
+```text
+http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local/protocol/openid-connect/token
 ```
 
-## Why only `state` and `nonce` seem to appear
+or the shorter form:
 
-That usually happens when the class shape and the JSON don’t line up cleanly. Jackson partially binds what it can, then leaves the rest null.
+```text
+http://keycloak.ns-keycloak/realms/arthur-local/protocol/openid-connect/token
+```
 
-## Best next check
+What this tells us:
 
-Please paste your actual `AuthTransaction` class. That is almost certainly where the remaining issue is.
+* login redirect is working
+* callback is working
+* Redis state round-trip is working
+* appId/codeVerifier/redirectUri are now present
+* only the token endpoint URL is wrong for in-cluster traffic
 
-This still fits your design: Arthur Core stores the auth transaction in Redis and uses it on callback to continue the login flow. 
+Use this rule:
+
+* browser-facing URLs: `https://keycloak.kubernetes.localhost`
+* service-to-service URLs inside k8s: `http://keycloak.ns-keycloak...`
+
+So in your callback flow, the token URL should come from an internal issuer or internal metadata source, not the external ingress hostname.
+
+The easiest fix is one of these.
+
+Use internal token URL directly:
+
+```java
+String tokenUrl =
+    "http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local/protocol/openid-connect/token";
+```
+
+Or better, make Lancelot return an internal issuer/token base for backend calls, separate from the external URL used in redirects.
+
+A clean split is:
+
+* `issuerUriExternal`: used for browser redirect / discovery shown to users
+* `issuerUriInternal`: used by Arthur Core for token exchange and backend calls
+
+Then callback should use the internal one.
+
+One important detail: keep `redirect_uri` as the external Arthur Core URL:
+
+```text
+https://arthur-core.kubernetes.localhost/arthur-core/auth/callback
+```
+
+That part is correct because Keycloak validates the redirect against the client config.
+
+So the mixed setup is correct:
+
+* token POST target: internal Keycloak service URL
+* redirect_uri form field: external Arthur Core ingress URL
+
+Change that token URL and you should move past this error. The next likely step after that is either a successful token response or a Keycloak 400 with a specific OIDC reason.
