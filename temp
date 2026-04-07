@@ -1,119 +1,89 @@
-Nice — this is real progress.
+This narrows it down a lot.
 
-You are now past:
+Your Redis value clearly contains `appId`, `codeVerifier`, `redirectUri`, and `createdAt`, but after conversion your log shows they become `null`.
 
-* redirect
-* Keycloak login
-* callback hit
-* state save/read from Redis
+That means the problem is **not Redis storage** anymore. It is **Map → AuthTransaction conversion**.
 
-The new failure is:
+## What this usually means
 
-```text
-appId must not be blank
-```
+Your `AuthTransaction` class is not shaped in a way Jackson can populate all fields correctly.
 
-And the key line in your log is this:
+The most common causes are:
 
-```text
-lookup auth transaction ... found=true
-```
+* missing no-args constructor
+* missing setters
+* field names not matching exactly
+* using a builder-only or custom constructor pattern
+* fields marked `final`
 
-So the transaction is there, but when callback does:
+## What the class should look like
 
-```java
-lancelotClient.getApp(tx.getAppId())
-```
-
-`tx.getAppId()` is blank.
-
-# Root cause
-
-In your `startAuthentication()` you save:
+Use a plain POJO like this:
 
 ```java
-transaction.setAppId(appConfig.getAppId());
+import lombok.Data;
+import lombok.NoArgsConstructor;
+import lombok.AllArgsConstructor;
+
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class AuthTransaction {
+    private String state;
+    private String nonce;
+    private String codeVerifier;
+    private String appId;
+    private String redirectUri;
+    private String postLoginRedirectUrl;
+    private Instant createdAt;
+}
 ```
 
-That is likely the problem.
+And make sure the JSON names match these field names exactly:
 
-Your `appConfig` clearly has values like `clientId`, `issuerUri`, and `redirectUri`, but it may **not** be returning `appId` populated. So you are storing a null/blank appId in Redis.
+* `codeVerifier`
+* `appId`
+* `redirectUri`
+* `postLoginRedirectUrl`
+* `createdAt`
 
-# Fix
+## Very important
 
-Change this:
+If you are using any of these on `AuthTransaction`, remove them for now:
+
+* `@Builder`
+* custom constructors only
+* `final` fields
+* weird field names like `appID`
+
+## Your conversion code should be
 
 ```java
-transaction.setAppId(appConfig.getAppId());
+if (value instanceof Map<?, ?>) {
+    AuthTransaction tx = objectMapper.convertValue(value, AuthTransaction.class);
+    log.info("converted tx={}", tx);
+    return tx;
+}
 ```
 
-to this:
+## Also make your `ObjectMapper` able to handle `Instant`
 
 ```java
-transaction.setAppId(appId);
+@Bean
+public ObjectMapper objectMapper() {
+    ObjectMapper mapper = new ObjectMapper();
+    mapper.registerModule(new JavaTimeModule());
+    mapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+    return mapper;
+}
 ```
 
-Use the original incoming `appId` from the request, because that is the authoritative value.
+## Why only `state` and `nonce` seem to appear
 
-# Why this is correct
+That usually happens when the class shape and the JSON don’t line up cleanly. Jackson partially binds what it can, then leaves the rest null.
 
-At `/auth/start`, the app is identified by the request:
+## Best next check
 
-```java
-startAuthentication(String appId)
-```
+Please paste your actual `AuthTransaction` class. That is almost certainly where the remaining issue is.
 
-That is the thing you used to call Lancelot in the first place. Even if Lancelot returns extra config, you should still persist the original app ID for the callback round-trip.
-
-# What to update
-
-In `startAuthentication()`:
-
-```java
-AuthTransaction transaction = new AuthTransaction();
-transaction.setState(state);
-transaction.setNonce(nonce);
-transaction.setCodeVerifier(codeVerifier);
-transaction.setAppId(appId); // <- fix here
-transaction.setRedirectUri(appConfig.getRedirectUri());
-transaction.setPostLoginRedirectUrl(appConfig.getPostLoginRedirectUrl());
-transaction.setCreatedAt(Instant.now());
-```
-
-# Add one useful log
-
-Right before saving:
-
-```java
-log.info("Saving auth transaction state={}, appId={}", state, appId);
-```
-
-And in callback:
-
-```java
-log.info("Loaded auth transaction state={}, appId={}", state, tx.getAppId());
-```
-
-That will confirm immediately that the right value survives the round-trip.
-
-# Why the current behavior happened
-
-Your flow is:
-
-1. `/auth/start` gets `appId=B2BOOST_BE`
-2. calls `lancelotClient.getApp(appId)`
-3. saves transaction
-4. callback loads transaction
-5. callback uses `tx.getAppId()`
-
-If `transaction.setAppId(appConfig.getAppId())` saved null, then callback cannot call Lancelot again.
-
-# After this fix
-
-The next likely step is:
-
-* callback loads transaction successfully
-* `lancelotClient.getApp(tx.getAppId())` works
-* token exchange happens
-
-If token exchange fails after that, the next error will likely be the final OIDC detail to fix.
+This still fits your design: Arthur Core stores the auth transaction in Redis and uses it on callback to continue the login flow. 
