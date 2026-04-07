@@ -1,225 +1,186 @@
-Now the error is back to **state lookup**, not token exchange.
-
-Your log shows:
-
-* `/auth/start` succeeded with `302 Found`
-* callback hit with a real `state`
-* then `handleCallback()` threw:
-  `Invalid or expired state`
-
-So the problem is now:
-
-> the `state` sent to Keycloak is not being found in Redis on the callback path.
+Nice — this is a **different (and actually good) error**. You fixed serialization, but now Spring can’t find your Redis bean.
 
 ---
 
-# What this means
+# 🚨 Error
 
-Your `/start` method is generating and saving an `AuthTransaction`, but one of these is happening:
-
-1. it is **not actually being written to Redis**
-2. it is being written under a **different key** than the one you read
-3. it is being written but **deserialization fails** on read
-4. the callback is hitting a **different pod / different Redis config**
-5. TTL is too short or save is silently failing
-
----
-
-# Most likely cause in your case
-
-Because you already had RedisTemplate / serializer issues earlier, the most likely problem is:
-
-## the object is not being read back as `AuthTransaction`
-
-In your `findByState()` you probably do something like:
-
-```java
-Object value = redisTemplate.opsForValue().get(PREFIX + state);
-if (value instanceof AuthTransaction transaction) {
-    return transaction;
-}
-return null;
+```text
+required a bean of type 'RedisTemplate' that could not be found
 ```
 
-With JSON Redis serializers, that `instanceof AuthTransaction` check often fails because the deserialized value may come back as a `LinkedHashMap`, not your class.
+👉 Translation:
 
-So Redis may contain the data, but your code still returns `null`.
+> You defined `RedisAuthTransactionService` expecting a `RedisTemplate`,
+> but Spring **doesn’t have one registered**.
 
 ---
 
-# First thing to check
+# 🧠 Why this happened
 
-Add logs in both save and read.
+You probably:
 
-## In `save()`
+* removed old Redis config ❌
+* or changed template type to `RedisTemplate<String, AuthTransaction>` ❌
+* but didn’t define a bean for it
 
-```java
-public void save(AuthTransaction transaction) {
-    String key = PREFIX + transaction.getState();
-    log.info("Saving auth transaction key={}", key);
-    redisTemplate.opsForValue().set(key, transaction, ttlSeconds, TimeUnit.SECONDS);
-    Object stored = redisTemplate.opsForValue().get(key);
-    log.info("Saved auth transaction read-back type={}", stored != null ? stored.getClass().getName() : "null");
-}
-```
+---
 
-## In `findByState()`
+# ✅ FIX (you MUST add Redis config bean)
+
+Create a config class:
+
+## ✅ `RedisConfig.java`
 
 ```java
-public AuthTransaction findByState(String state) {
-    String key = PREFIX + state;
-    Object value = redisTemplate.opsForValue().get(key);
-    log.info("Lookup auth transaction key={}, found type={}", key,
-            value != null ? value.getClass().getName() : "null");
+@Configuration
+public class RedisConfig {
 
-    if (value instanceof AuthTransaction transaction) {
-        return transaction;
+    @Bean
+    public RedisTemplate<String, Object> redisTemplate(RedisConnectionFactory connectionFactory) {
+        RedisTemplate<String, Object> template = new RedisTemplate<>();
+        template.setConnectionFactory(connectionFactory);
+
+        // Key serializer
+        template.setKeySerializer(new StringRedisSerializer());
+        template.setHashKeySerializer(new StringRedisSerializer());
+
+        // Value serializer (IMPORTANT)
+        GenericJackson2JsonRedisSerializer serializer =
+                new GenericJackson2JsonRedisSerializer();
+
+        template.setValueSerializer(serializer);
+        template.setHashValueSerializer(serializer);
+
+        template.afterPropertiesSet();
+        return template;
     }
-
-    return null;
 }
 ```
-
-If you see `java.util.LinkedHashMap`, that is the issue.
 
 ---
 
-# Best fix
+# ✅ Then update your service
 
-Use a **typed RedisTemplate** for auth transactions instead of `RedisTemplate<String, Object>`.
-
-## Redis config
+Make sure your service uses the same type:
 
 ```java
-@Bean
-public RedisTemplate<String, AuthTransaction> authTransactionRedisTemplate(
-        RedisConnectionFactory connectionFactory) {
-
-    RedisTemplate<String, AuthTransaction> template = new RedisTemplate<>();
-    template.setConnectionFactory(connectionFactory);
-
-    template.setKeySerializer(new StringRedisSerializer());
-    template.setHashKeySerializer(new StringRedisSerializer());
-
-    Jackson2JsonRedisSerializer<AuthTransaction> serializer =
-            new Jackson2JsonRedisSerializer<>(AuthTransaction.class);
-
-    ObjectMapper objectMapper = new ObjectMapper();
-    objectMapper.registerModule(new JavaTimeModule());
-    objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
-    serializer.setObjectMapper(objectMapper);
-
-    template.setValueSerializer(serializer);
-    template.setHashValueSerializer(serializer);
-    template.afterPropertiesSet();
-    return template;
-}
-```
-
-## Service
-
-```java
-@Service
 @RequiredArgsConstructor
-@Slf4j
+@Service
 public class RedisAuthTransactionService {
 
     private static final String PREFIX = "auth:state:";
-    private final RedisTemplate<String, AuthTransaction> authTransactionRedisTemplate;
 
-    @Value("${auth.state.ttl-seconds}")
-    private long ttlSeconds;
+    private final RedisTemplate<String, Object> redisTemplate;
 
-    public void save(AuthTransaction transaction) {
-        String key = PREFIX + transaction.getState();
-        log.info("Saving auth transaction key={}", key);
-        authTransactionRedisTemplate.opsForValue()
-                .set(key, transaction, ttlSeconds, TimeUnit.SECONDS);
+    public void save(AuthTransaction tx) {
+        redisTemplate.opsForValue().set(PREFIX + tx.getState(), tx, Duration.ofMinutes(5));
     }
 
     public AuthTransaction findByState(String state) {
-        String key = PREFIX + state;
-        AuthTransaction tx = authTransactionRedisTemplate.opsForValue().get(key);
-        log.info("Lookup auth transaction key={}, found={}", key, tx != null);
-        return tx;
+        Object value = redisTemplate.opsForValue().get(PREFIX + state);
+        return value == null ? null : (AuthTransaction) value;
     }
 
     public void delete(String state) {
-        authTransactionRedisTemplate.delete(PREFIX + state);
+        redisTemplate.delete(PREFIX + state);
     }
 }
 ```
 
 ---
 
-# Also verify these 3 things
+# ⚠️ ALSO CHECK (very important)
 
-## 1. Log the generated state in `/start`
+Make sure you have this dependency:
 
-Right now your logs do not show the generated state before redirect. Add:
+## Maven
 
-```java
-log.info("Generated state={}", state);
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-data-redis</artifactId>
+</dependency>
 ```
 
-Then compare it with the callback state.
-
-They must match exactly.
-
 ---
 
-## 2. Check the Redis key directly
+# ⚠️ AND Redis connection config
 
-Exec into Redis and run:
+In `application.yml`:
 
-```bash
-redis-cli KEYS "auth:state:*"
+```yaml
+spring:
+  data:
+    redis:
+      host: localhost   # or your k8s service
+      port: 6379
 ```
 
-You should see the key created after `/auth/start`.
+👉 If running in Kubernetes:
 
-Then:
-
-```bash
-redis-cli TTL "auth:state:<actual-state>"
+```yaml
+spring:
+  data:
+    redis:
+      host: redis.ns-<your-namespace>.svc.cluster.local
+      port: 6379
 ```
 
-Make sure it is not expiring immediately.
+---
+
+# 🧠 Why this fix is correct
+
+Spring Boot **does NOT auto-create RedisTemplate** unless:
+
+* Redis starter is present
+* connection config is valid
+
+So you must explicitly define it.
 
 ---
 
-## 3. Make sure Arthur Core pods share the same Redis
+# 🚀 After this fix
 
-If you have more than one Arthur Core pod and one pod writes while another reads from a different Redis config, you get this exact symptom.
+App should start ✅
+
+Then flow becomes:
+
+```text
+/auth/start
+ → state saved in Redis ✅
+
+Keycloak login
+
+/auth/callback
+ → state found ✅
+ → token exchange
+```
 
 ---
 
-# Why I do not think the issue is Keycloak now
+# 🎯 You are here
 
-Because your log shows the callback is arriving with a valid `state` parameter. So:
+You’ve solved:
 
-* authorize redirect works
-* Keycloak round-trip works
-* callback endpoint works
-
-The failure happens **before token exchange**, during local state correlation.
-
-That matches your architecture too: Arthur Core owns auth transaction state in Redis. 
+* ingress ✅
+* Keycloak config ✅
+* redirect URI ✅
+* state logic ✅
+* serializer issue ✅
+* now fixing bean wiring (this step)
 
 ---
 
-# What I’d do next
+# 👉 Next
 
-Add these logs first:
+Start app again.
 
-* generated state in `startAuthentication()`
-* Redis key written in `save()`
-* Redis value type in `findByState()`
+If successful, next error (if any) will be:
 
-My bet is you’ll see one of these:
+👉 token exchange (400)
 
-* state values don’t match
-* Redis returns `LinkedHashMap`
-* Redis returns `null`
+Paste that and we’ll finish the flow.
 
-Paste those 3 log lines and I’ll tell you the exact next fix.
+---
+
+You’re very close now — this is basically the last infrastructure issue 🔥
