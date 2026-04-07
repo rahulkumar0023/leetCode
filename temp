@@ -1,232 +1,201 @@
-Perfect — this is **exactly the next expected error** 👍
-You’ve officially passed the hardest parts 🎉
+Yes — this log strongly suggests the token POST is failing because your callback is **not sending all the values that match the authorization request**.
+
+The biggest issue is this:
+
+### You started login with PKCE
+
+Earlier, your `/auth/start` flow generated:
+
+* `state`
+* `nonce`
+* `code_verifier`
+* `code_challenge`
+
+and sent `code_challenge` to Keycloak.
+
+### But in `/auth/callback`, you only send:
+
+* `code`
+* `client_id`
+* `client_secret`
+* `redirect_uri`
+
+You are **not sending `code_verifier`**.
+
+That usually causes the token endpoint to return **400 Bad Request**.
 
 ---
 
-# 🧠 What just happened (good news)
+# What `handleCallback` should do
 
-Flow now works:
+Right now it’s too small. It should:
 
-1. ✅ Arthur Core → redirects to Keycloak
-2. ✅ Keycloak → login screen
-3. ✅ Login success
-4. 👉 Redirects back to:
+1. Accept both `code` and `state`
+2. Load the auth transaction from Redis using `state`
+3. Read from that saved transaction:
 
-```text
-/arthur-core/auth/callback?code=...
-```
+   * `appId`
+   * `codeVerifier`
+   * original `redirectUri`
+4. Call Lancelot using that `appId`
+5. Exchange code for token with:
 
----
+   * `grant_type=authorization_code`
+   * `client_id`
+   * `client_secret`
+   * `code`
+   * `redirect_uri`
+   * `code_verifier`
+6. Parse tokens
+7. Create session in Redis
 
-# 🚨 Current Problem
-
-```text
-404 /arthur-core/auth/callback
-```
-
-👉 This means:
-
-## ❌ You DON’T have a controller endpoint for `/auth/callback`
-
----
-
-# 🔥 This is expected — now we implement it
-
-You’re now at:
-
-# 🚀 **STEP: Implement OIDC callback handler**
+That matches your architecture, where Arthur Core orchestrates auth and keeps session state in Redis while Lancelot provides app metadata and user data. 
 
 ---
 
-# ✅ What `/auth/callback` must do
+# What is wrong in your current callback
 
-When Keycloak redirects back:
-
-```text
-GET /auth/callback?code=XYZ&state=ABC
-```
-
-Arthur Core must:
-
----
-
-## 1. Extract code
+From your screenshot, your callback method is:
 
 ```java
-String code = request.getParameter("code");
+@GetMapping("/callback")
+public ResponseEntity<String> callback(@RequestParam String code) {
+    authService.handleCallback(code);
+    return ResponseEntity.ok("Login successful");
+}
 ```
 
----
+Problems:
 
-## 2. Exchange code → token (Keycloak)
+* no `state`
+* no lookup of saved auth transaction
+* hardcoded `B2BOOST_BE`
+* no `code_verifier`
 
-Call:
+And in `handleCallback()` you do:
 
-```text
-POST /realms/{realm}/protocol/openid-connect/token
+```java
+lancelotClient.getApp("B2BOOST_BE")
 ```
 
----
-
-## 3. Parse tokens
-
-* access_token
-* id_token
-* expires_in
+That should not be hardcoded.
 
 ---
 
-## 4. Extract user info
-
-From JWT:
-
-* `sub`
-* `preferred_username`
-* roles
-
----
-
-## 5. Store session (Redis)
-
----
-
-## 6. Redirect user to app
-
----
-
-# 🧩 Minimal Implementation (start here)
+# What to change
 
 ## Controller
 
+Use:
+
 ```java
-@RestController
-@RequestMapping("/auth")
-public class AuthController {
+@GetMapping("/callback")
+public ResponseEntity<String> callback(
+        @RequestParam String code,
+        @RequestParam String state) {
 
-    private final AuthService authService;
-
-    public AuthController(AuthService authService) {
-        this.authService = authService;
-    }
-
-    @GetMapping("/callback")
-    public ResponseEntity<String> callback(
-            @RequestParam String code) {
-
-        authService.handleCallback(code);
-
-        return ResponseEntity.ok("Login successful");
-    }
+    authService.handleCallback(code, state);
+    return ResponseEntity.ok("Login successful");
 }
 ```
 
 ---
 
-# 🧩 AuthService (core logic)
+## Service flow
+
+Inside `handleCallback(code, state)`:
 
 ```java
-@Service
-public class AuthService {
-
-    private final WebClient webClient;
-
-    public AuthService(WebClient.Builder builder) {
-        this.webClient = builder.build();
-    }
-
-    public void handleCallback(String code) {
-
-        String tokenUrl = "http://keycloak.ns-keycloak/realms/arthur-local/protocol/openid-connect/token";
-
-        Map<String, String> response =
-                webClient.post()
-                        .uri(tokenUrl)
-                        .header("Content-Type", "application/x-www-form-urlencoded")
-                        .bodyValue("grant_type=authorization_code" +
-                                "&client_id=b2boost-be" +
-                                "&client_secret=YOUR_SECRET" +
-                                "&code=" + code +
-                                "&redirect_uri=https://arthur-core.kubernetes.localhost/arthur-core/auth/callback")
-                        .retrieve()
-                        .bodyToMono(Map.class)
-                        .block();
-
-        System.out.println("TOKEN RESPONSE: " + response);
-    }
+AuthTransaction tx = redisAuthTransactionService.findByState(state);
+if (tx == null) {
+    throw new IllegalStateException("Invalid or expired state");
 }
+
+AppConfigResponse appConfig = lancelotClient.getApp(tx.getAppId());
+String redirectUri = tx.getRedirectUri();
+String codeVerifier = tx.getCodeVerifier();
+```
+
+Then token request must include `code_verifier`.
+
+---
+
+## WebClient token request
+
+Use form data, not one big concatenated string:
+
+```java
+Map<String, Object> response = webClient.post()
+    .uri(tokenUrl)
+    .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+    .body(BodyInserters
+        .fromFormData("grant_type", "authorization_code")
+        .with("client_id", appConfig.getClientId())
+        .with("client_secret", appConfig.getClientSecret())
+        .with("code", code)
+        .with("redirect_uri", redirectUri)
+        .with("code_verifier", codeVerifier))
+    .retrieve()
+    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+    .block();
 ```
 
 ---
 
-# ⚠️ IMPORTANT
+# Also add this for debugging
 
-## redirect_uri MUST match EXACTLY
+Right now the log only says 400. Capture the actual Keycloak error body:
 
-```text
-https://arthur-core.kubernetes.localhost/arthur-core/auth/callback
+```java
+Map<String, Object> response = webClient.post()
+    .uri(tokenUrl)
+    .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+    .body(BodyInserters
+        .fromFormData("grant_type", "authorization_code")
+        .with("client_id", appConfig.getClientId())
+        .with("client_secret", appConfig.getClientSecret())
+        .with("code", code)
+        .with("redirect_uri", redirectUri)
+        .with("code_verifier", codeVerifier))
+    .retrieve()
+    .onStatus(HttpStatusCode::isError, clientResponse ->
+        clientResponse.bodyToMono(String.class).flatMap(body -> {
+            log.error("Token endpoint error body: {}", body);
+            return Mono.error(new IllegalStateException("Token exchange failed: " + body));
+        }))
+    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+    .block();
 ```
 
-Same in:
-
-* Keycloak
-* token request
-* initial auth request
+That will likely show something like `invalid_grant` or PKCE-related failure.
 
 ---
 
-# 🧪 What you should see now
+# Why this is very likely the cause
 
-After login:
+Your log shows:
 
-```text
-Login successful
-```
+* `/auth/start` returns 302 fine
+* `/auth/callback` is hit fine
+* token POST fails with 400
 
-And logs:
+That pattern is classic for one of these:
 
-```text
-TOKEN RESPONSE: {access_token=..., id_token=...}
-```
+* missing `code_verifier`
+* reused `code`
+* redirect URI mismatch
 
----
-
-# 🔥 You just unlocked the core of your system
-
-Now you have:
-
-* ✅ Keycloak login
-* ✅ Authorization Code
-* 👉 Next: token exchange
+In your case, because your start flow used PKCE earlier, **missing `code_verifier` is the most likely cause**.
 
 ---
 
-# 🚀 Next Step (VERY IMPORTANT)
+# After this fix
 
-After this works, we will:
+The next expected flow is:
 
-### 🔐 Parse JWT
+1. callback receives `code` and `state`
+2. token exchange succeeds
+3. you log access/id token response
+4. then we decode the JWT and create Redis session
 
-### 🧠 Extract user ID
-
-### 🧱 Store session in Redis
-
-### 🔗 Call Lancelot (get roles)
-
----
-
-# 👉 Tell me when ready
-
-Say:
-
-👉 **"callback working, got tokens"**
-
-Then I’ll help you:
-
-* decode JWT properly
-* validate signature (JWK)
-* build session model
-* plug Redis
-
----
-
-You’re now in the **real auth flow** — this is the heart of your architecture 🔥
+Send your current `handleCallback` after you add `state` and `code_verifier`, and I’ll tighten it up.
