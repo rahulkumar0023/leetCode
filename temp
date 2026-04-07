@@ -1,201 +1,172 @@
-Yes — this log strongly suggests the token POST is failing because your callback is **not sending all the values that match the authorization request**.
+This looks much better. You’re now storing state and sending `code_verifier`, so the remaining 400 is likely one of these two things:
 
-The biggest issue is this:
+## Most likely issue
 
-### You started login with PKCE
-
-Earlier, your `/auth/start` flow generated:
-
-* `state`
-* `nonce`
-* `code_verifier`
-* `code_challenge`
-
-and sent `code_challenge` to Keycloak.
-
-### But in `/auth/callback`, you only send:
-
-* `code`
-* `client_id`
-* `client_secret`
-* `redirect_uri`
-
-You are **not sending `code_verifier`**.
-
-That usually causes the token endpoint to return **400 Bad Request**.
-
----
-
-# What `handleCallback` should do
-
-Right now it’s too small. It should:
-
-1. Accept both `code` and `state`
-2. Load the auth transaction from Redis using `state`
-3. Read from that saved transaction:
-
-   * `appId`
-   * `codeVerifier`
-   * original `redirectUri`
-4. Call Lancelot using that `appId`
-5. Exchange code for token with:
-
-   * `grant_type=authorization_code`
-   * `client_id`
-   * `client_secret`
-   * `code`
-   * `redirect_uri`
-   * `code_verifier`
-6. Parse tokens
-7. Create session in Redis
-
-That matches your architecture, where Arthur Core orchestrates auth and keeps session state in Redis while Lancelot provides app metadata and user data. 
-
----
-
-# What is wrong in your current callback
-
-From your screenshot, your callback method is:
+Your token request is using:
 
 ```java
-@GetMapping("/callback")
-public ResponseEntity<String> callback(@RequestParam String code) {
-    authService.handleCallback(code);
-    return ResponseEntity.ok("Login successful");
+String tokenUrl = "http://keycloak.ns-keycloak/realms/arthur-local/protocol/openid-connect/token";
+```
+
+But in `/start` you discovered metadata from:
+
+```java
+appConfig.getIssuerUri()
+```
+
+and used that to build the authorize URL.
+
+Those two should come from the **same source**. Do not hardcode `tokenUrl`. Use OIDC discovery metadata again in callback.
+
+### Change this
+
+```java
+String tokenUrl = "http://keycloak.ns-keycloak/realms/arthur-local/protocol/openid-connect/token";
+```
+
+### To this
+
+```java
+OidcMetadata metadata = oidcDiscoveryClient.loadMetadata(appConfig.getIssuerUri());
+String tokenUrl = metadata.getTokenEndpoint();
+```
+
+That avoids subtle mismatches between issuer, realm, and token endpoint.
+
+---
+
+## Second likely issue
+
+In callback you are not validating that these values exist before calling Keycloak:
+
+* `tx.getRedirectUri()`
+* `tx.getCodeVerifier()`
+
+Add this before the token call:
+
+```java
+if (redirectUri == null || redirectUri.isBlank()) {
+    throw new IllegalStateException("Missing redirectUri in auth transaction");
 }
-```
 
-Problems:
-
-* no `state`
-* no lookup of saved auth transaction
-* hardcoded `B2BOOST_BE`
-* no `code_verifier`
-
-And in `handleCallback()` you do:
-
-```java
-lancelotClient.getApp("B2BOOST_BE")
-```
-
-That should not be hardcoded.
-
----
-
-# What to change
-
-## Controller
-
-Use:
-
-```java
-@GetMapping("/callback")
-public ResponseEntity<String> callback(
-        @RequestParam String code,
-        @RequestParam String state) {
-
-    authService.handleCallback(code, state);
-    return ResponseEntity.ok("Login successful");
+if (codeVerifier == null || codeVerifier.isBlank()) {
+    throw new IllegalStateException("Missing codeVerifier in auth transaction");
 }
 ```
 
 ---
 
-## Service flow
+## Also add these logs right before token exchange
 
-Inside `handleCallback(code, state)`:
+This will tell us immediately what is wrong:
 
 ```java
-AuthTransaction tx = redisAuthTransactionService.findByState(state);
-if (tx == null) {
-    throw new IllegalStateException("Invalid or expired state");
+log.info("Callback state={}", state);
+log.info("Callback code={}", code);
+log.info("TX appId={}", tx.getAppId());
+log.info("TX redirectUri={}", tx.getRedirectUri());
+log.info("TX codeVerifier present={}", codeVerifier != null && !codeVerifier.isBlank());
+log.info("App clientId={}", appConfig.getClientId());
+log.info("IssuerUri={}", appConfig.getIssuerUri());
+log.info("TokenUrl={}", tokenUrl);
+```
+
+Do **not** log the client secret or full tokens.
+
+---
+
+## One more important check
+
+Make sure the redirect URI in all three places is exactly the same:
+
+1. In Keycloak client config
+2. In `appConfig.getRedirectUri()` from Lancelot
+3. In token request via `tx.getRedirectUri()`
+
+It must be exactly:
+
+```text
+https://arthur-core.kubernetes.localhost/arthur-core/auth/callback
+```
+
+No trailing slash differences, no `/callback` vs `/auth/callback`, no internal cluster URL.
+
+---
+
+## Best next version of `handleCallback`
+
+Refactor the top of it like this:
+
+```java
+public void handleCallback(String code, String state) {
+    AuthTransaction tx = redisAuthTransactionService.findByState(state);
+    if (tx == null) {
+        throw new IllegalStateException("Invalid or expired state");
+    }
+
+    AppConfigResponse appConfig = lancelotClient.getApp(tx.getAppId());
+    validateAppConfig(appConfig);
+
+    String redirectUri = tx.getRedirectUri();
+    String codeVerifier = tx.getCodeVerifier();
+
+    if (redirectUri == null || redirectUri.isBlank()) {
+        throw new IllegalStateException("Missing redirectUri in auth transaction");
+    }
+    if (codeVerifier == null || codeVerifier.isBlank()) {
+        throw new IllegalStateException("Missing codeVerifier in auth transaction");
+    }
+
+    OidcMetadata metadata = oidcDiscoveryClient.loadMetadata(appConfig.getIssuerUri());
+    String tokenUrl = metadata.getTokenEndpoint();
+
+    log.info("Callback state={}", state);
+    log.info("TX appId={}", tx.getAppId());
+    log.info("TX redirectUri={}", redirectUri);
+    log.info("TX codeVerifier present={}", true);
+    log.info("TokenUrl={}", tokenUrl);
+
+    Map<String, Object> response = webClient.post()
+            .uri(tokenUrl)
+            .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+            .body(BodyInserters.fromFormData("grant_type", "authorization_code")
+                    .with("client_id", appConfig.getClientId())
+                    .with("client_secret", appConfig.getClientSecret())
+                    .with("code", code)
+                    .with("redirect_uri", redirectUri)
+                    .with("code_verifier", codeVerifier))
+            .retrieve()
+            .onStatus(HttpStatusCode::isError, clientResponse ->
+                    clientResponse.bodyToMono(String.class).flatMap(body -> {
+                        log.error("Token endpoint error body: {}", body);
+                        return Mono.error(new IllegalStateException("Token exchange failed: " + body));
+                    }))
+            .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+            .block();
+
+    log.info("Token exchange succeeded");
 }
-
-AppConfigResponse appConfig = lancelotClient.getApp(tx.getAppId());
-String redirectUri = tx.getRedirectUri();
-String codeVerifier = tx.getCodeVerifier();
-```
-
-Then token request must include `code_verifier`.
-
----
-
-## WebClient token request
-
-Use form data, not one big concatenated string:
-
-```java
-Map<String, Object> response = webClient.post()
-    .uri(tokenUrl)
-    .contentType(MediaType.APPLICATION_FORM_URLENCODED)
-    .body(BodyInserters
-        .fromFormData("grant_type", "authorization_code")
-        .with("client_id", appConfig.getClientId())
-        .with("client_secret", appConfig.getClientSecret())
-        .with("code", code)
-        .with("redirect_uri", redirectUri)
-        .with("code_verifier", codeVerifier))
-    .retrieve()
-    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
-    .block();
 ```
 
 ---
 
-# Also add this for debugging
+## Why I think this is the remaining problem
 
-Right now the log only says 400. Capture the actual Keycloak error body:
+Your `/start` method is well-shaped now:
 
-```java
-Map<String, Object> response = webClient.post()
-    .uri(tokenUrl)
-    .contentType(MediaType.APPLICATION_FORM_URLENCODED)
-    .body(BodyInserters
-        .fromFormData("grant_type", "authorization_code")
-        .with("client_id", appConfig.getClientId())
-        .with("client_secret", appConfig.getClientSecret())
-        .with("code", code)
-        .with("redirect_uri", redirectUri)
-        .with("code_verifier", codeVerifier))
-    .retrieve()
-    .onStatus(HttpStatusCode::isError, clientResponse ->
-        clientResponse.bodyToMono(String.class).flatMap(body -> {
-            log.error("Token endpoint error body: {}", body);
-            return Mono.error(new IllegalStateException("Token exchange failed: " + body));
-        }))
-    .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
-    .block();
-```
+* gets app config
+* loads OIDC metadata
+* generates state/nonce/verifier
+* saves transaction
+* builds authorize URL
 
-That will likely show something like `invalid_grant` or PKCE-related failure.
+So the callback should mirror that by:
 
----
+* loading transaction
+* loading app config
+* loading OIDC metadata
+* using discovered token endpoint
 
-# Why this is very likely the cause
+That matches your architecture where Arthur Core orchestrates auth and Lancelot supplies app config. 
 
-Your log shows:
-
-* `/auth/start` returns 302 fine
-* `/auth/callback` is hit fine
-* token POST fails with 400
-
-That pattern is classic for one of these:
-
-* missing `code_verifier`
-* reused `code`
-* redirect URI mismatch
-
-In your case, because your start flow used PKCE earlier, **missing `code_verifier` is the most likely cause**.
-
----
-
-# After this fix
-
-The next expected flow is:
-
-1. callback receives `code` and `state`
-2. token exchange succeeds
-3. you log access/id token response
-4. then we decode the JWT and create Redis session
-
-Send your current `handleCallback` after you add `state` and `code_verifier`, and I’ll tighten it up.
+After you add the token endpoint error body log, paste that one line. That message will usually make the final issue obvious immediately.
