@@ -1,75 +1,135 @@
-Yes — this is the next real issue, and it’s a clean one.
+Good. This is a different issue, and it is much simpler.
 
-Your flow is now working up to token exchange. The new failure is:
-
-```text
-Failed to resolve 'keycloak.kubernetes.localhost'
-```
-
-That means Arthur Core is trying to call the **browser URL** for Keycloak from inside Kubernetes.
-
-Inside the cluster, it should not use:
+You are now calling:
 
 ```text
-http://keycloak.kubernetes.localhost/...
+GET http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local/protocol/openid-connect/token/.well-known/openid-configuration
 ```
 
-It should use the **service DNS** instead:
+and Keycloak returns:
+
+```text
+405 Method Not Allowed
+```
+
+That URL is wrong.
+
+The `/.well-known/openid-configuration` path belongs under the **realm**, not under the **token endpoint**.
+
+What you have now is effectively:
+
+```text
+.../protocol/openid-connect/token/.well-known/openid-configuration
+```
+
+but it should be:
+
+```text
+http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local/.well-known/openid-configuration
+```
+
+Then from that metadata response, you read:
+
+* `authorization_endpoint`
+* `token_endpoint`
+* `jwks_uri`
+* `issuer`
+
+The fix is in how you build or pass `issuerUri`.
+
+Right now your log shows:
+
+```text
+Issuer URI : http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local/protocol/openid-connect/token
+```
+
+That is not an issuer URI. That is the token endpoint.
+
+It should be:
+
+```text
+http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local
+```
+
+So update the value coming from Lancelot or your temporary config.
+
+Use:
+
+```yaml
+issuer-uri: http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local
+```
+
+not:
+
+```yaml
+issuer-uri: http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local/protocol/openid-connect/token
+```
+
+Your discovery flow should look like this:
+
+```java
+String issuerUri = appConfig.getIssuerUri(); 
+// http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local
+
+OidcMetadata metadata = oidcDiscoveryClient.loadMetadata(issuerUri);
+
+// metadata.getAuthorizationEndpoint()
+// metadata.getTokenEndpoint()
+```
+
+And your discovery client should call:
+
+```java
+String discoveryUrl = issuerUri + "/.well-known/openid-configuration";
+```
+
+which becomes:
+
+```java
+http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local/.well-known/openid-configuration
+```
+
+Then for token exchange, use the `token_endpoint` returned by discovery, which will be:
 
 ```text
 http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local/protocol/openid-connect/token
 ```
 
-or the shorter form:
+So the correct sequence is:
 
-```text
-http://keycloak.ns-keycloak/realms/arthur-local/protocol/openid-connect/token
-```
+1. `issuerUri`
 
-What this tells us:
+   ```text
+   http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local
+   ```
 
-* login redirect is working
-* callback is working
-* Redis state round-trip is working
-* appId/codeVerifier/redirectUri are now present
-* only the token endpoint URL is wrong for in-cluster traffic
+2. discovery URL
 
-Use this rule:
+   ```text
+   http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local/.well-known/openid-configuration
+   ```
 
-* browser-facing URLs: `https://keycloak.kubernetes.localhost`
-* service-to-service URLs inside k8s: `http://keycloak.ns-keycloak...`
+3. token endpoint from metadata
 
-So in your callback flow, the token URL should come from an internal issuer or internal metadata source, not the external ingress hostname.
+   ```text
+   http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local/protocol/openid-connect/token
+   ```
 
-The easiest fix is one of these.
-
-Use internal token URL directly:
+Add a quick guard so this does not happen again:
 
 ```java
-String tokenUrl =
-    "http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local/protocol/openid-connect/token";
+if (issuerUri.contains("/protocol/openid-connect/token")) {
+    throw new IllegalArgumentException("issuerUri must be realm base URL, not token endpoint");
+}
 ```
 
-Or better, make Lancelot return an internal issuer/token base for backend calls, separate from the external URL used in redirects.
+And log both separately:
 
-A clean split is:
-
-* `issuerUriExternal`: used for browser redirect / discovery shown to users
-* `issuerUriInternal`: used by Arthur Core for token exchange and backend calls
-
-Then callback should use the internal one.
-
-One important detail: keep `redirect_uri` as the external Arthur Core URL:
-
-```text
-https://arthur-core.kubernetes.localhost/arthur-core/auth/callback
+```java
+log.info("Issuer URI={}", issuerUri);
+log.info("Discovery URL={}", issuerUri + "/.well-known/openid-configuration");
 ```
 
-That part is correct because Keycloak validates the redirect against the client config.
+So the immediate fix is: change `appConfig.getIssuerUri()` to the realm base URL only.
 
-So the mixed setup is correct:
-
-* token POST target: internal Keycloak service URL
-* redirect_uri form field: external Arthur Core ingress URL
-
-Change that token URL and you should move past this error. The next likely step after that is either a successful token response or a Keycloak 400 with a specific OIDC reason.
+After that, this error should disappear, and the next step will likely be the real token exchange.
