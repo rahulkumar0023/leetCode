@@ -1,3 +1,390 @@
+Great. Here’s a clean first version for **Lancelot** that gives you a working test user now and leaves room for the future structure.
+
+## 1. Entity
+
+```java
+package com.bnpp.pf.lancelot.entity;
+
+import jakarta.persistence.*;
+import lombok.Getter;
+import lombok.Setter;
+
+@Entity
+@Table(name = "users")
+@Getter
+@Setter
+public class UserEntity {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(name = "user_id", nullable = false, unique = true)
+    private String userId;
+
+    @Column(name = "username", nullable = false, unique = true)
+    private String username;
+
+    @Column(name = "first_name")
+    private String firstName;
+
+    @Column(name = "last_name")
+    private String lastName;
+
+    @Column(name = "email")
+    private String email;
+
+    @Column(name = "phone_number")
+    private String phoneNumber;
+}
+```
+
+---
+
+## 2. Repository
+
+```java
+package com.bnpp.pf.lancelot.repository;
+
+import com.bnpp.pf.lancelot.entity.UserEntity;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import java.util.Optional;
+
+public interface UserRepository extends JpaRepository<UserEntity, Long> {
+    Optional<UserEntity> findByUsername(String username);
+}
+```
+
+---
+
+## 3. Response DTOs
+
+### UserResponse
+
+```java
+package com.bnpp.pf.lancelot.dto;
+
+import lombok.Data;
+
+import java.util.List;
+
+@Data
+public class UserResponse {
+    private String userId;
+    private String username;
+    private UserInfoResponse userInfo;
+    private List<SalesPointResponse> salesPoints;
+    private RelatedPartyResponse relatedDealer;
+    private RelatedPartyResponse relatedZoneManager;
+    private List<String> businessLines;
+    private List<String> roles;
+}
+```
+
+### UserInfoResponse
+
+```java
+package com.bnpp.pf.lancelot.dto;
+
+import lombok.Data;
+
+import java.util.List;
+
+@Data
+public class UserInfoResponse {
+    private String firstName;
+    private String lastName;
+    private List<String> phoneNumbers;
+    private List<String> emails;
+}
+```
+
+### SalesPointResponse
+
+```java
+package com.bnpp.pf.lancelot.dto;
+
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class SalesPointResponse {
+    private String id;
+    private String name;
+}
+```
+
+### RelatedPartyResponse
+
+```java
+package com.bnpp.pf.lancelot.dto;
+
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class RelatedPartyResponse {
+    private String id;
+    private String name;
+}
+```
+
+---
+
+## 4. Service
+
+```java
+package com.bnpp.pf.lancelot.service;
+
+import com.bnpp.pf.lancelot.dto.*;
+import com.bnpp.pf.lancelot.entity.UserEntity;
+import com.bnpp.pf.lancelot.repository.UserRepository;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+
+@Service
+@RequiredArgsConstructor
+public class UserService {
+
+    private final UserRepository userRepository;
+
+    public UserResponse getByUsername(String username) {
+        UserEntity user = userRepository.findByUsername(username)
+                .orElseThrow(() -> new IllegalArgumentException("User not found: " + username));
+
+        return mapToResponse(user);
+    }
+
+    private UserResponse mapToResponse(UserEntity user) {
+        UserResponse response = new UserResponse();
+        response.setUserId(user.getUserId());
+        response.setUsername(user.getUsername());
+
+        UserInfoResponse userInfo = new UserInfoResponse();
+        userInfo.setFirstName(user.getFirstName());
+        userInfo.setLastName(user.getLastName());
+        userInfo.setPhoneNumbers(
+                user.getPhoneNumber() == null ? List.of() : List.of(user.getPhoneNumber())
+        );
+        userInfo.setEmails(
+                user.getEmail() == null ? List.of() : List.of(user.getEmail())
+        );
+        response.setUserInfo(userInfo);
+
+        response.setSalesPoints(List.of(
+                new SalesPointResponse("SP001", "Sales Point 1")
+        ));
+
+        response.setRelatedDealer(new RelatedPartyResponse("DLR001", "Dealer 1"));
+        response.setRelatedZoneManager(new RelatedPartyResponse("ZM001", "Zone Manager 1"));
+        response.setBusinessLines(List.of("AUTO_LOANS"));
+        response.setRoles(List.of("SELLER"));
+
+        return response;
+    }
+}
+```
+
+---
+
+## 5. Controller
+
+Since we’re really looking up by username for now, make that explicit.
+
+```java
+package com.bnpp.pf.lancelot.controller;
+
+import com.bnpp.pf.lancelot.dto.UserResponse;
+import com.bnpp.pf.lancelot.service.UserService;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/users")
+@RequiredArgsConstructor
+public class UserController {
+
+    private final UserService userService;
+
+    @GetMapping("/by-username")
+    public ResponseEntity<UserResponse> getByUsername(@RequestParam String username) {
+        return ResponseEntity.ok(userService.getByUsername(username));
+    }
+}
+```
+
+---
+
+## 6. Seed SQL
+
+If you use `data.sql`, add:
+
+```sql
+INSERT INTO users (
+    user_id,
+    username,
+    first_name,
+    last_name,
+    email,
+    phone_number
+) VALUES (
+    'USR_TEST_001',
+    'testuser',
+    'Test',
+    'User',
+    'testuser@test.local',
+    '+33123456789'
+);
+```
+
+If your table may already contain rows, safer version:
+
+```sql
+INSERT INTO users (
+    user_id,
+    username,
+    first_name,
+    last_name,
+    email,
+    phone_number
+)
+SELECT
+    'USR_TEST_001',
+    'testuser',
+    'Test',
+    'User',
+    'testuser@test.local',
+    '+33123456789'
+WHERE NOT EXISTS (
+    SELECT 1 FROM users WHERE username = 'testuser'
+);
+```
+
+---
+
+## 7. Arthur Core change
+
+Because Lancelot is now looking up by username, in Arthur Core use:
+
+```java
+String username = claims.getPreferredUsername();
+UserResponse user = lancelotClient.getUserByUsername(username);
+```
+
+---
+
+## 8. LancelotClient change in Arthur Core
+
+```java
+public UserResponse getUserByUsername(String username) {
+    log.info("Calling Lancelot getUserByUsername username={}", username);
+
+    return lancelotWebClient.get()
+            .uri(uriBuilder -> uriBuilder
+                    .path("/users/by-username")
+                    .queryParam("username", username)
+                    .build())
+            .retrieve()
+            .bodyToMono(UserResponse.class)
+            .block();
+}
+```
+
+---
+
+## 9. Expected JSON response
+
+Calling:
+
+```text
+GET /users/by-username?username=testuser
+```
+
+should return something like:
+
+```json
+{
+  "userId": "USR_TEST_001",
+  "username": "testuser",
+  "userInfo": {
+    "firstName": "Test",
+    "lastName": "User",
+    "phoneNumbers": [
+      "+33123456789"
+    ],
+    "emails": [
+      "testuser@test.local"
+    ]
+  },
+  "salesPoints": [
+    {
+      "id": "SP001",
+      "name": "Sales Point 1"
+    }
+  ],
+  "relatedDealer": {
+    "id": "DLR001",
+    "name": "Dealer 1"
+  },
+  "relatedZoneManager": {
+    "id": "ZM001",
+    "name": "Zone Manager 1"
+  },
+  "businessLines": [
+    "AUTO_LOANS"
+  ],
+  "roles": [
+    "SELLER"
+  ]
+}
+```
+
+---
+
+## 10. Why this is a good first step
+
+This gets you:
+
+* a real Lancelot endpoint
+* real DB-backed lookup
+* a future-friendly response contract
+* minimal changes in Arthur Core
+
+And later you can evolve it to:
+
+* multiple emails
+* multiple phone numbers
+* real sales point table
+* dealer / zone manager tables
+* business line table
+* role mapping tables
+
+without changing the basic flow.
+
+## Next thing to do
+
+After adding this, test Lancelot directly first:
+
+```text
+GET /users/by-username?username=testuser
+```
+
+Then wire Arthur Core to call `getUserByUsername`.
+
+After that, the next step is session creation and final redirect.
+
+
+------------------
 Yes — that’s the right move.
 
 Since Arthur Core is already reaching the point of calling Lancelot, the fastest next step is to add a **test user in Lancelot** with a response shape that already leaves room for your future hierarchy fields.
