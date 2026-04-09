@@ -1,167 +1,287 @@
-Good — this error is **exactly because of the Spring JWT decoder we just added**, and it’s a configuration mismatch. Easy fix 👍
+Yes — that’s the right next step.
+
+Arthur Core is now doing its job:
+
+* login works
+* callback works
+* token exchange works
+* JWT is parsed
+* it tries to call Lancelot
+
+So now Lancelot needs to provide the user.
+
+## What `getUserById` should do in Lancelot
+
+Given a user identifier from Arthur Core, it should return the user’s app/business profile, not Keycloak auth data.
+
+At minimum, return:
+
+* `userId`
+* `username`
+* `email`
+* `roles`
+
+Later you can extend it with:
+
+* tenant/app assignments
+* org hierarchy context
+* permissions
+* status flags
 
 ---
 
-# 🚨 Root Cause (from your logs)
+## First design decision
 
-```
-JwtDecoder ... The Issuer "http://keycloak.kubernetes.localhost/realms/arthur-local"
-did not match the requested issuer
-"http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local"
-```
+Before coding, lock this:
 
-👉 Translation:
+### Which field from Keycloak will Arthur Core send?
 
-* You configured decoder with **internal URL**
-* But the JWT token says issuer is **external URL**
+Right now you’re likely using one of:
 
-So Spring says:
+* `sub`
+* `preferred_username`
+* `email`
 
-❌ “This token is not from the issuer I expect”
+You must decide what Lancelot will look up by.
 
----
+### Best practical choice
 
-# 🧠 Why this happens (important)
-
-Inside the JWT:
-
-```json
-"iss": "https://keycloak.kubernetes.localhost/realms/arthur-local"
-```
-
-But your decoder is configured as:
+If your Lancelot users already have usernames like `testuser`, then use:
 
 ```java
-JwtDecoders.fromIssuerLocation(
-    "http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local"
-)
+preferred_username
 ```
 
-👉 These must MATCH exactly.
-
----
-
-# ✅ FIX OPTIONS (choose one)
-
----
-
-## ✅ Option 1 — Disable issuer validation (BEST FOR NOW)
-
-Since you're still building the flow, do this:
+If Lancelot stores Keycloak subject IDs, then use:
 
 ```java
-@Bean
-public JwtDecoder jwtDecoder() {
-    NimbusJwtDecoder decoder = NimbusJwtDecoder
-        .withJwkSetUri("http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local/protocol/openid-connect/certs")
-        .build();
+sub
+```
 
-    decoder.setJwtValidator(token -> OAuth2TokenValidatorResult.success());
+For local development, `preferred_username` is usually easiest.
 
-    return decoder;
+---
+
+## Recommended API in Lancelot
+
+### Option 1: path variable
+
+```java
+GET /users/{userId}
+```
+
+Good if the identifier is truly your internal user id.
+
+### Option 2: query param
+
+```java
+GET /users/by-username?username=testuser
+```
+
+Better if you are actually looking up by username.
+
+Because your method is called `getUserById`, but the real lookup may currently be username-based, it is okay to start with a temporary API that matches reality.
+
+---
+
+## Clean minimal version
+
+### Controller
+
+```java
+@RestController
+@RequestMapping("/users")
+@RequiredArgsConstructor
+public class UserController {
+
+    private final UserService userService;
+
+    @GetMapping("/{userId}")
+    public ResponseEntity<UserResponse> getUserById(@PathVariable String userId) {
+        return ResponseEntity.ok(userService.getUserById(userId));
+    }
 }
 ```
 
-👉 This:
-
-* uses internal URL (so Kubernetes works)
-* skips issuer validation (so mismatch doesn’t break you)
-
 ---
 
-## ✅ Option 2 — Use external issuer (NOT recommended for you)
+## Service
 
 ```java
-JwtDecoders.fromIssuerLocation(
-    "https://keycloak.kubernetes.localhost/realms/arthur-local"
-)
+@Service
+@RequiredArgsConstructor
+public class UserService {
+
+    private final UserRepository userRepository;
+
+    public UserResponse getUserById(String userId) {
+        User user = userRepository.findByUserId(userId)
+                .orElseThrow(() -> new IllegalArgumentException("User not found: " + userId));
+
+        return mapToResponse(user);
+    }
+
+    private UserResponse mapToResponse(User user) {
+        UserResponse response = new UserResponse();
+        response.setUserId(user.getUserId());
+        response.setUsername(user.getUsername());
+        response.setEmail(user.getEmail());
+        response.setRoles(user.getRoles());
+        return response;
+    }
+}
 ```
 
-❌ Won’t work inside cluster (DNS issue again)
-
 ---
 
-## ✅ Option 3 — Advanced (production clean)
+## Repository
 
-You would:
+```java
+@Repository
+public interface UserRepository extends JpaRepository<User, Long> {
 
-* keep external issuer in JWT
-* but override validation to accept it
-* while still using internal JWK URL
-
-We can do this later — not needed now
-
----
-
-# 🎯 What you should do RIGHT NOW
-
-Use **Option 1**.
-
-That keeps:
-
-* your current architecture intact
-* no DNS issues
-* no issuer mismatch issues
-
----
-
-# 🧠 Important takeaway (this is key to your system)
-
-You now have **two realities again**:
-
-| Thing                  | Value                           |
-| ---------------------- | ------------------------------- |
-| JWT issuer (`iss`)     | `keycloak.kubernetes.localhost` |
-| Internal communication | `keycloak.ns-keycloak`          |
-
-👉 These will NEVER match automatically
-👉 You must handle this explicitly
-
----
-
-# 🚀 After this fix
-
-Your flow becomes:
-
-```
-token exchange ✅
-JWT decoded ✅
-claims extracted ✅
+    Optional<User> findByUserId(String userId);
+}
 ```
 
-Then:
+---
+
+## Entity example
+
+Use whatever matches your schema, but something like:
+
+```java
+@Entity
+@Table(name = "users")
+@Getter
+@Setter
+public class User {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(name = "user_id", unique = true, nullable = false)
+    private String userId;
+
+    @Column(name = "username")
+    private String username;
+
+    @Column(name = "email")
+    private String email;
+
+    @ElementCollection(fetch = FetchType.EAGER)
+    @CollectionTable(name = "user_roles", joinColumns = @JoinColumn(name = "user_id_ref"))
+    @Column(name = "role")
+    private List<String> roles;
+}
+```
+
+---
+
+## Response DTO
+
+```java
+@Data
+public class UserResponse {
+    private String userId;
+    private String username;
+    private String email;
+    private List<String> roles;
+}
+```
+
+---
+
+## If you want to use username instead
+
+If Arthur Core is extracting:
+
+```java
+claims.getPreferredUsername()
+```
+
+then Lancelot should be:
+
+### Repository
+
+```java
+Optional<User> findByUsername(String username);
+```
+
+### Service
+
+```java
+public UserResponse getUserByUsername(String username) {
+    User user = userRepository.findByUsername(username)
+            .orElseThrow(() -> new IllegalArgumentException("User not found: " + username));
+    return mapToResponse(user);
+}
+```
+
+### Controller
+
+```java
+@GetMapping("/by-username")
+public ResponseEntity<UserResponse> getUserByUsername(@RequestParam String username) {
+    return ResponseEntity.ok(userService.getUserByUsername(username));
+}
+```
+
+For now, this may be the fastest route if your DB already has usernames.
+
+---
+
+## My recommendation for your current phase
+
+Use this temporary mapping:
+
+* Arthur Core extracts `preferred_username`
+* Lancelot implements lookup by username
+
+That is usually much easier than wiring Keycloak `sub` into the DB immediately.
+
+Then later, once your user model is stable, you can move to:
+
+* `sub` as external identity key
+* internal `userId` as business key
+
+---
+
+## Suggested next implementation path
+
+### In Arthur Core
+
+Temporarily change:
 
 ```java
 String userId = claims.getSub();
-UserResponse user = lancelotClient.getUserById(userId);
 ```
 
+to:
+
+```java
+String userId = claims.getPreferredUsername();
+```
+
+if Lancelot will lookup by username.
+
+### In Lancelot
+
+Implement:
+
+```java
+GET /users/by-username?username=testuser
+```
+
+Then later rename/normalize once the identity model is finalized.
+
 ---
 
-# 🔥 Where you are now
+## Best next step
 
-You have successfully built:
+Decide this one thing first:
 
-✅ OIDC flow
-✅ Kubernetes ingress
-✅ Redis auth state
-✅ Token exchange
-🔥 Now fixing **JWT validation edge case**
+**Do you want Lancelot to look up users by `sub` or by `preferred_username` for now?**
 
----
-
-# 👉 Next step
-
-Apply the decoder fix and run again.
-
-Then tell me:
-
-👉 **"JWT parsed + user fetched"**
-
-And we’ll finalize:
-
-* session creation
-* passing user to frontend
-* protecting APIs
-
-You are literally at the **final 2–3 steps** 🚀
+If you want, I’ll write the exact Lancelot controller, service, entity, repository, and sample SQL for the option you choose.
