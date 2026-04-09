@@ -1,135 +1,315 @@
-Good. This is a different issue, and it is much simpler.
+Yes. Here’s the clean change to make in **Arthur Core**.
 
-You are now calling:
+## Goal
 
-```text
-GET http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local/protocol/openid-connect/token/.well-known/openid-configuration
-```
+After Keycloak token exchange:
 
-and Keycloak returns:
+1. parse the token
+2. extract the user identifier
+3. call `Lancelot.getUserById(...)`
+4. build the Arthur session from Lancelot data
 
-```text
-405 Method Not Allowed
-```
+---
 
-That URL is wrong.
+## 1. Update `handleCallback()`
 
-The `/.well-known/openid-configuration` path belongs under the **realm**, not under the **token endpoint**.
-
-What you have now is effectively:
-
-```text
-.../protocol/openid-connect/token/.well-known/openid-configuration
-```
-
-but it should be:
-
-```text
-http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local/.well-known/openid-configuration
-```
-
-Then from that metadata response, you read:
-
-* `authorization_endpoint`
-* `token_endpoint`
-* `jwks_uri`
-* `issuer`
-
-The fix is in how you build or pass `issuerUri`.
-
-Right now your log shows:
-
-```text
-Issuer URI : http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local/protocol/openid-connect/token
-```
-
-That is not an issuer URI. That is the token endpoint.
-
-It should be:
-
-```text
-http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local
-```
-
-So update the value coming from Lancelot or your temporary config.
-
-Use:
-
-```yaml
-issuer-uri: http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local
-```
-
-not:
-
-```yaml
-issuer-uri: http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local/protocol/openid-connect/token
-```
-
-Your discovery flow should look like this:
+Use the token response, extract `id_token`, parse claims, then call Lancelot.
 
 ```java
-String issuerUri = appConfig.getIssuerUri(); 
-// http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class AuthService {
 
-OidcMetadata metadata = oidcDiscoveryClient.loadMetadata(issuerUri);
+    private final WebClient webClient;
+    private final RedisAuthTransactionService redisAuthTransactionService;
+    private final LancelotClient lancelotClient;
+    private final OidcDiscoveryClient oidcDiscoveryClient;
+    private final JwtService jwtService;
+    private final RedisSessionService redisSessionService;
 
-// metadata.getAuthorizationEndpoint()
-// metadata.getTokenEndpoint()
-```
+    public void handleCallback(String code, String state) {
+        AuthTransaction tx = redisAuthTransactionService.findByState(state);
+        if (tx == null) {
+            throw new IllegalStateException("Invalid or expired state");
+        }
 
-And your discovery client should call:
+        AppConfigResponse appConfig = lancelotClient.getApp(tx.getAppId());
 
-```java
-String discoveryUrl = issuerUri + "/.well-known/openid-configuration";
-```
+        OidcMetadata metadata = oidcDiscoveryClient.loadMetadata(appConfig.getIssuerUri());
 
-which becomes:
+        String tokenUrl = toInternalUrl(metadata.getTokenEndpoint());
 
-```java
-http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local/.well-known/openid-configuration
-```
+        Map<String, Object> tokenResponse = webClient.post()
+                .uri(tokenUrl)
+                .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+                .body(BodyInserters.fromFormData("grant_type", "authorization_code")
+                        .with("client_id", appConfig.getClientId())
+                        .with("client_secret", appConfig.getClientSecret())
+                        .with("code", code)
+                        .with("redirect_uri", tx.getRedirectUri())
+                        .with("code_verifier", tx.getCodeVerifier()))
+                .retrieve()
+                .onStatus(HttpStatusCode::isError, clientResponse ->
+                        clientResponse.bodyToMono(String.class).flatMap(body -> {
+                            log.error("Token endpoint error body: {}", body);
+                            return Mono.error(new IllegalStateException("Token exchange failed: " + body));
+                        }))
+                .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+                .block();
 
-Then for token exchange, use the `token_endpoint` returned by discovery, which will be:
+        log.info("Token exchange succeeded");
 
-```text
-http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local/protocol/openid-connect/token
-```
+        String accessToken = (String) tokenResponse.get("access_token");
+        String idToken = (String) tokenResponse.get("id_token");
+        String refreshToken = (String) tokenResponse.get("refresh_token");
 
-So the correct sequence is:
+        JwtUserClaims claims = jwtService.extractClaims(idToken);
 
-1. `issuerUri`
+        log.info("Authenticated subject={}, username={}, email={}",
+                claims.getSub(), claims.getPreferredUsername(), claims.getEmail());
 
-   ```text
-   http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local
-   ```
+        String userId = claims.getSub(); // change if Lancelot expects username/email instead
 
-2. discovery URL
+        UserResponse user = lancelotClient.getUserById(userId);
 
-   ```text
-   http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local/.well-known/openid-configuration
-   ```
+        log.info("Loaded user from Lancelot userId={}, username={}",
+                user.getUserId(), user.getUsername());
 
-3. token endpoint from metadata
+        UserSession session = new UserSession();
+        session.setSessionId(UUID.randomUUID().toString());
+        session.setAppId(tx.getAppId());
+        session.setUserId(user.getUserId());
+        session.setUsername(user.getUsername());
+        session.setEmail(user.getEmail());
+        session.setRoles(user.getRoles());
+        session.setAccessToken(accessToken);
+        session.setRefreshToken(refreshToken);
+        session.setCreatedAt(Instant.now());
 
-   ```text
-   http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local/protocol/openid-connect/token
-   ```
+        redisSessionService.save(session);
 
-Add a quick guard so this does not happen again:
+        redisAuthTransactionService.delete(state);
 
-```java
-if (issuerUri.contains("/protocol/openid-connect/token")) {
-    throw new IllegalArgumentException("issuerUri must be realm base URL, not token endpoint");
+        log.info("Session created for userId={}, appId={}", user.getUserId(), tx.getAppId());
+    }
+
+    private String toInternalUrl(String url) {
+        return url.replace("keycloak.kubernetes.localhost", "keycloak.ns-keycloak.svc.cluster.local");
+    }
 }
 ```
 
-And log both separately:
+---
+
+## 2. Add a JWT parser service
+
+For now, decode claims from `id_token`. This does **not** validate signature yet; it just parses. That is enough to move the flow forward.
 
 ```java
-log.info("Issuer URI={}", issuerUri);
-log.info("Discovery URL={}", issuerUri + "/.well-known/openid-configuration");
+@Service
+public class JwtService {
+
+    public JwtUserClaims extractClaims(String jwtToken) {
+        try {
+            SignedJWT signedJWT = SignedJWT.parse(jwtToken);
+            JWTClaimsSet claimsSet = signedJWT.getJWTClaimsSet();
+
+            JwtUserClaims claims = new JwtUserClaims();
+            claims.setSub(claimsSet.getSubject());
+            claims.setPreferredUsername((String) claimsSet.getClaim("preferred_username"));
+            claims.setEmail((String) claimsSet.getClaim("email"));
+            claims.setGivenName((String) claimsSet.getClaim("given_name"));
+            claims.setFamilyName((String) claimsSet.getClaim("family_name"));
+            return claims;
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to parse JWT token", e);
+        }
+    }
+}
 ```
 
-So the immediate fix is: change `appConfig.getIssuerUri()` to the realm base URL only.
+### DTO for token claims
 
-After that, this error should disappear, and the next step will likely be the real token exchange.
+```java
+@Data
+public class JwtUserClaims {
+    private String sub;
+    private String preferredUsername;
+    private String email;
+    private String givenName;
+    private String familyName;
+}
+```
+
+---
+
+## 3. Add `LancelotClient.getUserById(...)`
+
+If you already have this, just adapt the response type.
+
+```java
+@Component
+@RequiredArgsConstructor
+@Slf4j
+public class LancelotClient {
+
+    private final WebClient lancelotWebClient;
+
+    public AppConfigResponse getApp(String appId) {
+        return lancelotWebClient.get()
+                .uri("/apps/{appId}", appId)
+                .retrieve()
+                .bodyToMono(AppConfigResponse.class)
+                .block();
+    }
+
+    public UserResponse getUserById(String userId) {
+        log.info("Calling Lancelot getUserById userId={}", userId);
+
+        return lancelotWebClient.get()
+                .uri("/users/{userId}", userId)
+                .retrieve()
+                .bodyToMono(UserResponse.class)
+                .block();
+    }
+}
+```
+
+---
+
+## 4. Add `UserResponse`
+
+Adjust fields to match your real Lancelot API.
+
+```java
+@Data
+public class UserResponse {
+    private String userId;
+    private String username;
+    private String email;
+    private List<String> roles;
+}
+```
+
+---
+
+## 5. Add Arthur session model
+
+```java
+@Data
+public class UserSession {
+    private String sessionId;
+    private String appId;
+    private String userId;
+    private String username;
+    private String email;
+    private List<String> roles;
+    private String accessToken;
+    private String refreshToken;
+    private Instant createdAt;
+}
+```
+
+---
+
+## 6. Add Redis session service
+
+```java
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class RedisSessionService {
+
+    private static final String PREFIX = "session:";
+
+    private final RedisTemplate<String, Object> redisTemplate;
+
+    public void save(UserSession session) {
+        String key = PREFIX + session.getSessionId();
+        redisTemplate.opsForValue().set(key, session, Duration.ofHours(1));
+        log.info("Saved session key={}", key);
+    }
+
+    public UserSession findBySessionId(String sessionId) {
+        Object value = redisTemplate.opsForValue().get(PREFIX + sessionId);
+        if (value == null) {
+            return null;
+        }
+        return (value instanceof UserSession us)
+                ? us
+                : new ObjectMapper().convertValue(value, UserSession.class);
+    }
+
+    public void delete(String sessionId) {
+        redisTemplate.delete(PREFIX + sessionId);
+    }
+}
+```
+
+---
+
+## 7. Maven dependency for JWT parsing
+
+If not already present:
+
+```xml
+<dependency>
+    <groupId>com.nimbusds</groupId>
+    <artifactId>nimbus-jose-jwt</artifactId>
+</dependency>
+```
+
+---
+
+## 8. Important decision: which claim maps to Lancelot?
+
+Right now I used:
+
+```java
+String userId = claims.getSub();
+```
+
+That is correct **only if** Lancelot stores the same Keycloak subject.
+
+If Lancelot expects username instead, change to:
+
+```java
+String userId = claims.getPreferredUsername();
+```
+
+If it expects email:
+
+```java
+String userId = claims.getEmail();
+```
+
+---
+
+## 9. Best immediate debug logs
+
+Add these and run once:
+
+```java
+log.info("id_token present={}", idToken != null);
+log.info("access_token present={}", accessToken != null);
+log.info("JWT subject={}", claims.getSub());
+log.info("JWT preferred_username={}", claims.getPreferredUsername());
+log.info("JWT email={}", claims.getEmail());
+```
+
+That will tell you exactly what identifier is available.
+
+---
+
+## 10. What happens next
+
+After this change, your callback flow becomes:
+
+* Keycloak login
+* token exchange
+* parse `id_token`
+* call `Lancelot.getUserById(...)`
+* store Arthur session in Redis
+
+If you paste your current `UserResponse` shape or `getUserById` endpoint, I’ll align the code exactly to your Lancelot API.
