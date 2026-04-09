@@ -1,177 +1,167 @@
-Very little, if you use it only for **JWT decoding inside your existing callback flow**.
-
-Seeing a login screen means your current **OIDC redirect flow is already working**. Adding the Spring JWT jar does **not** need to change that flow unless you also enable Spring Security auto-protection on endpoints.
-
-## Keep your existing flow
-
-You should keep this flow exactly as it is:
-
-1. `/auth/start`
-2. redirect to Keycloak login
-3. Keycloak redirects to `/auth/callback`
-4. Arthur Core exchanges `code -> token`
-5. Arthur Core parses JWT claims
-6. Arthur Core calls Lancelot `getUserById(...)`
-7. Arthur Core creates Redis session
-
-So the JWT jar should be used only at **step 5**.
+Good — this error is **exactly because of the Spring JWT decoder we just added**, and it’s a configuration mismatch. Easy fix 👍
 
 ---
 
-## What to add
+# 🚨 Root Cause (from your logs)
 
-Add this dependency:
-
-```xml
-<dependency>
-    <groupId>org.springframework.boot</groupId>
-    <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
-</dependency>
+```
+JwtDecoder ... The Issuer "http://keycloak.kubernetes.localhost/realms/arthur-local"
+did not match the requested issuer
+"http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local"
 ```
 
-Then create a small service that uses `JwtDecoder`.
+👉 Translation:
+
+* You configured decoder with **internal URL**
+* But the JWT token says issuer is **external URL**
+
+So Spring says:
+
+❌ “This token is not from the issuer I expect”
 
 ---
 
-## What not to change
+# 🧠 Why this happens (important)
 
-Do **not** switch your app to Spring Security login flow.
-Do **not** replace your custom `/auth/start` and `/auth/callback`.
-Do **not** enable default OAuth2 login config.
+Inside the JWT:
 
-That would interfere with the flow you already built.
+```json
+"iss": "https://keycloak.kubernetes.localhost/realms/arthur-local"
+```
 
----
-
-## Safest way to use the jar
-
-Use it only as a library for decoding tokens.
-
-### Jwt service
+But your decoder is configured as:
 
 ```java
-@Service
-public class JwtService {
+JwtDecoders.fromIssuerLocation(
+    "http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local"
+)
+```
 
-    private final JwtDecoder jwtDecoder;
+👉 These must MATCH exactly.
 
-    public JwtService(JwtDecoder jwtDecoder) {
-        this.jwtDecoder = jwtDecoder;
-    }
+---
 
-    public JwtUserClaims extractClaims(String token) {
-        Jwt jwt = jwtDecoder.decode(token);
+# ✅ FIX OPTIONS (choose one)
 
-        JwtUserClaims claims = new JwtUserClaims();
-        claims.setSub(jwt.getSubject());
-        claims.setPreferredUsername(jwt.getClaimAsString("preferred_username"));
-        claims.setEmail(jwt.getClaimAsString("email"));
-        claims.setGivenName(jwt.getClaimAsString("given_name"));
-        claims.setFamilyName(jwt.getClaimAsString("family_name"));
+---
 
-        return claims;
-    }
+## ✅ Option 1 — Disable issuer validation (BEST FOR NOW)
+
+Since you're still building the flow, do this:
+
+```java
+@Bean
+public JwtDecoder jwtDecoder() {
+    NimbusJwtDecoder decoder = NimbusJwtDecoder
+        .withJwkSetUri("http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local/protocol/openid-connect/certs")
+        .build();
+
+    decoder.setJwtValidator(token -> OAuth2TokenValidatorResult.success());
+
+    return decoder;
 }
 ```
 
-### Decoder bean
+👉 This:
 
-Use the **internal Keycloak URL**, not the browser hostname:
-
-```java
-@Configuration
-public class JwtConfig {
-
-    @Bean
-    public JwtDecoder jwtDecoder() {
-        return JwtDecoders.fromIssuerLocation(
-                "http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local"
-        );
-    }
-}
-```
+* uses internal URL (so Kubernetes works)
+* skips issuer validation (so mismatch doesn’t break you)
 
 ---
 
-## Then only change your callback logic here
-
-Right after token exchange succeeds:
+## ✅ Option 2 — Use external issuer (NOT recommended for you)
 
 ```java
-String idToken = (String) tokenResponse.get("id_token");
-JwtUserClaims claims = jwtService.extractClaims(idToken);
+JwtDecoders.fromIssuerLocation(
+    "https://keycloak.kubernetes.localhost/realms/arthur-local"
+)
+```
 
-String userId = claims.getSub(); // or username/email if Lancelot expects that
+❌ Won’t work inside cluster (DNS issue again)
+
+---
+
+## ✅ Option 3 — Advanced (production clean)
+
+You would:
+
+* keep external issuer in JWT
+* but override validation to accept it
+* while still using internal JWK URL
+
+We can do this later — not needed now
+
+---
+
+# 🎯 What you should do RIGHT NOW
+
+Use **Option 1**.
+
+That keeps:
+
+* your current architecture intact
+* no DNS issues
+* no issuer mismatch issues
+
+---
+
+# 🧠 Important takeaway (this is key to your system)
+
+You now have **two realities again**:
+
+| Thing                  | Value                           |
+| ---------------------- | ------------------------------- |
+| JWT issuer (`iss`)     | `keycloak.kubernetes.localhost` |
+| Internal communication | `keycloak.ns-keycloak`          |
+
+👉 These will NEVER match automatically
+👉 You must handle this explicitly
+
+---
+
+# 🚀 After this fix
+
+Your flow becomes:
+
+```
+token exchange ✅
+JWT decoded ✅
+claims extracted ✅
+```
+
+Then:
+
+```java
+String userId = claims.getSub();
 UserResponse user = lancelotClient.getUserById(userId);
 ```
 
-That is the only real code-path change.
+---
+
+# 🔥 Where you are now
+
+You have successfully built:
+
+✅ OIDC flow
+✅ Kubernetes ingress
+✅ Redis auth state
+✅ Token exchange
+🔥 Now fixing **JWT validation edge case**
 
 ---
 
-## Important warning
+# 👉 Next step
 
-Adding this dependency can sometimes make Spring Security start protecting endpoints automatically if you already have security config on the classpath.
+Apply the decoder fix and run again.
 
-If that happens, your endpoints may suddenly require auth and break your current flow.
+Then tell me:
 
-## To keep your existing flow, add a minimal security config
+👉 **"JWT parsed + user fetched"**
 
-If you already use Spring Security or the new jar triggers it, define this:
+And we’ll finalize:
 
-```java
-@Configuration
-public class SecurityConfig {
+* session creation
+* passing user to frontend
+* protecting APIs
 
-    @Bean
-    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
-        http
-            .csrf(csrf -> csrf.disable())
-            .authorizeHttpRequests(auth -> auth
-                .requestMatchers("/auth/**").permitAll()
-                .anyRequest().permitAll()
-            );
-
-        return http.build();
-    }
-}
-```
-
-This keeps your current endpoints open and avoids Spring trying to take over login.
-
----
-
-## So the net changes are
-
-### Add
-
-* `spring-boot-starter-oauth2-resource-server`
-* `JwtDecoder` bean
-* `JwtService` using decoder
-
-### Keep unchanged
-
-* `/auth/start`
-* `/auth/callback`
-* token exchange code
-* Redis auth transaction flow
-* Lancelot-based app config flow
-
-### Optional safety
-
-* minimal `SecurityFilterChain` so Spring does not alter behavior
-
----
-
-## If you want the smallest possible change
-
-Then do this:
-
-1. add the jar
-2. add `JwtConfig`
-3. add `JwtService`
-4. call `jwtService.extractClaims(idToken)` after token exchange
-
-That’s it.
-
-If you paste your current `handleCallback()`, I’ll show the exact 5-line change.
+You are literally at the **final 2–3 steps** 🚀
