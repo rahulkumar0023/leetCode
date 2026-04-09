@@ -1,315 +1,177 @@
-Yes. Here’s the clean change to make in **Arthur Core**.
+Very little, if you use it only for **JWT decoding inside your existing callback flow**.
 
-## Goal
+Seeing a login screen means your current **OIDC redirect flow is already working**. Adding the Spring JWT jar does **not** need to change that flow unless you also enable Spring Security auto-protection on endpoints.
 
-After Keycloak token exchange:
+## Keep your existing flow
 
-1. parse the token
-2. extract the user identifier
-3. call `Lancelot.getUserById(...)`
-4. build the Arthur session from Lancelot data
+You should keep this flow exactly as it is:
+
+1. `/auth/start`
+2. redirect to Keycloak login
+3. Keycloak redirects to `/auth/callback`
+4. Arthur Core exchanges `code -> token`
+5. Arthur Core parses JWT claims
+6. Arthur Core calls Lancelot `getUserById(...)`
+7. Arthur Core creates Redis session
+
+So the JWT jar should be used only at **step 5**.
 
 ---
 
-## 1. Update `handleCallback()`
+## What to add
 
-Use the token response, extract `id_token`, parse claims, then call Lancelot.
+Add this dependency:
 
-```java
-@Service
-@RequiredArgsConstructor
-@Slf4j
-public class AuthService {
-
-    private final WebClient webClient;
-    private final RedisAuthTransactionService redisAuthTransactionService;
-    private final LancelotClient lancelotClient;
-    private final OidcDiscoveryClient oidcDiscoveryClient;
-    private final JwtService jwtService;
-    private final RedisSessionService redisSessionService;
-
-    public void handleCallback(String code, String state) {
-        AuthTransaction tx = redisAuthTransactionService.findByState(state);
-        if (tx == null) {
-            throw new IllegalStateException("Invalid or expired state");
-        }
-
-        AppConfigResponse appConfig = lancelotClient.getApp(tx.getAppId());
-
-        OidcMetadata metadata = oidcDiscoveryClient.loadMetadata(appConfig.getIssuerUri());
-
-        String tokenUrl = toInternalUrl(metadata.getTokenEndpoint());
-
-        Map<String, Object> tokenResponse = webClient.post()
-                .uri(tokenUrl)
-                .contentType(MediaType.APPLICATION_FORM_URLENCODED)
-                .body(BodyInserters.fromFormData("grant_type", "authorization_code")
-                        .with("client_id", appConfig.getClientId())
-                        .with("client_secret", appConfig.getClientSecret())
-                        .with("code", code)
-                        .with("redirect_uri", tx.getRedirectUri())
-                        .with("code_verifier", tx.getCodeVerifier()))
-                .retrieve()
-                .onStatus(HttpStatusCode::isError, clientResponse ->
-                        clientResponse.bodyToMono(String.class).flatMap(body -> {
-                            log.error("Token endpoint error body: {}", body);
-                            return Mono.error(new IllegalStateException("Token exchange failed: " + body));
-                        }))
-                .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
-                .block();
-
-        log.info("Token exchange succeeded");
-
-        String accessToken = (String) tokenResponse.get("access_token");
-        String idToken = (String) tokenResponse.get("id_token");
-        String refreshToken = (String) tokenResponse.get("refresh_token");
-
-        JwtUserClaims claims = jwtService.extractClaims(idToken);
-
-        log.info("Authenticated subject={}, username={}, email={}",
-                claims.getSub(), claims.getPreferredUsername(), claims.getEmail());
-
-        String userId = claims.getSub(); // change if Lancelot expects username/email instead
-
-        UserResponse user = lancelotClient.getUserById(userId);
-
-        log.info("Loaded user from Lancelot userId={}, username={}",
-                user.getUserId(), user.getUsername());
-
-        UserSession session = new UserSession();
-        session.setSessionId(UUID.randomUUID().toString());
-        session.setAppId(tx.getAppId());
-        session.setUserId(user.getUserId());
-        session.setUsername(user.getUsername());
-        session.setEmail(user.getEmail());
-        session.setRoles(user.getRoles());
-        session.setAccessToken(accessToken);
-        session.setRefreshToken(refreshToken);
-        session.setCreatedAt(Instant.now());
-
-        redisSessionService.save(session);
-
-        redisAuthTransactionService.delete(state);
-
-        log.info("Session created for userId={}, appId={}", user.getUserId(), tx.getAppId());
-    }
-
-    private String toInternalUrl(String url) {
-        return url.replace("keycloak.kubernetes.localhost", "keycloak.ns-keycloak.svc.cluster.local");
-    }
-}
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+</dependency>
 ```
 
+Then create a small service that uses `JwtDecoder`.
+
 ---
 
-## 2. Add a JWT parser service
+## What not to change
 
-For now, decode claims from `id_token`. This does **not** validate signature yet; it just parses. That is enough to move the flow forward.
+Do **not** switch your app to Spring Security login flow.
+Do **not** replace your custom `/auth/start` and `/auth/callback`.
+Do **not** enable default OAuth2 login config.
+
+That would interfere with the flow you already built.
+
+---
+
+## Safest way to use the jar
+
+Use it only as a library for decoding tokens.
+
+### Jwt service
 
 ```java
 @Service
 public class JwtService {
 
-    public JwtUserClaims extractClaims(String jwtToken) {
-        try {
-            SignedJWT signedJWT = SignedJWT.parse(jwtToken);
-            JWTClaimsSet claimsSet = signedJWT.getJWTClaimsSet();
+    private final JwtDecoder jwtDecoder;
 
-            JwtUserClaims claims = new JwtUserClaims();
-            claims.setSub(claimsSet.getSubject());
-            claims.setPreferredUsername((String) claimsSet.getClaim("preferred_username"));
-            claims.setEmail((String) claimsSet.getClaim("email"));
-            claims.setGivenName((String) claimsSet.getClaim("given_name"));
-            claims.setFamilyName((String) claimsSet.getClaim("family_name"));
-            return claims;
-        } catch (Exception e) {
-            throw new IllegalStateException("Failed to parse JWT token", e);
-        }
+    public JwtService(JwtDecoder jwtDecoder) {
+        this.jwtDecoder = jwtDecoder;
+    }
+
+    public JwtUserClaims extractClaims(String token) {
+        Jwt jwt = jwtDecoder.decode(token);
+
+        JwtUserClaims claims = new JwtUserClaims();
+        claims.setSub(jwt.getSubject());
+        claims.setPreferredUsername(jwt.getClaimAsString("preferred_username"));
+        claims.setEmail(jwt.getClaimAsString("email"));
+        claims.setGivenName(jwt.getClaimAsString("given_name"));
+        claims.setFamilyName(jwt.getClaimAsString("family_name"));
+
+        return claims;
     }
 }
 ```
 
-### DTO for token claims
+### Decoder bean
+
+Use the **internal Keycloak URL**, not the browser hostname:
 
 ```java
-@Data
-public class JwtUserClaims {
-    private String sub;
-    private String preferredUsername;
-    private String email;
-    private String givenName;
-    private String familyName;
-}
-```
+@Configuration
+public class JwtConfig {
 
----
-
-## 3. Add `LancelotClient.getUserById(...)`
-
-If you already have this, just adapt the response type.
-
-```java
-@Component
-@RequiredArgsConstructor
-@Slf4j
-public class LancelotClient {
-
-    private final WebClient lancelotWebClient;
-
-    public AppConfigResponse getApp(String appId) {
-        return lancelotWebClient.get()
-                .uri("/apps/{appId}", appId)
-                .retrieve()
-                .bodyToMono(AppConfigResponse.class)
-                .block();
-    }
-
-    public UserResponse getUserById(String userId) {
-        log.info("Calling Lancelot getUserById userId={}", userId);
-
-        return lancelotWebClient.get()
-                .uri("/users/{userId}", userId)
-                .retrieve()
-                .bodyToMono(UserResponse.class)
-                .block();
+    @Bean
+    public JwtDecoder jwtDecoder() {
+        return JwtDecoders.fromIssuerLocation(
+                "http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local"
+        );
     }
 }
 ```
 
 ---
 
-## 4. Add `UserResponse`
+## Then only change your callback logic here
 
-Adjust fields to match your real Lancelot API.
+Right after token exchange succeeds:
 
 ```java
-@Data
-public class UserResponse {
-    private String userId;
-    private String username;
-    private String email;
-    private List<String> roles;
-}
+String idToken = (String) tokenResponse.get("id_token");
+JwtUserClaims claims = jwtService.extractClaims(idToken);
+
+String userId = claims.getSub(); // or username/email if Lancelot expects that
+UserResponse user = lancelotClient.getUserById(userId);
 ```
+
+That is the only real code-path change.
 
 ---
 
-## 5. Add Arthur session model
+## Important warning
+
+Adding this dependency can sometimes make Spring Security start protecting endpoints automatically if you already have security config on the classpath.
+
+If that happens, your endpoints may suddenly require auth and break your current flow.
+
+## To keep your existing flow, add a minimal security config
+
+If you already use Spring Security or the new jar triggers it, define this:
 
 ```java
-@Data
-public class UserSession {
-    private String sessionId;
-    private String appId;
-    private String userId;
-    private String username;
-    private String email;
-    private List<String> roles;
-    private String accessToken;
-    private String refreshToken;
-    private Instant createdAt;
-}
-```
+@Configuration
+public class SecurityConfig {
 
----
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        http
+            .csrf(csrf -> csrf.disable())
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers("/auth/**").permitAll()
+                .anyRequest().permitAll()
+            );
 
-## 6. Add Redis session service
-
-```java
-@Service
-@RequiredArgsConstructor
-@Slf4j
-public class RedisSessionService {
-
-    private static final String PREFIX = "session:";
-
-    private final RedisTemplate<String, Object> redisTemplate;
-
-    public void save(UserSession session) {
-        String key = PREFIX + session.getSessionId();
-        redisTemplate.opsForValue().set(key, session, Duration.ofHours(1));
-        log.info("Saved session key={}", key);
-    }
-
-    public UserSession findBySessionId(String sessionId) {
-        Object value = redisTemplate.opsForValue().get(PREFIX + sessionId);
-        if (value == null) {
-            return null;
-        }
-        return (value instanceof UserSession us)
-                ? us
-                : new ObjectMapper().convertValue(value, UserSession.class);
-    }
-
-    public void delete(String sessionId) {
-        redisTemplate.delete(PREFIX + sessionId);
+        return http.build();
     }
 }
 ```
 
----
-
-## 7. Maven dependency for JWT parsing
-
-If not already present:
-
-```xml
-<dependency>
-    <groupId>com.nimbusds</groupId>
-    <artifactId>nimbus-jose-jwt</artifactId>
-</dependency>
-```
+This keeps your current endpoints open and avoids Spring trying to take over login.
 
 ---
 
-## 8. Important decision: which claim maps to Lancelot?
+## So the net changes are
 
-Right now I used:
+### Add
 
-```java
-String userId = claims.getSub();
-```
+* `spring-boot-starter-oauth2-resource-server`
+* `JwtDecoder` bean
+* `JwtService` using decoder
 
-That is correct **only if** Lancelot stores the same Keycloak subject.
+### Keep unchanged
 
-If Lancelot expects username instead, change to:
+* `/auth/start`
+* `/auth/callback`
+* token exchange code
+* Redis auth transaction flow
+* Lancelot-based app config flow
 
-```java
-String userId = claims.getPreferredUsername();
-```
+### Optional safety
 
-If it expects email:
-
-```java
-String userId = claims.getEmail();
-```
+* minimal `SecurityFilterChain` so Spring does not alter behavior
 
 ---
 
-## 9. Best immediate debug logs
+## If you want the smallest possible change
 
-Add these and run once:
+Then do this:
 
-```java
-log.info("id_token present={}", idToken != null);
-log.info("access_token present={}", accessToken != null);
-log.info("JWT subject={}", claims.getSub());
-log.info("JWT preferred_username={}", claims.getPreferredUsername());
-log.info("JWT email={}", claims.getEmail());
-```
+1. add the jar
+2. add `JwtConfig`
+3. add `JwtService`
+4. call `jwtService.extractClaims(idToken)` after token exchange
 
-That will tell you exactly what identifier is available.
+That’s it.
 
----
-
-## 10. What happens next
-
-After this change, your callback flow becomes:
-
-* Keycloak login
-* token exchange
-* parse `id_token`
-* call `Lancelot.getUserById(...)`
-* store Arthur session in Redis
-
-If you paste your current `UserResponse` shape or `getUserById` endpoint, I’ll align the code exactly to your Lancelot API.
+If you paste your current `handleCallback()`, I’ll show the exact 5-line change.
