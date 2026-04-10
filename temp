@@ -1,301 +1,233 @@
-That’s the issue.
+Nice — this is the final step of the flow 🔥
 
-With only @InjectMocks, cosStorageService is a real object, not a Mockito mock/spy, so this will not work:
-
-doNothing().when(cosStorageService).moveFile(sourceKey, targetKey);
-verify(cosStorageService).moveFile(sourceKey, targetKey);
-
-Two ways to fix it
-
-Option 1 — use @Spy @InjectMocks for cosStorageService
-
-This is the easiest if you want to verify moveFile(...) directly.
-
-Change:
-
-@InjectMocks
-private CosStorageService cosStorageService;
-
-to:
-
-@Spy
-@InjectMocks
-private CosStorageService cosStorageService;
-
-Then the tests I gave will work.
-
-⸻
-
-Option 2 — keep @InjectMocks only, and verify downstream S3 calls
-
-This is usually better if you want to test behavior, not internal method calls.
-
-Since moveIfExists(...) now calls moveFile(...), and moveFile(...) eventually calls S3 operations, verify those S3 interactions instead.
-
-Updated tests for your current setup
-
-1. source does not exist
-
-@Test
-void moveIfExists_shouldReturnFalse_whenSourceDoesNotExist() {
-    String sourceKey = "failed/file.zip.pgp";
-    String targetKey = "retrying/file.zip.pgp";
-    String sourceKeyWithPrefix = "test-bucket/" + sourceKey;
-
-    when(s3Client.doesObjectExist("test-bucket", sourceKeyWithPrefix)).thenReturn(false);
-
-    boolean result = cosStorageService.moveIfExists(sourceKey, targetKey);
-
-    assertThat(result).isFalse();
-    verify(s3Client).doesObjectExist("test-bucket", sourceKeyWithPrefix);
-    verify(s3Client, never()).copyObject(anyString(), anyString(), anyString(), anyString());
-    verify(s3Client, never()).deleteObject(anyString(), anyString());
-}
-
-
-⸻
-
-2. source exists and move succeeds
-
-@Test
-void moveIfExists_shouldReturnTrue_whenSourceExists() {
-    String sourceKey = "failed/file.zip.pgp";
-    String targetKey = "retrying/file.zip.pgp";
-    String sourceKeyWithPrefix = "test-bucket/" + sourceKey;
-
-    when(s3Client.doesObjectExist("test-bucket", sourceKeyWithPrefix)).thenReturn(true);
-
-    boolean result = cosStorageService.moveIfExists(sourceKey, targetKey);
-
-    assertThat(result).isTrue();
-    verify(s3Client).doesObjectExist("test-bucket", sourceKeyWithPrefix);
-    verify(s3Client).copyObject("test-bucket", sourceKey, "test-bucket", targetKey);
-    verify(s3Client).deleteObject("test-bucket", sourceKey);
-}
-
-This assumes your moveFile(sourceKey, targetKey) still does:
-
-s3Client.copyObject(bucketName, sourceKey, bucketName, targetKey);
-s3Client.deleteObject(bucketName, sourceKey);
-
-
-⸻
-
-3. exception occurs
-
-@Test
-void moveIfExists_shouldReturnFalse_whenExceptionOccurs() {
-    String sourceKey = "failed/file.zip.pgp";
-    String targetKey = "retrying/file.zip.pgp";
-    String sourceKeyWithPrefix = "test-bucket/" + sourceKey;
-
-    when(s3Client.doesObjectExist("test-bucket", sourceKeyWithPrefix)).thenReturn(true);
-    doThrow(new RuntimeException("copy failed"))
-            .when(s3Client)
-            .copyObject("test-bucket", sourceKey, "test-bucket", targetKey);
-
-    boolean result = cosStorageService.moveIfExists(sourceKey, targetKey);
-
-    assertThat(result).isFalse();
-    verify(s3Client).doesObjectExist("test-bucket", sourceKeyWithPrefix);
-    verify(s3Client).copyObject("test-bucket", sourceKey, "test-bucket", targetKey);
-    verify(s3Client, never()).deleteObject("test-bucket", sourceKey);
-}
-
-
-⸻
-
-Important note
-
-Your new doesObjectExist(...) call is using:
-
-"test-bucket/failed/file.zip.pgp"
-
-So your stub must match that exact value:
-
-when(s3Client.doesObjectExist("test-bucket", "test-bucket/failed/file.zip.pgp"))
-
-not:
-
-when(s3Client.doesObjectExist("test-bucket", "failed/file.zip.pgp"))
-
-That mismatch is exactly what your screenshot shows.
-
-⸻
-
-My recommendation
-
-Since moveIfExists() is a public method and moveFile() is an implementation detail, I’d keep @InjectMocks and use Option 2.
-
-That gives stronger tests and avoids spying on internals.
-
-If you paste your current moveFile(...) method text, I’ll align the verify lines exactly.
-
-Yes — your tests are failing because `moveIfExists(...)` no longer calls `doesObjectExist(...)` with:
-
-```java
-"failed/file.zip.pgp"
-```
-
-It now calls it with:
-
-```java
-"test-bucket/failed/file.zip.pgp"
-```
-
-And it also delegates to `moveFile(...)` instead of directly calling `copyObject(...)` and `deleteObject(...)`.
-
-So the tests need to change to match that.
-
-## One thing to double-check first
-
-Your ternary in the screenshot looks backwards. It should be:
-
-```java
-String sourceKeyWithPrefix = sourceKey.contains(bucketName)
-        ? sourceKey
-        : bucketName + "/" + sourceKey;
-```
-
-Not the other way around.
+You now need to **send the user back to the frontend (B2Boost)** after authentication.
 
 ---
 
-## Updated tests for `moveIfExists(...)`
+# 🧠 What should happen now
 
-If you already use Mockito in this class, the simplest fix is to make the service a **spy**, so you can verify `moveFile(...)` directly.
+After `/auth/callback` completes:
 
-### Update field
+1. User is authenticated
+2. Session is created in Redis
+3. You must:
+
+   * generate a session identifier (or token)
+   * attach it to response (cookie or query param)
+   * redirect to frontend URL
+
+---
+
+# ✅ Recommended approach (clean + scalable)
 
 Use:
 
-```java
-@Spy
-@InjectMocks
-private CosStorageService cosStorageService;
-```
-
-instead of only `@InjectMocks`.
+👉 **HTTP redirect + session cookie**
 
 ---
 
-## Final test methods
+# 🔁 Final flow
 
-```java
-@Test
-void moveIfExists_shouldReturnFalse_whenSourceDoesNotExist() {
-    String sourceKey = "failed/file.zip.pgp";
-    String targetKey = "retrying/file.zip.pgp";
-    String sourceKeyWithPrefix = "test-bucket/" + sourceKey;
-
-    when(s3Client.doesObjectExist("test-bucket", sourceKeyWithPrefix)).thenReturn(false);
-
-    boolean result = cosStorageService.moveIfExists(sourceKey, targetKey);
-
-    assertThat(result).isFalse();
-    verify(s3Client).doesObjectExist("test-bucket", sourceKeyWithPrefix);
-    verify(cosStorageService, never()).moveFile(anyString(), anyString());
-}
 ```
-
-```java
-@Test
-void moveIfExists_shouldReturnTrue_whenSourceExists() {
-    String sourceKey = "failed/file.zip.pgp";
-    String targetKey = "retrying/file.zip.pgp";
-    String sourceKeyWithPrefix = "test-bucket/" + sourceKey;
-
-    when(s3Client.doesObjectExist("test-bucket", sourceKeyWithPrefix)).thenReturn(true);
-    doNothing().when(cosStorageService).moveFile(sourceKey, targetKey);
-
-    boolean result = cosStorageService.moveIfExists(sourceKey, targetKey);
-
-    assertThat(result).isTrue();
-    verify(s3Client).doesObjectExist("test-bucket", sourceKeyWithPrefix);
-    verify(cosStorageService).moveFile(sourceKey, targetKey);
-}
-```
-
-```java
-@Test
-void moveIfExists_shouldReturnFalse_whenExceptionOccurs() {
-    String sourceKey = "failed/file.zip.pgp";
-    String targetKey = "retrying/file.zip.pgp";
-    String sourceKeyWithPrefix = "test-bucket/" + sourceKey;
-
-    when(s3Client.doesObjectExist("test-bucket", sourceKeyWithPrefix)).thenReturn(true);
-    doThrow(new RuntimeException("move failed")).when(cosStorageService).moveFile(sourceKey, targetKey);
-
-    boolean result = cosStorageService.moveIfExists(sourceKey, targetKey);
-
-    assertThat(result).isFalse();
-    verify(s3Client).doesObjectExist("test-bucket", sourceKeyWithPrefix);
-    verify(cosStorageService).moveFile(sourceKey, targetKey);
-}
+Browser → /auth/start
+ → Keycloak login
+ → /auth/callback (Arthur Core)
+ → create session
+ → set cookie
+ → redirect to frontend
 ```
 
 ---
 
-## Very useful extra test
+# 🧩 Step 1 — Get redirect URL from Lancelot (BEST PRACTICE)
 
-Since you changed logic to avoid double bucket prefixing, add this too:
+Your `AppConfig` from Lancelot should include:
+
+```json
+{
+  "appId": "B2BOOST_BE",
+  "redirectUrl": "https://b2boost.kubernetes.localhost"
+}
+```
+
+If not already present, add it.
+
+---
+
+# 🧩 Step 2 — Update callback method
+
+Modify your controller (not service) to return a redirect.
+
+## Controller
 
 ```java
-@Test
-void moveIfExists_shouldNotAddBucketPrefixAgain_whenAlreadyPresent() {
-    String sourceKey = "test-bucket/failed/file.zip.pgp";
-    String targetKey = "retrying/file.zip.pgp";
+@GetMapping("/auth/callback")
+public void handleCallback(
+        @RequestParam String code,
+        @RequestParam String state,
+        HttpServletResponse response
+) throws IOException {
 
-    when(s3Client.doesObjectExist("test-bucket", sourceKey)).thenReturn(true);
-    doNothing().when(cosStorageService).moveFile(sourceKey, targetKey);
+    AuthResult result = authService.handleCallback(code, state);
 
-    boolean result = cosStorageService.moveIfExists(sourceKey, targetKey);
+    // set session cookie
+    Cookie cookie = new Cookie("SESSION_ID", result.getSessionId());
+    cookie.setHttpOnly(true);
+    cookie.setSecure(false); // true in prod (HTTPS)
+    cookie.setPath("/");
+    cookie.setMaxAge(3600);
 
-    assertThat(result).isTrue();
-    verify(s3Client).doesObjectExist("test-bucket", sourceKey);
-    verify(cosStorageService).moveFile(sourceKey, targetKey);
+    response.addCookie(cookie);
+
+    // redirect to frontend
+    response.sendRedirect(result.getRedirectUrl());
 }
 ```
 
 ---
 
-## Imports you’ll need
+# 🧩 Step 3 — Return redirect info from service
+
+Update `handleCallback()` to return:
 
 ```java
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.doNothing;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-import static org.mockito.ArgumentMatchers.anyString;
+public AuthResult handleCallback(String code, String state) {
+    ...
+    redisSessionService.save(session);
+
+    return new AuthResult(
+        session.getSessionId(),
+        appConfig.getRedirectUrl()
+    );
+}
 ```
 
 ---
 
-## Why this fixes the failure
-
-Your failing stub was:
+## DTO
 
 ```java
-when(s3Client.doesObjectExist("test-bucket", "failed/file.zip.pgp"))
+@AllArgsConstructor
+@Getter
+public class AuthResult {
+    private String sessionId;
+    private String redirectUrl;
+}
 ```
-
-But the code now calls:
-
-```java
-s3Client.doesObjectExist("test-bucket", "test-bucket/failed/file.zip.pgp")
-```
-
-So Mockito reported a strict stubbing mismatch.
 
 ---
 
-## Short version
+# 🧠 Important design decision
 
-Change:
+## Why cookie is better than query param
 
-* the stubbed source key to include `test-bucket/`
-* the verification to `moveFile(...)` instead of direct `copyObject/deleteObject`
+### ❌ Bad
 
-If you want, paste the full `moveIfExists(...)` method as text and I’ll verify that ternary line too.
+```text
+https://b2boost...?sessionId=abc123
+```
+
+* visible in URL
+* insecure
+* leaks in logs
+
+---
+
+### ✅ Good
+
+```http
+Set-Cookie: SESSION_ID=abc123
+```
+
+* HttpOnly → JS can’t read it
+* Secure → HTTPS only (prod)
+* cleaner
+
+---
+
+# 🧪 What you should see in browser
+
+After login:
+
+1. Browser hits `/auth/callback`
+
+2. Response:
+
+   * sets cookie
+   * redirects
+
+3. Browser lands on:
+
+```text
+https://b2boost.kubernetes.localhost
+```
+
+4. Cookie present:
+
+```text
+SESSION_ID=abc123
+```
+
+---
+
+# 🧩 Step 4 — Frontend behavior (later)
+
+Frontend will:
+
+* call APIs with cookie automatically
+* Arthur Core reads cookie
+* resolves session from Redis
+
+---
+
+# 🧠 Optional improvement (VERY useful)
+
+Add fallback redirect:
+
+```java
+String redirectUrl = appConfig.getRedirectUrl() != null
+        ? appConfig.getRedirectUrl()
+        : "http://localhost:3000";
+```
+
+---
+
+# 🎯 Where you are now
+
+You’ve built:
+
+✅ Keycloak login
+✅ OIDC flow
+✅ Token exchange
+✅ JWT parsing
+✅ Lancelot integration
+🔥 Now finishing **user redirection**
+
+---
+
+# 🚀 Next step
+
+Implement redirect + cookie.
+
+Then test full flow:
+
+👉 open app → login → land back on frontend
+
+---
+
+# 🔥 After this
+
+We’ll do:
+
+1. **protect APIs using session**
+2. read session from cookie
+3. attach user context to requests
+4. support multiple apps via `APP_ID`
+
+---
+
+Tell me once you see:
+
+👉 **"redirect works and cookie is set"**
+
+and we’ll lock the system end-to-end.
