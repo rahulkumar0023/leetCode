@@ -1,3 +1,136 @@
+That’s the issue.
+
+With only @InjectMocks, cosStorageService is a real object, not a Mockito mock/spy, so this will not work:
+
+doNothing().when(cosStorageService).moveFile(sourceKey, targetKey);
+verify(cosStorageService).moveFile(sourceKey, targetKey);
+
+Two ways to fix it
+
+Option 1 — use @Spy @InjectMocks for cosStorageService
+
+This is the easiest if you want to verify moveFile(...) directly.
+
+Change:
+
+@InjectMocks
+private CosStorageService cosStorageService;
+
+to:
+
+@Spy
+@InjectMocks
+private CosStorageService cosStorageService;
+
+Then the tests I gave will work.
+
+⸻
+
+Option 2 — keep @InjectMocks only, and verify downstream S3 calls
+
+This is usually better if you want to test behavior, not internal method calls.
+
+Since moveIfExists(...) now calls moveFile(...), and moveFile(...) eventually calls S3 operations, verify those S3 interactions instead.
+
+Updated tests for your current setup
+
+1. source does not exist
+
+@Test
+void moveIfExists_shouldReturnFalse_whenSourceDoesNotExist() {
+    String sourceKey = "failed/file.zip.pgp";
+    String targetKey = "retrying/file.zip.pgp";
+    String sourceKeyWithPrefix = "test-bucket/" + sourceKey;
+
+    when(s3Client.doesObjectExist("test-bucket", sourceKeyWithPrefix)).thenReturn(false);
+
+    boolean result = cosStorageService.moveIfExists(sourceKey, targetKey);
+
+    assertThat(result).isFalse();
+    verify(s3Client).doesObjectExist("test-bucket", sourceKeyWithPrefix);
+    verify(s3Client, never()).copyObject(anyString(), anyString(), anyString(), anyString());
+    verify(s3Client, never()).deleteObject(anyString(), anyString());
+}
+
+
+⸻
+
+2. source exists and move succeeds
+
+@Test
+void moveIfExists_shouldReturnTrue_whenSourceExists() {
+    String sourceKey = "failed/file.zip.pgp";
+    String targetKey = "retrying/file.zip.pgp";
+    String sourceKeyWithPrefix = "test-bucket/" + sourceKey;
+
+    when(s3Client.doesObjectExist("test-bucket", sourceKeyWithPrefix)).thenReturn(true);
+
+    boolean result = cosStorageService.moveIfExists(sourceKey, targetKey);
+
+    assertThat(result).isTrue();
+    verify(s3Client).doesObjectExist("test-bucket", sourceKeyWithPrefix);
+    verify(s3Client).copyObject("test-bucket", sourceKey, "test-bucket", targetKey);
+    verify(s3Client).deleteObject("test-bucket", sourceKey);
+}
+
+This assumes your moveFile(sourceKey, targetKey) still does:
+
+s3Client.copyObject(bucketName, sourceKey, bucketName, targetKey);
+s3Client.deleteObject(bucketName, sourceKey);
+
+
+⸻
+
+3. exception occurs
+
+@Test
+void moveIfExists_shouldReturnFalse_whenExceptionOccurs() {
+    String sourceKey = "failed/file.zip.pgp";
+    String targetKey = "retrying/file.zip.pgp";
+    String sourceKeyWithPrefix = "test-bucket/" + sourceKey;
+
+    when(s3Client.doesObjectExist("test-bucket", sourceKeyWithPrefix)).thenReturn(true);
+    doThrow(new RuntimeException("copy failed"))
+            .when(s3Client)
+            .copyObject("test-bucket", sourceKey, "test-bucket", targetKey);
+
+    boolean result = cosStorageService.moveIfExists(sourceKey, targetKey);
+
+    assertThat(result).isFalse();
+    verify(s3Client).doesObjectExist("test-bucket", sourceKeyWithPrefix);
+    verify(s3Client).copyObject("test-bucket", sourceKey, "test-bucket", targetKey);
+    verify(s3Client, never()).deleteObject("test-bucket", sourceKey);
+}
+
+
+⸻
+
+Important note
+
+Your new doesObjectExist(...) call is using:
+
+"test-bucket/failed/file.zip.pgp"
+
+So your stub must match that exact value:
+
+when(s3Client.doesObjectExist("test-bucket", "test-bucket/failed/file.zip.pgp"))
+
+not:
+
+when(s3Client.doesObjectExist("test-bucket", "failed/file.zip.pgp"))
+
+That mismatch is exactly what your screenshot shows.
+
+⸻
+
+My recommendation
+
+Since moveIfExists() is a public method and moveFile() is an implementation detail, I’d keep @InjectMocks and use Option 2.
+
+That gives stronger tests and avoids spying on internals.
+
+If you paste your current moveFile(...) method text, I’ll align the verify lines exactly.
+
 Yes — your tests are failing because `moveIfExists(...)` no longer calls `doesObjectExist(...)` with:
 
 ```java
