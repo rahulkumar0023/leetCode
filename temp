@@ -1,417 +1,168 @@
-Yes — then keep the API as **getUserById** and make the test data match that contract.
+Yes — your tests are failing because `moveIfExists(...)` no longer calls `doesObjectExist(...)` with:
 
-That is the better design.
-
-For now, Arthur Core can still temporarily map a Keycloak claim to the Lancelot `userId`, but the Lancelot API itself should stay:
-
-```text
-GET /users/{userId}
+```java
+"failed/file.zip.pgp"
 ```
 
-And since you’re using **Liquibase YAML**, I’ll give you the setup that way.
+It now calls it with:
+
+```java
+"test-bucket/failed/file.zip.pgp"
+```
+
+And it also delegates to `moveFile(...)` instead of directly calling `copyObject(...)` and `deleteObject(...)`.
+
+So the tests need to change to match that.
+
+## One thing to double-check first
+
+Your ternary in the screenshot looks backwards. It should be:
+
+```java
+String sourceKeyWithPrefix = sourceKey.contains(bucketName)
+        ? sourceKey
+        : bucketName + "/" + sourceKey;
+```
+
+Not the other way around.
 
 ---
 
-# Recommended approach
+## Updated tests for `moveIfExists(...)`
 
-## Contract
+If you already use Mockito in this class, the simplest fix is to make the service a **spy**, so you can verify `moveFile(...)` directly.
 
-Lancelot exposes:
+### Update field
 
-```text
-GET /users/{userId}
-```
-
-## Temporary mapping
-
-Arthur Core uses a claim from Keycloak and passes it as `userId`.
-
-For the test phase, the cleanest option is:
-
-* set your Lancelot test `user_id` to match the Keycloak identifier you want to use
-* then later replace with a proper identity mapping table if needed
-
-If you want the simplest implementation now, use:
+Use:
 
 ```java
-String userId = claims.getPreferredUsername();
+@Spy
+@InjectMocks
+private CosStorageService cosStorageService;
 ```
 
-and seed Lancelot with:
-
-```text
-user_id = testuser
-```
-
-That lets you keep the **API name correct** while still moving forward.
-
-Later, if you move to `sub`, you only change the mapping in Arthur Core, not the Lancelot API.
+instead of only `@InjectMocks`.
 
 ---
 
-# Lancelot implementation
-
-## Controller
+## Final test methods
 
 ```java
-package com.bnpp.pf.lancelot.controller;
+@Test
+void moveIfExists_shouldReturnFalse_whenSourceDoesNotExist() {
+    String sourceKey = "failed/file.zip.pgp";
+    String targetKey = "retrying/file.zip.pgp";
+    String sourceKeyWithPrefix = "test-bucket/" + sourceKey;
 
-import com.bnpp.pf.lancelot.dto.UserResponse;
-import com.bnpp.pf.lancelot.service.UserService;
-import lombok.RequiredArgsConstructor;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
+    when(s3Client.doesObjectExist("test-bucket", sourceKeyWithPrefix)).thenReturn(false);
 
-@RestController
-@RequestMapping("/users")
-@RequiredArgsConstructor
-public class UserController {
+    boolean result = cosStorageService.moveIfExists(sourceKey, targetKey);
 
-    private final UserService userService;
+    assertThat(result).isFalse();
+    verify(s3Client).doesObjectExist("test-bucket", sourceKeyWithPrefix);
+    verify(cosStorageService, never()).moveFile(anyString(), anyString());
+}
+```
 
-    @GetMapping("/{userId}")
-    public ResponseEntity<UserResponse> getUserById(@PathVariable String userId) {
-        return ResponseEntity.ok(userService.getUserById(userId));
-    }
+```java
+@Test
+void moveIfExists_shouldReturnTrue_whenSourceExists() {
+    String sourceKey = "failed/file.zip.pgp";
+    String targetKey = "retrying/file.zip.pgp";
+    String sourceKeyWithPrefix = "test-bucket/" + sourceKey;
+
+    when(s3Client.doesObjectExist("test-bucket", sourceKeyWithPrefix)).thenReturn(true);
+    doNothing().when(cosStorageService).moveFile(sourceKey, targetKey);
+
+    boolean result = cosStorageService.moveIfExists(sourceKey, targetKey);
+
+    assertThat(result).isTrue();
+    verify(s3Client).doesObjectExist("test-bucket", sourceKeyWithPrefix);
+    verify(cosStorageService).moveFile(sourceKey, targetKey);
+}
+```
+
+```java
+@Test
+void moveIfExists_shouldReturnFalse_whenExceptionOccurs() {
+    String sourceKey = "failed/file.zip.pgp";
+    String targetKey = "retrying/file.zip.pgp";
+    String sourceKeyWithPrefix = "test-bucket/" + sourceKey;
+
+    when(s3Client.doesObjectExist("test-bucket", sourceKeyWithPrefix)).thenReturn(true);
+    doThrow(new RuntimeException("move failed")).when(cosStorageService).moveFile(sourceKey, targetKey);
+
+    boolean result = cosStorageService.moveIfExists(sourceKey, targetKey);
+
+    assertThat(result).isFalse();
+    verify(s3Client).doesObjectExist("test-bucket", sourceKeyWithPrefix);
+    verify(cosStorageService).moveFile(sourceKey, targetKey);
 }
 ```
 
 ---
 
-## Service
+## Very useful extra test
+
+Since you changed logic to avoid double bucket prefixing, add this too:
 
 ```java
-package com.bnpp.pf.lancelot.service;
+@Test
+void moveIfExists_shouldNotAddBucketPrefixAgain_whenAlreadyPresent() {
+    String sourceKey = "test-bucket/failed/file.zip.pgp";
+    String targetKey = "retrying/file.zip.pgp";
 
-import com.bnpp.pf.lancelot.dto.*;
-import com.bnpp.pf.lancelot.entity.UserEntity;
-import com.bnpp.pf.lancelot.repository.UserRepository;
-import lombok.RequiredArgsConstructor;
-import org.springframework.stereotype.Service;
+    when(s3Client.doesObjectExist("test-bucket", sourceKey)).thenReturn(true);
+    doNothing().when(cosStorageService).moveFile(sourceKey, targetKey);
 
-import java.util.List;
+    boolean result = cosStorageService.moveIfExists(sourceKey, targetKey);
 
-@Service
-@RequiredArgsConstructor
-public class UserService {
-
-    private final UserRepository userRepository;
-
-    public UserResponse getUserById(String userId) {
-        UserEntity user = userRepository.findByUserId(userId)
-                .orElseThrow(() -> new IllegalArgumentException("User not found: " + userId));
-
-        return mapToResponse(user);
-    }
-
-    private UserResponse mapToResponse(UserEntity user) {
-        UserResponse response = new UserResponse();
-        response.setUserId(user.getUserId());
-        response.setUsername(user.getUsername());
-
-        UserInfoResponse userInfo = new UserInfoResponse();
-        userInfo.setFirstName(user.getFirstName());
-        userInfo.setLastName(user.getLastName());
-        userInfo.setPhoneNumbers(
-                user.getPhoneNumber() == null ? List.of() : List.of(user.getPhoneNumber())
-        );
-        userInfo.setEmails(
-                user.getEmail() == null ? List.of() : List.of(user.getEmail())
-        );
-        response.setUserInfo(userInfo);
-
-        response.setSalesPoints(List.of(
-                new SalesPointResponse("SP001", "Sales Point 1")
-        ));
-        response.setRelatedDealer(new RelatedPartyResponse("DLR001", "Dealer 1"));
-        response.setRelatedZoneManager(new RelatedPartyResponse("ZM001", "Zone Manager 1"));
-        response.setBusinessLines(List.of("AUTO_LOANS"));
-        response.setRoles(List.of("SELLER"));
-
-        return response;
-    }
+    assertThat(result).isTrue();
+    verify(s3Client).doesObjectExist("test-bucket", sourceKey);
+    verify(cosStorageService).moveFile(sourceKey, targetKey);
 }
 ```
 
 ---
 
-## Repository
+## Imports you’ll need
 
 ```java
-package com.bnpp.pf.lancelot.repository;
-
-import com.bnpp.pf.lancelot.entity.UserEntity;
-import org.springframework.data.jpa.repository.JpaRepository;
-
-import java.util.Optional;
-
-public interface UserRepository extends JpaRepository<UserEntity, Long> {
-    Optional<UserEntity> findByUserId(String userId);
-}
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.anyString;
 ```
 
 ---
 
-## Entity
+## Why this fixes the failure
+
+Your failing stub was:
 
 ```java
-package com.bnpp.pf.lancelot.entity;
-
-import jakarta.persistence.*;
-import lombok.Getter;
-import lombok.Setter;
-
-@Entity
-@Table(name = "users")
-@Getter
-@Setter
-public class UserEntity {
-
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
-
-    @Column(name = "user_id", nullable = false, unique = true)
-    private String userId;
-
-    @Column(name = "username", nullable = false, unique = true)
-    private String username;
-
-    @Column(name = "first_name")
-    private String firstName;
-
-    @Column(name = "last_name")
-    private String lastName;
-
-    @Column(name = "email")
-    private String email;
-
-    @Column(name = "phone_number")
-    private String phoneNumber;
-}
+when(s3Client.doesObjectExist("test-bucket", "failed/file.zip.pgp"))
 ```
+
+But the code now calls:
+
+```java
+s3Client.doesObjectExist("test-bucket", "test-bucket/failed/file.zip.pgp")
+```
+
+So Mockito reported a strict stubbing mismatch.
 
 ---
 
-# DTOs
+## Short version
 
-## UserResponse
+Change:
 
-```java
-package com.bnpp.pf.lancelot.dto;
+* the stubbed source key to include `test-bucket/`
+* the verification to `moveFile(...)` instead of direct `copyObject/deleteObject`
 
-import lombok.Data;
-import java.util.List;
-
-@Data
-public class UserResponse {
-    private String userId;
-    private String username;
-    private UserInfoResponse userInfo;
-    private List<SalesPointResponse> salesPoints;
-    private RelatedPartyResponse relatedDealer;
-    private RelatedPartyResponse relatedZoneManager;
-    private List<String> businessLines;
-    private List<String> roles;
-}
-```
-
-## UserInfoResponse
-
-```java
-package com.bnpp.pf.lancelot.dto;
-
-import lombok.Data;
-import java.util.List;
-
-@Data
-public class UserInfoResponse {
-    private String firstName;
-    private String lastName;
-    private List<String> phoneNumbers;
-    private List<String> emails;
-}
-```
-
-## SalesPointResponse
-
-```java
-package com.bnpp.pf.lancelot.dto;
-
-import lombok.AllArgsConstructor;
-import lombok.Data;
-import lombok.NoArgsConstructor;
-
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-public class SalesPointResponse {
-    private String id;
-    private String name;
-}
-```
-
-## RelatedPartyResponse
-
-```java
-package com.bnpp.pf.lancelot.dto;
-
-import lombok.AllArgsConstructor;
-import lombok.Data;
-import lombok.NoArgsConstructor;
-
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-public class RelatedPartyResponse {
-    private String id;
-    private String name;
-}
-```
-
----
-
-# Liquibase YAML
-
-You said you use Liquibase YAML for inserting data, so here’s a clean first version.
-
-## Example changelog
-
-```yaml
-databaseChangeLog:
-  - changeSet:
-      id: 001-create-users-table
-      author: openai
-      changes:
-        - createTable:
-            tableName: users
-            columns:
-              - column:
-                  name: id
-                  type: BIGINT
-                  autoIncrement: true
-                  constraints:
-                    primaryKey: true
-                    nullable: false
-              - column:
-                  name: user_id
-                  type: VARCHAR(100)
-                  constraints:
-                    nullable: false
-                    unique: true
-              - column:
-                  name: username
-                  type: VARCHAR(100)
-                  constraints:
-                    nullable: false
-                    unique: true
-              - column:
-                  name: first_name
-                  type: VARCHAR(100)
-              - column:
-                  name: last_name
-                  type: VARCHAR(100)
-              - column:
-                  name: email
-                  type: VARCHAR(200)
-              - column:
-                  name: phone_number
-                  type: VARCHAR(50)
-
-  - changeSet:
-      id: 002-insert-test-user
-      author: openai
-      changes:
-        - insert:
-            tableName: users
-            columns:
-              - column:
-                  name: user_id
-                  value: testuser
-              - column:
-                  name: username
-                  value: testuser
-              - column:
-                  name: first_name
-                  value: Test
-              - column:
-                  name: last_name
-                  value: User
-              - column:
-                  name: email
-                  value: testuser@test.local
-              - column:
-                  name: phone_number
-                  value: "+33123456789"
-```
-
----
-
-# Arthur Core change
-
-Since the Lancelot API is now truly `getUserById`, update Arthur Core to pass the chosen identifier as `userId`.
-
-For now:
-
-```java
-String userId = claims.getPreferredUsername();
-UserResponse user = lancelotClient.getUserById(userId);
-```
-
-That keeps the API contract right, while the current value happens to be `testuser`.
-
-Later you can switch to:
-
-```java
-String userId = claims.getSub();
-```
-
-once Lancelot stores Keycloak subject IDs.
-
----
-
-# Lancelot client in Arthur Core
-
-```java
-public UserResponse getUserById(String userId) {
-    log.info("Calling Lancelot getUserById userId={}", userId);
-
-    return lancelotWebClient.get()
-            .uri("/users/{userId}", userId)
-            .retrieve()
-            .bodyToMono(UserResponse.class)
-            .block();
-}
-```
-
----
-
-# Why this is the best setup
-
-This gives you:
-
-* correct API semantics now
-* test data loaded through Liquibase
-* no fake `by-username` endpoint
-* easy migration later from `preferred_username` to `sub`
-
-So your temporary compromise is only in **Arthur Core claim mapping**, not in the **Lancelot API design**.
-
----
-
-# My recommendation
-
-Do this now:
-
-1. keep `GET /users/{userId}`
-2. seed test user with `user_id: testuser`
-3. in Arthur Core use `claims.getPreferredUsername()`
-4. once flow is stable, decide whether to migrate to `sub`
-
-If you want, I can write the **next Liquibase YAML** for the future-friendly child tables too, like:
-
-* `user_emails`
-* `user_phone_numbers`
-* `sales_points`
-* `business_lines`
-* dealer / zone manager relations
+If you want, paste the full `moveIfExists(...)` method as text and I’ll verify that ternary line too.
