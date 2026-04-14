@@ -1,233 +1,511 @@
-Nice — this is the final step of the flow 🔥
+Yes — let’s implement the **smallest working handoff flow** first.
 
-You now need to **send the user back to the frontend (B2Boost)** after authentication.
+## What we’ll add
 
----
+In **Arthur Core**:
 
-# 🧠 What should happen now
+1. create `LoginHandoff` in Redis
+2. after callback, redirect to:
 
-After `/auth/callback` completes:
+   ```text
+   post_login_redirect_url?code=...
+   ```
+3. add:
 
-1. User is authenticated
-2. Session is created in Redis
-3. You must:
+   ```text
+   POST /auth/handoff/exchange
+   ```
 
-   * generate a session identifier (or token)
-   * attach it to response (cookie or query param)
-   * redirect to frontend URL
+   which:
 
----
+   * validates code
+   * loads Arthur session
+   * invalidates code
+   * returns user context
 
-# ✅ Recommended approach (clean + scalable)
-
-Use:
-
-👉 **HTTP redirect + session cookie**
-
----
-
-# 🔁 Final flow
-
-```
-Browser → /auth/start
- → Keycloak login
- → /auth/callback (Arthur Core)
- → create session
- → set cookie
- → redirect to frontend
-```
+That gives you the multi-domain-safe pattern.
 
 ---
 
-# 🧩 Step 1 — Get redirect URL from Lancelot (BEST PRACTICE)
-
-Your `AppConfig` from Lancelot should include:
-
-```json
-{
-  "appId": "B2BOOST_BE",
-  "redirectUrl": "https://b2boost.kubernetes.localhost"
-}
-```
-
-If not already present, add it.
-
----
-
-# 🧩 Step 2 — Update callback method
-
-Modify your controller (not service) to return a redirect.
-
-## Controller
+# 1. Redis model for handoff
 
 ```java
-@GetMapping("/auth/callback")
-public void handleCallback(
-        @RequestParam String code,
-        @RequestParam String state,
-        HttpServletResponse response
-) throws IOException {
+package com.bnpp.pf.arthur.core.model;
 
-    AuthResult result = authService.handleCallback(code, state);
+import lombok.Data;
 
-    // set session cookie
-    Cookie cookie = new Cookie("SESSION_ID", result.getSessionId());
-    cookie.setHttpOnly(true);
-    cookie.setSecure(false); // true in prod (HTTPS)
-    cookie.setPath("/");
-    cookie.setMaxAge(3600);
+import java.time.Instant;
 
-    response.addCookie(cookie);
-
-    // redirect to frontend
-    response.sendRedirect(result.getRedirectUrl());
+@Data
+public class LoginHandoff {
+    private String code;
+    private String sessionId;
+    private String appId;
+    private String redirectUrl;
+    private Instant createdAt;
+    private Instant expiresAt;
+    private boolean used;
 }
 ```
 
 ---
 
-# 🧩 Step 3 — Return redirect info from service
+# 2. Handoff exchange request / response
 
-Update `handleCallback()` to return:
+## Request
+
+```java
+package com.bnpp.pf.arthur.core.dto;
+
+import lombok.Data;
+
+@Data
+public class HandoffExchangeRequest {
+    private String code;
+}
+```
+
+## Response
+
+Start simple:
+
+```java
+package com.bnpp.pf.arthur.core.dto;
+
+import lombok.Data;
+
+import java.util.List;
+
+@Data
+public class HandoffExchangeResponse {
+    private String userId;
+    private String username;
+    private String email;
+    private List<String> roles;
+    private String appId;
+}
+```
+
+You can extend this later with `userInfo`, `salesPoints`, `relatedDealer`, and so on.
+
+---
+
+# 3. Redis service for handoff
+
+```java
+package com.bnpp.pf.arthur.core.service;
+
+import com.bnpp.pf.arthur.core.model.LoginHandoff;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.stereotype.Service;
+
+import java.time.Duration;
+
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class RedisLoginHandoffService {
+
+    private static final String PREFIX = "handoff:";
+    private final RedisTemplate<String, Object> redisTemplate;
+    private final ObjectMapper objectMapper;
+
+    public void save(LoginHandoff handoff) {
+        redisTemplate.opsForValue().set(
+                PREFIX + handoff.getCode(),
+                handoff,
+                Duration.ofMinutes(1)
+        );
+        log.info("Saved login handoff code={}", handoff.getCode());
+    }
+
+    public LoginHandoff findByCode(String code) {
+        Object value = redisTemplate.opsForValue().get(PREFIX + code);
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof LoginHandoff handoff) {
+            return handoff;
+        }
+        return objectMapper.convertValue(value, LoginHandoff.class);
+    }
+
+    public void delete(String code) {
+        redisTemplate.delete(PREFIX + code);
+    }
+}
+```
+
+---
+
+# 4. Update `UserSession`
+
+Your session should already exist, but make sure it has the fields you need for exchange:
+
+```java
+package com.bnpp.pf.arthur.core.model;
+
+import lombok.Data;
+
+import java.time.Instant;
+import java.util.List;
+
+@Data
+public class UserSession {
+    private String sessionId;
+    private String appId;
+    private String userId;
+    private String username;
+    private String email;
+    private List<String> roles;
+    private Instant createdAt;
+}
+```
+
+---
+
+# 5. Redis session service
+
+If you already have one, keep it. Otherwise:
+
+```java
+package com.bnpp.pf.arthur.core.service;
+
+import com.bnpp.pf.arthur.core.model.UserSession;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.stereotype.Service;
+
+import java.time.Duration;
+
+@Service
+@RequiredArgsConstructor
+public class RedisSessionService {
+
+    private static final String PREFIX = "session:";
+    private final RedisTemplate<String, Object> redisTemplate;
+    private final ObjectMapper objectMapper;
+
+    public void save(UserSession session) {
+        redisTemplate.opsForValue().set(
+                PREFIX + session.getSessionId(),
+                session,
+                Duration.ofHours(1)
+        );
+    }
+
+    public UserSession findBySessionId(String sessionId) {
+        Object value = redisTemplate.opsForValue().get(PREFIX + sessionId);
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof UserSession session) {
+            return session;
+        }
+        return objectMapper.convertValue(value, UserSession.class);
+    }
+}
+```
+
+---
+
+# 6. Auth result after callback
+
+Instead of returning only session/cookie info, return redirect URL + handoff code.
+
+```java
+package com.bnpp.pf.arthur.core.dto;
+
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+
+@Getter
+@AllArgsConstructor
+public class AuthResult {
+    private String sessionId;
+    private String redirectUrl;
+    private String handoffCode;
+}
+```
+
+---
+
+# 7. Update `handleCallback()` in `AuthService`
+
+After you create the Arthur session, create a handoff.
 
 ```java
 public AuthResult handleCallback(String code, String state) {
-    ...
+    AuthTransaction tx = redisAuthTransactionService.findByState(state);
+    if (tx == null) {
+        throw new IllegalStateException("Invalid or expired state");
+    }
+
+    AppConfigResponse appConfig = lancelotClient.getApp(tx.getAppId());
+
+    // token exchange already working
+    Map<String, Object> tokenResponse = exchangeToken(code, tx, appConfig);
+
+    String idToken = (String) tokenResponse.get("id_token");
+    JwtUserClaims claims = jwtService.extractClaims(idToken);
+
+    String userId = claims.getPreferredUsername(); // current mapping
+    UserResponse user = lancelotClient.getUserById(userId);
+
+    UserSession session = new UserSession();
+    session.setSessionId(UUID.randomUUID().toString());
+    session.setAppId(tx.getAppId());
+    session.setUserId(user.getUserId());
+    session.setUsername(user.getUsername());
+    session.setEmail(user.getUserInfo() != null && user.getUserInfo().getEmails() != null
+            && !user.getUserInfo().getEmails().isEmpty()
+            ? user.getUserInfo().getEmails().get(0)
+            : null);
+    session.setRoles(user.getRoles());
+    session.setCreatedAt(Instant.now());
+
     redisSessionService.save(session);
 
+    String handoffCode = UUID.randomUUID().toString();
+
+    LoginHandoff handoff = new LoginHandoff();
+    handoff.setCode(handoffCode);
+    handoff.setSessionId(session.getSessionId());
+    handoff.setAppId(tx.getAppId());
+    handoff.setRedirectUrl(appConfig.getPostLoginRedirectUrl());
+    handoff.setCreatedAt(Instant.now());
+    handoff.setExpiresAt(Instant.now().plusSeconds(60));
+    handoff.setUsed(false);
+
+    redisLoginHandoffService.save(handoff);
+
+    redisAuthTransactionService.delete(state);
+
     return new AuthResult(
-        session.getSessionId(),
-        appConfig.getRedirectUrl()
+            session.getSessionId(),
+            appConfig.getPostLoginRedirectUrl(),
+            handoffCode
     );
 }
 ```
 
 ---
 
-## DTO
+# 8. Update callback controller to redirect with handoff code
+
+Do not forward. Redirect.
 
 ```java
-@AllArgsConstructor
-@Getter
-public class AuthResult {
-    private String sessionId;
-    private String redirectUrl;
+package com.bnpp.pf.arthur.core.controller;
+
+import com.bnpp.pf.arthur.core.dto.AuthResult;
+import com.bnpp.pf.arthur.core.service.AuthService;
+import jakarta.servlet.http.HttpServletResponse;
+import lombok.RequiredArgsConstructor;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.io.IOException;
+
+@RestController
+@RequiredArgsConstructor
+public class AuthController {
+
+    private final AuthService authService;
+
+    @GetMapping("/auth/callback")
+    public void callback(
+            @RequestParam String code,
+            @RequestParam String state,
+            HttpServletResponse response
+    ) throws IOException {
+
+        AuthResult result = authService.handleCallback(code, state);
+
+        String separator = result.getRedirectUrl().contains("?") ? "&" : "?";
+        String finalRedirect = result.getRedirectUrl() + separator + "code=" + result.getHandoffCode();
+
+        response.sendRedirect(finalRedirect);
+    }
 }
 ```
 
 ---
 
-# 🧠 Important design decision
-
-## Why cookie is better than query param
-
-### ❌ Bad
-
-```text
-https://b2boost...?sessionId=abc123
-```
-
-* visible in URL
-* insecure
-* leaks in logs
-
----
-
-### ✅ Good
-
-```http
-Set-Cookie: SESSION_ID=abc123
-```
-
-* HttpOnly → JS can’t read it
-* Secure → HTTPS only (prod)
-* cleaner
-
----
-
-# 🧪 What you should see in browser
-
-After login:
-
-1. Browser hits `/auth/callback`
-
-2. Response:
-
-   * sets cookie
-   * redirects
-
-3. Browser lands on:
-
-```text
-https://b2boost.kubernetes.localhost
-```
-
-4. Cookie present:
-
-```text
-SESSION_ID=abc123
-```
-
----
-
-# 🧩 Step 4 — Frontend behavior (later)
-
-Frontend will:
-
-* call APIs with cookie automatically
-* Arthur Core reads cookie
-* resolves session from Redis
-
----
-
-# 🧠 Optional improvement (VERY useful)
-
-Add fallback redirect:
+# 9. Add exchange endpoint
 
 ```java
-String redirectUrl = appConfig.getRedirectUrl() != null
-        ? appConfig.getRedirectUrl()
-        : "http://localhost:3000";
+package com.bnpp.pf.arthur.core.controller;
+
+import com.bnpp.pf.arthur.core.dto.HandoffExchangeRequest;
+import com.bnpp.pf.arthur.core.dto.HandoffExchangeResponse;
+import com.bnpp.pf.arthur.core.service.HandoffService;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/auth/handoff")
+@RequiredArgsConstructor
+public class HandoffController {
+
+    private final HandoffService handoffService;
+
+    @PostMapping("/exchange")
+    public ResponseEntity<HandoffExchangeResponse> exchange(
+            @RequestBody HandoffExchangeRequest request
+    ) {
+        return ResponseEntity.ok(handoffService.exchange(request.getCode()));
+    }
+}
 ```
 
 ---
 
-# 🎯 Where you are now
+# 10. Handoff service
 
-You’ve built:
+```java
+package com.bnpp.pf.arthur.core.service;
 
-✅ Keycloak login
-✅ OIDC flow
-✅ Token exchange
-✅ JWT parsing
-✅ Lancelot integration
-🔥 Now finishing **user redirection**
+import com.bnpp.pf.arthur.core.dto.HandoffExchangeResponse;
+import com.bnpp.pf.arthur.core.model.LoginHandoff;
+import com.bnpp.pf.arthur.core.model.UserSession;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+
+import java.time.Instant;
+
+@Service
+@RequiredArgsConstructor
+public class HandoffService {
+
+    private final RedisLoginHandoffService redisLoginHandoffService;
+    private final RedisSessionService redisSessionService;
+
+    public HandoffExchangeResponse exchange(String code) {
+        LoginHandoff handoff = redisLoginHandoffService.findByCode(code);
+
+        if (handoff == null) {
+            throw new IllegalStateException("Invalid or expired handoff code");
+        }
+
+        if (handoff.isUsed()) {
+            throw new IllegalStateException("Handoff code already used");
+        }
+
+        if (handoff.getExpiresAt() != null && Instant.now().isAfter(handoff.getExpiresAt())) {
+            redisLoginHandoffService.delete(code);
+            throw new IllegalStateException("Handoff code expired");
+        }
+
+        UserSession session = redisSessionService.findBySessionId(handoff.getSessionId());
+        if (session == null) {
+            redisLoginHandoffService.delete(code);
+            throw new IllegalStateException("Session not found for handoff code");
+        }
+
+        handoff.setUsed(true);
+        redisLoginHandoffService.delete(code); // one-time use
+
+        HandoffExchangeResponse response = new HandoffExchangeResponse();
+        response.setUserId(session.getUserId());
+        response.setUsername(session.getUsername());
+        response.setEmail(session.getEmail());
+        response.setRoles(session.getRoles());
+        response.setAppId(session.getAppId());
+
+        return response;
+    }
+}
+```
 
 ---
 
-# 🚀 Next step
+# 11. Receiver app flow
 
-Implement redirect + cookie.
+The actual application will get redirected to:
 
-Then test full flow:
+```text
+https://actual-app/post-login?code=abc123
+```
 
-👉 open app → login → land back on frontend
+Then its backend should call:
+
+```http
+POST /auth/handoff/exchange
+{
+  "code": "abc123"
+}
+```
+
+Arthur Core returns:
+
+```json
+{
+  "userId": "testuser",
+  "username": "testuser",
+  "email": "testuser@test.local",
+  "roles": ["SELLER"],
+  "appId": "B2BOOST_BE"
+}
+```
+
+Then the actual app:
+
+* creates its own local session
+* sets its own cookie
+* builds Spring Security context
 
 ---
 
-# 🔥 After this
+# 12. Security note
 
-We’ll do:
+For the first working version, this is enough.
 
-1. **protect APIs using session**
-2. read session from cookie
-3. attach user context to requests
-4. support multiple apps via `APP_ID`
+Next hardening step:
+
+* protect `/auth/handoff/exchange` so only trusted apps can call it
+* add app secret / internal header / mTLS
+
+But first get the flow working.
 
 ---
 
-Tell me once you see:
+# 13. First test target
 
-👉 **"redirect works and cookie is set"**
+You should be able to verify these steps:
 
-and we’ll lock the system end-to-end.
+1. login completes
+2. browser lands on:
+
+   ```text
+   post_login_redirect_url?code=...
+   ```
+3. POST to `/auth/handoff/exchange` returns user context
+4. second POST with same code fails
+
+That proves one-time handoff works.
+
+---
+
+# 14. About JWT
+
+Yes, still possible later:
+
+* keep `code` in browser redirect
+* after exchange, Arthur Core can return an **Arthur-issued JWT**
+* not needed for the first working cut
+
+First get the opaque-code flow working.
+
+If you want, next I’ll give you the **exact receiver-app code** to:
+
+* read `code`
+* call Arthur Core exchange
+* create `SecurityContext`
+* set local session/cookie
