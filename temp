@@ -1,61 +1,20 @@
-Yes — let’s implement the **smallest working handoff flow** first.
+Here’s a **minimal Spring Boot version** for the **other application**.
 
-## What we’ll add
+This does 4 things:
 
-In **Arthur Core**:
-
-1. create `LoginHandoff` in Redis
-2. after callback, redirect to:
-
-   ```text
-   post_login_redirect_url?code=...
-   ```
-3. add:
-
-   ```text
-   POST /auth/handoff/exchange
-   ```
-
-   which:
-
-   * validates code
-   * loads Arthur session
-   * invalidates code
-   * returns user context
-
-That gives you the multi-domain-safe pattern.
+1. receives `?code=...` on `/post-login`
+2. calls Arthur Core `/auth/handoff/exchange`
+3. creates local Spring Security session
+4. redirects to `/home`
 
 ---
 
-# 1. Redis model for handoff
+# 1. DTOs
+
+## `HandoffExchangeRequest.java`
 
 ```java
-package com.bnpp.pf.arthur.core.model;
-
-import lombok.Data;
-
-import java.time.Instant;
-
-@Data
-public class LoginHandoff {
-    private String code;
-    private String sessionId;
-    private String appId;
-    private String redirectUrl;
-    private Instant createdAt;
-    private Instant expiresAt;
-    private boolean used;
-}
-```
-
----
-
-# 2. Handoff exchange request / response
-
-## Request
-
-```java
-package com.bnpp.pf.arthur.core.dto;
+package com.example.app.auth.dto;
 
 import lombok.Data;
 
@@ -65,12 +24,10 @@ public class HandoffExchangeRequest {
 }
 ```
 
-## Response
-
-Start simple:
+## `HandoffExchangeResponse.java`
 
 ```java
-package com.bnpp.pf.arthur.core.dto;
+package com.example.app.auth.dto;
 
 import lombok.Data;
 
@@ -86,338 +43,152 @@ public class HandoffExchangeResponse {
 }
 ```
 
-You can extend this later with `userInfo`, `salesPoints`, `relatedDealer`, and so on.
+---
+
+# 2. Arthur Core client config
+
+## `ArthurCoreClientConfig.java`
+
+```java
+package com.example.app.auth.config;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.reactive.function.client.WebClient;
+
+@Configuration
+public class ArthurCoreClientConfig {
+
+    @Bean
+    public WebClient arthurCoreWebClient(
+            @Value("${arthur-core.base-url}") String baseUrl
+    ) {
+        return WebClient.builder()
+                .baseUrl(baseUrl)
+                .build();
+    }
+}
+```
+
+## `application.yml`
+
+```yaml
+arthur-core:
+  base-url: http://arthur-core-backend.ns-arthur-core.svc.cluster.local:8080
+  internal-secret: my-shared-secret
+```
+
+Use your actual Arthur Core service URL and port.
 
 ---
 
-# 3. Redis service for handoff
+# 3. Arthur exchange client
+
+## `ArthurAuthClient.java`
 
 ```java
-package com.bnpp.pf.arthur.core.service;
+package com.example.app.auth.client;
 
-import com.bnpp.pf.arthur.core.model.LoginHandoff;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.example.app.auth.dto.HandoffExchangeRequest;
+import com.example.app.auth.dto.HandoffExchangeResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatusCode;
+import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Mono;
 
-import java.time.Duration;
-
-@Service
+@Component
 @RequiredArgsConstructor
 @Slf4j
-public class RedisLoginHandoffService {
+public class ArthurAuthClient {
 
-    private static final String PREFIX = "handoff:";
-    private final RedisTemplate<String, Object> redisTemplate;
-    private final ObjectMapper objectMapper;
+    private final WebClient arthurCoreWebClient;
 
-    public void save(LoginHandoff handoff) {
-        redisTemplate.opsForValue().set(
-                PREFIX + handoff.getCode(),
-                handoff,
-                Duration.ofMinutes(1)
-        );
-        log.info("Saved login handoff code={}", handoff.getCode());
-    }
+    @Value("${arthur-core.internal-secret}")
+    private String internalSecret;
 
-    public LoginHandoff findByCode(String code) {
-        Object value = redisTemplate.opsForValue().get(PREFIX + code);
-        if (value == null) {
-            return null;
-        }
-        if (value instanceof LoginHandoff handoff) {
-            return handoff;
-        }
-        return objectMapper.convertValue(value, LoginHandoff.class);
-    }
+    public HandoffExchangeResponse exchangeCode(String code) {
+        HandoffExchangeRequest request = new HandoffExchangeRequest();
+        request.setCode(code);
 
-    public void delete(String code) {
-        redisTemplate.delete(PREFIX + code);
+        return arthurCoreWebClient.post()
+                .uri("/auth/handoff/exchange")
+                .header("X-INTERNAL-APP-SECRET", internalSecret)
+                .bodyValue(request)
+                .retrieve()
+                .onStatus(HttpStatusCode::isError, response ->
+                        response.bodyToMono(String.class).flatMap(body -> {
+                            log.error("Arthur Core handoff exchange failed: {}", body);
+                            return Mono.error(new IllegalStateException("Handoff exchange failed: " + body));
+                        }))
+                .bodyToMono(HandoffExchangeResponse.class)
+                .block();
     }
 }
 ```
 
 ---
 
-# 4. Update `UserSession`
+# 4. Build Spring Security authentication
 
-Your session should already exist, but make sure it has the fields you need for exchange:
+## `PostLoginService.java`
 
 ```java
-package com.bnpp.pf.arthur.core.model;
+package com.example.app.auth.service;
 
-import lombok.Data;
+import com.example.app.auth.client.ArthurAuthClient;
+import com.example.app.auth.dto.HandoffExchangeResponse;
+import jakarta.servlet.http.HttpServletRequest;
+import lombok.RequiredArgsConstructor;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.context.SecurityContext;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
+import org.springframework.stereotype.Service;
 
-import java.time.Instant;
 import java.util.List;
 
-@Data
-public class UserSession {
-    private String sessionId;
-    private String appId;
-    private String userId;
-    private String username;
-    private String email;
-    private List<String> roles;
-    private Instant createdAt;
-}
-```
-
----
-
-# 5. Redis session service
-
-If you already have one, keep it. Otherwise:
-
-```java
-package com.bnpp.pf.arthur.core.service;
-
-import com.bnpp.pf.arthur.core.model.UserSession;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.RequiredArgsConstructor;
-import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.stereotype.Service;
-
-import java.time.Duration;
-
 @Service
 @RequiredArgsConstructor
-public class RedisSessionService {
+public class PostLoginService {
 
-    private static final String PREFIX = "session:";
-    private final RedisTemplate<String, Object> redisTemplate;
-    private final ObjectMapper objectMapper;
+    private final ArthurAuthClient arthurAuthClient;
 
-    public void save(UserSession session) {
-        redisTemplate.opsForValue().set(
-                PREFIX + session.getSessionId(),
-                session,
-                Duration.ofHours(1)
+    public HandoffExchangeResponse loginWithHandoffCode(String code, HttpServletRequest request) {
+        HandoffExchangeResponse response = arthurAuthClient.exchangeCode(code);
+
+        List<GrantedAuthority> authorities = response.getRoles() == null
+                ? List.of()
+                : response.getRoles().stream()
+                    .map(role -> role.startsWith("ROLE_")
+                            ? new SimpleGrantedAuthority(role)
+                            : new SimpleGrantedAuthority("ROLE_" + role))
+                    .map(GrantedAuthority.class::cast)
+                    .toList();
+
+        AppUserPrincipal principal = new AppUserPrincipal(
+                response.getUserId(),
+                response.getUsername(),
+                response.getEmail(),
+                response.getAppId()
         );
-    }
 
-    public UserSession findBySessionId(String sessionId) {
-        Object value = redisTemplate.opsForValue().get(PREFIX + sessionId);
-        if (value == null) {
-            return null;
-        }
-        if (value instanceof UserSession session) {
-            return session;
-        }
-        return objectMapper.convertValue(value, UserSession.class);
-    }
-}
-```
+        UsernamePasswordAuthenticationToken authentication =
+                new UsernamePasswordAuthenticationToken(principal, null, authorities);
 
----
+        SecurityContext context = SecurityContextHolder.createEmptyContext();
+        context.setAuthentication(authentication);
+        SecurityContextHolder.setContext(context);
 
-# 6. Auth result after callback
-
-Instead of returning only session/cookie info, return redirect URL + handoff code.
-
-```java
-package com.bnpp.pf.arthur.core.dto;
-
-import lombok.AllArgsConstructor;
-import lombok.Getter;
-
-@Getter
-@AllArgsConstructor
-public class AuthResult {
-    private String sessionId;
-    private String redirectUrl;
-    private String handoffCode;
-}
-```
-
----
-
-# 7. Update `handleCallback()` in `AuthService`
-
-After you create the Arthur session, create a handoff.
-
-```java
-public AuthResult handleCallback(String code, String state) {
-    AuthTransaction tx = redisAuthTransactionService.findByState(state);
-    if (tx == null) {
-        throw new IllegalStateException("Invalid or expired state");
-    }
-
-    AppConfigResponse appConfig = lancelotClient.getApp(tx.getAppId());
-
-    // token exchange already working
-    Map<String, Object> tokenResponse = exchangeToken(code, tx, appConfig);
-
-    String idToken = (String) tokenResponse.get("id_token");
-    JwtUserClaims claims = jwtService.extractClaims(idToken);
-
-    String userId = claims.getPreferredUsername(); // current mapping
-    UserResponse user = lancelotClient.getUserById(userId);
-
-    UserSession session = new UserSession();
-    session.setSessionId(UUID.randomUUID().toString());
-    session.setAppId(tx.getAppId());
-    session.setUserId(user.getUserId());
-    session.setUsername(user.getUsername());
-    session.setEmail(user.getUserInfo() != null && user.getUserInfo().getEmails() != null
-            && !user.getUserInfo().getEmails().isEmpty()
-            ? user.getUserInfo().getEmails().get(0)
-            : null);
-    session.setRoles(user.getRoles());
-    session.setCreatedAt(Instant.now());
-
-    redisSessionService.save(session);
-
-    String handoffCode = UUID.randomUUID().toString();
-
-    LoginHandoff handoff = new LoginHandoff();
-    handoff.setCode(handoffCode);
-    handoff.setSessionId(session.getSessionId());
-    handoff.setAppId(tx.getAppId());
-    handoff.setRedirectUrl(appConfig.getPostLoginRedirectUrl());
-    handoff.setCreatedAt(Instant.now());
-    handoff.setExpiresAt(Instant.now().plusSeconds(60));
-    handoff.setUsed(false);
-
-    redisLoginHandoffService.save(handoff);
-
-    redisAuthTransactionService.delete(state);
-
-    return new AuthResult(
-            session.getSessionId(),
-            appConfig.getPostLoginRedirectUrl(),
-            handoffCode
-    );
-}
-```
-
----
-
-# 8. Update callback controller to redirect with handoff code
-
-Do not forward. Redirect.
-
-```java
-package com.bnpp.pf.arthur.core.controller;
-
-import com.bnpp.pf.arthur.core.dto.AuthResult;
-import com.bnpp.pf.arthur.core.service.AuthService;
-import jakarta.servlet.http.HttpServletResponse;
-import lombok.RequiredArgsConstructor;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.RestController;
-
-import java.io.IOException;
-
-@RestController
-@RequiredArgsConstructor
-public class AuthController {
-
-    private final AuthService authService;
-
-    @GetMapping("/auth/callback")
-    public void callback(
-            @RequestParam String code,
-            @RequestParam String state,
-            HttpServletResponse response
-    ) throws IOException {
-
-        AuthResult result = authService.handleCallback(code, state);
-
-        String separator = result.getRedirectUrl().contains("?") ? "&" : "?";
-        String finalRedirect = result.getRedirectUrl() + separator + "code=" + result.getHandoffCode();
-
-        response.sendRedirect(finalRedirect);
-    }
-}
-```
-
----
-
-# 9. Add exchange endpoint
-
-```java
-package com.bnpp.pf.arthur.core.controller;
-
-import com.bnpp.pf.arthur.core.dto.HandoffExchangeRequest;
-import com.bnpp.pf.arthur.core.dto.HandoffExchangeResponse;
-import com.bnpp.pf.arthur.core.service.HandoffService;
-import lombok.RequiredArgsConstructor;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
-
-@RestController
-@RequestMapping("/auth/handoff")
-@RequiredArgsConstructor
-public class HandoffController {
-
-    private final HandoffService handoffService;
-
-    @PostMapping("/exchange")
-    public ResponseEntity<HandoffExchangeResponse> exchange(
-            @RequestBody HandoffExchangeRequest request
-    ) {
-        return ResponseEntity.ok(handoffService.exchange(request.getCode()));
-    }
-}
-```
-
----
-
-# 10. Handoff service
-
-```java
-package com.bnpp.pf.arthur.core.service;
-
-import com.bnpp.pf.arthur.core.dto.HandoffExchangeResponse;
-import com.bnpp.pf.arthur.core.model.LoginHandoff;
-import com.bnpp.pf.arthur.core.model.UserSession;
-import lombok.RequiredArgsConstructor;
-import org.springframework.stereotype.Service;
-
-import java.time.Instant;
-
-@Service
-@RequiredArgsConstructor
-public class HandoffService {
-
-    private final RedisLoginHandoffService redisLoginHandoffService;
-    private final RedisSessionService redisSessionService;
-
-    public HandoffExchangeResponse exchange(String code) {
-        LoginHandoff handoff = redisLoginHandoffService.findByCode(code);
-
-        if (handoff == null) {
-            throw new IllegalStateException("Invalid or expired handoff code");
-        }
-
-        if (handoff.isUsed()) {
-            throw new IllegalStateException("Handoff code already used");
-        }
-
-        if (handoff.getExpiresAt() != null && Instant.now().isAfter(handoff.getExpiresAt())) {
-            redisLoginHandoffService.delete(code);
-            throw new IllegalStateException("Handoff code expired");
-        }
-
-        UserSession session = redisSessionService.findBySessionId(handoff.getSessionId());
-        if (session == null) {
-            redisLoginHandoffService.delete(code);
-            throw new IllegalStateException("Session not found for handoff code");
-        }
-
-        handoff.setUsed(true);
-        redisLoginHandoffService.delete(code); // one-time use
-
-        HandoffExchangeResponse response = new HandoffExchangeResponse();
-        response.setUserId(session.getUserId());
-        response.setUsername(session.getUsername());
-        response.setEmail(session.getEmail());
-        response.setRoles(session.getRoles());
-        response.setAppId(session.getAppId());
+        request.getSession(true).setAttribute(
+                HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY,
+                context
+        );
 
         return response;
     }
@@ -426,86 +197,205 @@ public class HandoffService {
 
 ---
 
-# 11. Receiver app flow
+# 5. Principal object
 
-The actual application will get redirected to:
+## `AppUserPrincipal.java`
 
-```text
-https://actual-app/post-login?code=abc123
-```
+```java
+package com.example.app.auth.service;
 
-Then its backend should call:
+import lombok.AllArgsConstructor;
+import lombok.Getter;
 
-```http
-POST /auth/handoff/exchange
-{
-  "code": "abc123"
+@Getter
+@AllArgsConstructor
+public class AppUserPrincipal {
+    private String userId;
+    private String username;
+    private String email;
+    private String appId;
 }
 ```
 
-Arthur Core returns:
+---
 
-```json
-{
-  "userId": "testuser",
-  "username": "testuser",
-  "email": "testuser@test.local",
-  "roles": ["SELLER"],
-  "appId": "B2BOOST_BE"
+# 6. Post-login controller
+
+## `PostLoginController.java`
+
+```java
+package com.example.app.auth.controller;
+
+import com.example.app.auth.dto.HandoffExchangeResponse;
+import com.example.app.auth.service.PostLoginService;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+
+import java.io.IOException;
+
+@Controller
+@RequiredArgsConstructor
+public class PostLoginController {
+
+    private final PostLoginService postLoginService;
+
+    @GetMapping("/post-login")
+    public void postLogin(
+            @RequestParam("code") String code,
+            HttpServletRequest request,
+            HttpServletResponse response
+    ) throws IOException {
+
+        HandoffExchangeResponse login = postLoginService.loginWithHandoffCode(code, request);
+
+        response.sendRedirect("/home");
+    }
 }
 ```
 
-Then the actual app:
-
-* creates its own local session
-* sets its own cookie
-* builds Spring Security context
+You can later redirect based on `login.getAppId()` or user role.
 
 ---
 
-# 12. Security note
+# 7. Minimal security config
 
-For the first working version, this is enough.
+This allows `/post-login` and requires auth for the rest.
 
-Next hardening step:
+## `SecurityConfig.java`
 
-* protect `/auth/handoff/exchange` so only trusted apps can call it
-* add app secret / internal header / mTLS
+```java
+package com.example.app.auth.config;
 
-But first get the flow working.
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.Customizer;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.web.SecurityFilterChain;
+
+@Configuration
+public class SecurityConfig {
+
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        http
+            .csrf(csrf -> csrf.disable())
+            .authorizeHttpRequests(auth -> auth
+                    .requestMatchers("/post-login").permitAll()
+                    .requestMatchers("/error").permitAll()
+                    .anyRequest().authenticated()
+            )
+            .formLogin(form -> form.disable())
+            .httpBasic(Customizer.withDefaults());
+
+        return http.build();
+    }
+}
+```
+
+If you do not want `httpBasic`, you can remove it.
 
 ---
 
-# 13. First test target
+# 8. Test controller
 
-You should be able to verify these steps:
+## `HomeController.java`
 
-1. login completes
-2. browser lands on:
+```java
+package com.example.app.web;
+
+import com.example.app.auth.service.AppUserPrincipal;
+import org.springframework.security.core.Authentication;
+import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.ResponseBody;
+
+@Controller
+public class HomeController {
+
+    @GetMapping("/home")
+    @ResponseBody
+    public String home(Authentication authentication) {
+        AppUserPrincipal principal = (AppUserPrincipal) authentication.getPrincipal();
+
+        return "Logged in user: " + principal.getUsername()
+                + ", userId=" + principal.getUserId()
+                + ", appId=" + principal.getAppId();
+    }
+}
+```
+
+---
+
+# 9. What Arthur Core must already have
+
+Arthur Core should now:
+
+* redirect to:
+
+  ```text
+  https://actual-app/post-login?code=abc123
+  ```
+* expose:
+
+  ```text
+  POST /auth/handoff/exchange
+  ```
+* return:
+
+  ```json
+  {
+    "userId": "testuser",
+    "username": "testuser",
+    "email": "testuser@test.local",
+    "roles": ["SELLER"],
+    "appId": "B2BOOST_BE"
+  }
+  ```
+
+---
+
+# 10. End-to-end result
+
+Now the flow becomes:
+
+1. User logs in through Arthur Core
+2. Arthur Core redirects to:
 
    ```text
-   post_login_redirect_url?code=...
+   /post-login?code=...
    ```
-3. POST to `/auth/handoff/exchange` returns user context
-4. second POST with same code fails
-
-That proves one-time handoff works.
+3. Other app exchanges code with Arthur Core
+4. Other app creates Spring Security session
+5. Other app redirects to `/home`
+6. `/home` sees authenticated user
 
 ---
 
-# 14. About JWT
+# 11. Next hardening steps
 
-Yes, still possible later:
+After this works, add these next:
 
-* keep `code` in browser redirect
-* after exchange, Arthur Core can return an **Arthur-issued JWT**
-* not needed for the first working cut
+* validate `X-INTERNAL-APP-SECRET` in Arthur Core
+* delete handoff code after first use
+* reject expired handoff codes
+* add logout
+* add richer user context from Lancelot
 
-First get the opaque-code flow working.
+---
 
-If you want, next I’ll give you the **exact receiver-app code** to:
+# 12. One thing to watch
 
-* read `code`
-* call Arthur Core exchange
-* create `SecurityContext`
-* set local session/cookie
+If your other app is a SPA and not a server-rendered Spring MVC app, the pattern changes a bit:
+
+* frontend reads `code`
+* frontend sends code to its backend
+* backend calls Arthur Core exchange
+* backend creates session
+
+If your other app is Spring MVC or Spring Boot backend first, the code above is the right starting point.
+
+If you want, next I’ll give you the **Arthur Core exchange endpoint validation with `X-INTERNAL-APP-SECRET`** so both sides match.
