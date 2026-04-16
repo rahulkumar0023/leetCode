@@ -1,3 +1,190 @@
+Then that’s the issue.
+
+uri("/auth/handoff/exchange") is the endpoint the receiving app is trying to call on Arthur Core, and if it does not exist in Arthur Core yet, the receiving app cannot complete the handoff.
+
+What it is supposed to be
+
+This is the server-to-server exchange endpoint.
+
+Flow:
+	1.	Arthur Core redirects browser to:
+
+https://actual-app/stub-server/post-login?code=abc123
+
+
+	2.	The actual app backend reads code=abc123
+	3.	The actual app backend calls Arthur Core:
+
+POST /auth/handoff/exchange
+
+
+	4.	Arthur Core:
+	•	checks if abc123 exists in Redis
+	•	checks if expired / used
+	•	finds the real session
+	•	returns user info
+	•	deletes the handoff code
+
+So yes — if that endpoint is not present in Arthur Core, the receiving app will fail.
+
+⸻
+
+What you need to add in Arthur Core
+
+1. Controller
+
+@RestController
+@RequestMapping("/auth/handoff")
+@RequiredArgsConstructor
+public class HandoffController {
+
+    private final HandoffService handoffService;
+
+    @PostMapping("/exchange")
+    public ResponseEntity<HandoffExchangeResponse> exchange(
+            @RequestBody HandoffExchangeRequest request
+    ) {
+        return ResponseEntity.ok(handoffService.exchange(request.getCode()));
+    }
+}
+
+If Arthur Core has a global context path like /arthur-core, then the full URL becomes:
+
+/arthur-core/auth/handoff/exchange
+
+That part is important.
+
+⸻
+
+2. Request DTO
+
+@Data
+public class HandoffExchangeRequest {
+    private String code;
+}
+
+
+⸻
+
+3. Response DTO
+
+Start simple:
+
+@Data
+public class HandoffExchangeResponse {
+    private String userId;
+    private String username;
+    private String email;
+    private List<String> roles;
+    private String appId;
+}
+
+
+⸻
+
+4. Service
+
+@Service
+@RequiredArgsConstructor
+public class HandoffService {
+
+    private final RedisLoginHandoffService redisLoginHandoffService;
+    private final RedisSessionService redisSessionService;
+
+    public HandoffExchangeResponse exchange(String code) {
+        LoginHandoff handoff = redisLoginHandoffService.findByCode(code);
+
+        if (handoff == null) {
+            throw new IllegalStateException("Invalid or expired handoff code");
+        }
+
+        if (handoff.isUsed()) {
+            throw new IllegalStateException("Handoff code already used");
+        }
+
+        if (handoff.getExpiresAt() != null && Instant.now().isAfter(handoff.getExpiresAt())) {
+            redisLoginHandoffService.delete(code);
+            throw new IllegalStateException("Handoff code expired");
+        }
+
+        UserSession session = redisSessionService.findBySessionId(handoff.getSessionId());
+        if (session == null) {
+            redisLoginHandoffService.delete(code);
+            throw new IllegalStateException("Session not found for handoff code");
+        }
+
+        redisLoginHandoffService.delete(code); // one-time use
+
+        HandoffExchangeResponse response = new HandoffExchangeResponse();
+        response.setUserId(session.getUserId());
+        response.setUsername(session.getUsername());
+        response.setEmail(session.getEmail());
+        response.setRoles(session.getRoles());
+        response.setAppId(session.getAppId());
+
+        return response;
+    }
+}
+
+
+⸻
+
+Important: Arthur Core context path
+
+Earlier your Arthur Core callback was under something like:
+
+/arthur-core/auth/callback
+
+So Arthur Core may already have a context path /arthur-core.
+
+If yes, then the receiving app should not call:
+
+.uri("/auth/handoff/exchange")
+
+against a base URL that has no context path.
+
+You have two options:
+
+Option A — put context path in base URL
+
+arthur-core:
+  base-url: http://arthur-core-backend.ns-arthur-core.svc.cluster.local:8080/arthur-core
+
+Then client can use:
+
+.uri("/auth/handoff/exchange")
+
+Option B — keep base URL plain and include full path in URI
+
+arthur-core:
+  base-url: http://arthur-core-backend.ns-arthur-core.svc.cluster.local:8080
+
+Then client must use:
+
+.uri("/arthur-core/auth/handoff/exchange")
+
+One of these must match your real Arthur Core setup.
+
+⸻
+
+What to do right now
+	1.	Add the handoff exchange endpoint in Arthur Core
+	2.	Check whether Arthur Core has context path /arthur-core
+	3.	Make the receiving app call the correct full path
+
+Most likely final URL
+
+Probably this:
+
+http://arthur-core-backend.ns-arthur-core.svc.cluster.local:8080/arthur-core/auth/handoff/exchange
+
+
+⸻
+
+One-line answer
+
+You are right: if /auth/handoff/exchange is not present in Arthur Core yet, the receiving app cannot work. That endpoint is the missing piece of the handoff flow.
+
 Here’s a **minimal Spring Boot version** for the **other application**.
 
 This does 4 things:
