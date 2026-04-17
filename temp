@@ -1,588 +1,457 @@
-Then that’s the issue.
+Yes — add logs in all 3 apps. The best setup is:
 
-uri("/auth/handoff/exchange") is the endpoint the receiving app is trying to call on Arthur Core, and if it does not exist in Arthur Core yet, the receiving app cannot complete the handoff.
+* **business flow logs** you add manually
+* **Spring Security / WebClient debug logs** from config
+* **request correlation id** so one login flow is easy to follow
 
-What it is supposed to be
+Here’s the clean version.
 
-This is the server-to-server exchange endpoint.
+# 1. Add one flow id across the request
 
-Flow:
-	1.	Arthur Core redirects browser to:
+Use one id like `flowId` or `traceId` and log it everywhere.
 
-https://actual-app/stub-server/post-login?code=abc123
+## Arthur Core
 
+At `/auth/start`, generate one:
 
-	2.	The actual app backend reads code=abc123
-	3.	The actual app backend calls Arthur Core:
+```java
+String flowId = UUID.randomUUID().toString();
+MDC.put("flowId", flowId);
+log.info("Auth flow started for appId={}", appId);
+```
 
-POST /auth/handoff/exchange
+Store it in `AuthTransaction` too:
 
+```java
+transaction.setFlowId(flowId);
+```
 
-	4.	Arthur Core:
-	•	checks if abc123 exists in Redis
-	•	checks if expired / used
-	•	finds the real session
-	•	returns user info
-	•	deletes the handoff code
+Then in callback, restore it:
 
-So yes — if that endpoint is not present in Arthur Core, the receiving app will fail.
+```java
+MDC.put("flowId", tx.getFlowId());
+log.info("Auth callback received");
+```
 
-⸻
+Also copy it into:
 
-What you need to add in Arthur Core
+* `UserSession`
+* `LoginHandoff`
 
-1. Controller
-
-@RestController
-@RequestMapping("/auth/handoff")
-@RequiredArgsConstructor
-public class HandoffController {
-
-    private final HandoffService handoffService;
-
-    @PostMapping("/exchange")
-    public ResponseEntity<HandoffExchangeResponse> exchange(
-            @RequestBody HandoffExchangeRequest request
-    ) {
-        return ResponseEntity.ok(handoffService.exchange(request.getCode()));
-    }
-}
-
-If Arthur Core has a global context path like /arthur-core, then the full URL becomes:
-
-/arthur-core/auth/handoff/exchange
-
-That part is important.
-
-⸻
-
-2. Request DTO
-
-@Data
-public class HandoffExchangeRequest {
-    private String code;
-}
-
-
-⸻
-
-3. Response DTO
-
-Start simple:
-
-@Data
-public class HandoffExchangeResponse {
-    private String userId;
-    private String username;
-    private String email;
-    private List<String> roles;
-    private String appId;
-}
-
-
-⸻
-
-4. Service
-
-@Service
-@RequiredArgsConstructor
-public class HandoffService {
-
-    private final RedisLoginHandoffService redisLoginHandoffService;
-    private final RedisSessionService redisSessionService;
-
-    public HandoffExchangeResponse exchange(String code) {
-        LoginHandoff handoff = redisLoginHandoffService.findByCode(code);
-
-        if (handoff == null) {
-            throw new IllegalStateException("Invalid or expired handoff code");
-        }
-
-        if (handoff.isUsed()) {
-            throw new IllegalStateException("Handoff code already used");
-        }
-
-        if (handoff.getExpiresAt() != null && Instant.now().isAfter(handoff.getExpiresAt())) {
-            redisLoginHandoffService.delete(code);
-            throw new IllegalStateException("Handoff code expired");
-        }
-
-        UserSession session = redisSessionService.findBySessionId(handoff.getSessionId());
-        if (session == null) {
-            redisLoginHandoffService.delete(code);
-            throw new IllegalStateException("Session not found for handoff code");
-        }
-
-        redisLoginHandoffService.delete(code); // one-time use
-
-        HandoffExchangeResponse response = new HandoffExchangeResponse();
-        response.setUserId(session.getUserId());
-        response.setUsername(session.getUsername());
-        response.setEmail(session.getEmail());
-        response.setRoles(session.getRoles());
-        response.setAppId(session.getAppId());
-
-        return response;
-    }
-}
-
-
-⸻
-
-Important: Arthur Core context path
-
-Earlier your Arthur Core callback was under something like:
-
-/arthur-core/auth/callback
-
-So Arthur Core may already have a context path /arthur-core.
-
-If yes, then the receiving app should not call:
-
-.uri("/auth/handoff/exchange")
-
-against a base URL that has no context path.
-
-You have two options:
-
-Option A — put context path in base URL
-
-arthur-core:
-  base-url: http://arthur-core-backend.ns-arthur-core.svc.cluster.local:8080/arthur-core
-
-Then client can use:
-
-.uri("/auth/handoff/exchange")
-
-Option B — keep base URL plain and include full path in URI
-
-arthur-core:
-  base-url: http://arthur-core-backend.ns-arthur-core.svc.cluster.local:8080
-
-Then client must use:
-
-.uri("/arthur-core/auth/handoff/exchange")
-
-One of these must match your real Arthur Core setup.
-
-⸻
-
-What to do right now
-	1.	Add the handoff exchange endpoint in Arthur Core
-	2.	Check whether Arthur Core has context path /arthur-core
-	3.	Make the receiving app call the correct full path
-
-Most likely final URL
-
-Probably this:
-
-http://arthur-core-backend.ns-arthur-core.svc.cluster.local:8080/arthur-core/auth/handoff/exchange
-
-
-⸻
-
-One-line answer
-
-You are right: if /auth/handoff/exchange is not present in Arthur Core yet, the receiving app cannot work. That endpoint is the missing piece of the handoff flow.
-
-Here’s a **minimal Spring Boot version** for the **other application**.
-
-This does 4 things:
-
-1. receives `?code=...` on `/post-login`
-2. calls Arthur Core `/auth/handoff/exchange`
-3. creates local Spring Security session
-4. redirects to `/home`
+Then when stub-server calls Arthur Core exchange, pass it as header too.
 
 ---
 
-# 1. DTOs
+# 2. Add business logs in Arthur Core
 
-## `HandoffExchangeRequest.java`
+These are the most useful places.
+
+## In `/auth/start`
+
+Log:
+
+* appId
+* redirectUri
+* issuerUri
+* generated state
+* PKCE generated
+* auth transaction saved
+
+Example:
 
 ```java
-package com.example.app.auth.dto;
-
-import lombok.Data;
-
-@Data
-public class HandoffExchangeRequest {
-    private String code;
-}
+log.info("Starting authentication for appId={}", appId);
+log.info("Loaded app config redirectUri={}, issuerUri={}", appConfig.getRedirectUri(), appConfig.getIssuerUri());
+log.info("Generated state={}, nonce={}", state, nonce);
+log.info("Saved auth transaction for state={}", state);
+log.info("Redirecting to IdP");
 ```
 
-## `HandoffExchangeResponse.java`
+## In `/auth/callback`
+
+Log:
+
+* code received
+* state received
+* auth transaction found
+* token exchange started/succeeded
+* claims extracted
+* user id used for Lancelot call
+* user returned from Lancelot
+* session created
+* handoff created
+* redirect target
+
+Example:
 
 ```java
-package com.example.app.auth.dto;
+log.info("Callback received with state={}", state);
+log.info("Auth transaction found for appId={}", tx.getAppId());
+log.info("Exchanging code for token");
+log.info("Token exchange succeeded");
+log.info("JWT claims extracted subject={}, preferredUsername={}", claims.getSub(), claims.getPreferredUsername());
+log.info("Calling Lancelot getUserById userId={}", userId);
+log.info("Loaded user from Lancelot userId={}, username={}", user.getUserId(), user.getUsername());
+log.info("Arthur session created sessionId={}", session.getSessionId());
+log.info("Login handoff created code={} for appId={}", handoffCode, tx.getAppId());
+log.info("Redirecting to postLoginRedirectUrl={}", appConfig.getPostLoginRedirectUrl());
+```
 
-import lombok.Data;
+## In `/auth/handoff/exchange`
 
-import java.util.List;
+Log:
 
-@Data
-public class HandoffExchangeResponse {
-    private String userId;
-    private String username;
-    private String email;
-    private List<String> roles;
-    private String appId;
-}
+* code received
+* handoff found
+* session found
+* handoff invalidated
+* response sent
+
+```java
+log.info("Handoff exchange requested for code={}", code);
+log.info("Handoff found for sessionId={}", handoff.getSessionId());
+log.info("Arthur session loaded userId={}, appId={}", session.getUserId(), session.getAppId());
+log.info("Handoff code invalidated");
+log.info("Returning handoff exchange response for userId={}", session.getUserId());
+```
+
+## In Redis services
+
+Log:
+
+* save key
+* lookup key
+* delete key
+* ttl if useful
+
+---
+
+# 3. Add business logs in Lancelot
+
+## In `getApp`
+
+Log:
+
+* appId requested
+* app found
+* redirectUri / postLoginRedirectUrl / issuerUri
+
+```java
+log.info("getApp called with appId={}", appId);
+log.info("Returning app config appId={}, redirectUri={}, postLoginRedirectUrl={}",
+        app.getAppId(), app.getRedirectUri(), app.getPostLoginRedirectUrl());
+```
+
+## In `getUserById`
+
+Log:
+
+* userId requested
+* DB row found
+* response fields returned
+
+```java
+log.info("getUserById called with userId={}", userId);
+log.info("User entity found userId={}, username={}", user.getUserId(), user.getUsername());
+log.info("Returning user response userId={}, username={}", response.getUserId(), response.getUsername());
+```
+
+This is especially useful because you already had mapping issues.
+
+---
+
+# 4. Add business logs in stub-server
+
+## In `/post-login`
+
+Log:
+
+* code received
+* Arthur exchange start
+* Arthur exchange success
+* local session/security context created
+* redirect to `/B2BOOST`
+
+```java
+log.info("Received /post-login with code={}", code);
+log.info("Calling Arthur Core handoff exchange");
+log.info("Handoff exchange succeeded for userId={}, username={}", login.getUserId(), login.getUsername());
+log.info("Security context created for username={}", login.getUsername());
+log.info("Redirecting to {}", request.getContextPath() + "/B2BOOST");
+```
+
+## In homepage controller
+
+Log authenticated principal:
+
+```java
+log.info("Accessing B2BOOST with principal={}", authentication.getName());
 ```
 
 ---
 
-# 2. Arthur Core client config
+# 5. Enable Spring Security logs
 
-## `ArthurCoreClientConfig.java`
-
-```java
-package com.example.app.auth.config;
-
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.web.reactive.function.client.WebClient;
-
-@Configuration
-public class ArthurCoreClientConfig {
-
-    @Bean
-    public WebClient arthurCoreWebClient(
-            @Value("${arthur-core.base-url}") String baseUrl
-    ) {
-        return WebClient.builder()
-                .baseUrl(baseUrl)
-                .build();
-    }
-}
-```
-
-## `application.yml`
+In each app’s `application.yml`, add:
 
 ```yaml
-arthur-core:
-  base-url: http://arthur-core-backend.ns-arthur-core.svc.cluster.local:8080
-  internal-secret: my-shared-secret
+logging:
+  level:
+    org.springframework.security: DEBUG
 ```
 
-Use your actual Arthur Core service URL and port.
+If you want very detailed logs:
+
+```yaml
+logging:
+  level:
+    org.springframework.security: TRACE
+```
+
+Use `TRACE` only temporarily. It gets noisy.
+
+This is useful in:
+
+* **Arthur Core**
+* **stub-server**
+
+Usually not needed in Lancelot unless it also has security.
 
 ---
 
-# 3. Arthur exchange client
+# 6. Enable WebClient / HTTP client logs
 
-## `ArthurAuthClient.java`
+For backend-to-backend calls.
+
+## Arthur Core
+
+Useful for:
+
+* Keycloak discovery
+* token exchange
+* Lancelot calls
+
+## stub-server
+
+Useful for:
+
+* Arthur handoff exchange
+
+In `application.yml`:
+
+```yaml
+logging:
+  level:
+    org.springframework.web.reactive.function.client: DEBUG
+    reactor.netty.http.client: DEBUG
+```
+
+This shows request/response activity, but not always body content.
+
+---
+
+# 7. Add request logging filter
+
+In all apps, add a simple servlet filter to log incoming requests.
 
 ```java
-package com.example.app.auth.client;
-
-import com.example.app.auth.dto.HandoffExchangeRequest;
-import com.example.app.auth.dto.HandoffExchangeResponse;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.HttpStatusCode;
-import org.springframework.stereotype.Component;
-import org.springframework.web.reactive.function.client.WebClient;
-import reactor.core.publisher.Mono;
-
 @Component
-@RequiredArgsConstructor
 @Slf4j
-public class ArthurAuthClient {
+public class RequestLoggingFilter extends OncePerRequestFilter {
 
-    private final WebClient arthurCoreWebClient;
-
-    @Value("${arthur-core.internal-secret}")
-    private String internalSecret;
-
-    public HandoffExchangeResponse exchangeCode(String code) {
-        HandoffExchangeRequest request = new HandoffExchangeRequest();
-        request.setCode(code);
-
-        return arthurCoreWebClient.post()
-                .uri("/auth/handoff/exchange")
-                .header("X-INTERNAL-APP-SECRET", internalSecret)
-                .bodyValue(request)
-                .retrieve()
-                .onStatus(HttpStatusCode::isError, response ->
-                        response.bodyToMono(String.class).flatMap(body -> {
-                            log.error("Arthur Core handoff exchange failed: {}", body);
-                            return Mono.error(new IllegalStateException("Handoff exchange failed: " + body));
-                        }))
-                .bodyToMono(HandoffExchangeResponse.class)
-                .block();
-    }
-}
-```
-
----
-
-# 4. Build Spring Security authentication
-
-## `PostLoginService.java`
-
-```java
-package com.example.app.auth.service;
-
-import com.example.app.auth.client.ArthurAuthClient;
-import com.example.app.auth.dto.HandoffExchangeResponse;
-import jakarta.servlet.http.HttpServletRequest;
-import lombok.RequiredArgsConstructor;
-import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
-import org.springframework.security.core.GrantedAuthority;
-import org.springframework.security.core.authority.SimpleGrantedAuthority;
-import org.springframework.security.core.context.SecurityContext;
-import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
-import org.springframework.stereotype.Service;
-
-import java.util.List;
-
-@Service
-@RequiredArgsConstructor
-public class PostLoginService {
-
-    private final ArthurAuthClient arthurAuthClient;
-
-    public HandoffExchangeResponse loginWithHandoffCode(String code, HttpServletRequest request) {
-        HandoffExchangeResponse response = arthurAuthClient.exchangeCode(code);
-
-        List<GrantedAuthority> authorities = response.getRoles() == null
-                ? List.of()
-                : response.getRoles().stream()
-                    .map(role -> role.startsWith("ROLE_")
-                            ? new SimpleGrantedAuthority(role)
-                            : new SimpleGrantedAuthority("ROLE_" + role))
-                    .map(GrantedAuthority.class::cast)
-                    .toList();
-
-        AppUserPrincipal principal = new AppUserPrincipal(
-                response.getUserId(),
-                response.getUsername(),
-                response.getEmail(),
-                response.getAppId()
-        );
-
-        UsernamePasswordAuthenticationToken authentication =
-                new UsernamePasswordAuthenticationToken(principal, null, authorities);
-
-        SecurityContext context = SecurityContextHolder.createEmptyContext();
-        context.setAuthentication(authentication);
-        SecurityContextHolder.setContext(context);
-
-        request.getSession(true).setAttribute(
-                HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY,
-                context
-        );
-
-        return response;
-    }
-}
-```
-
----
-
-# 5. Principal object
-
-## `AppUserPrincipal.java`
-
-```java
-package com.example.app.auth.service;
-
-import lombok.AllArgsConstructor;
-import lombok.Getter;
-
-@Getter
-@AllArgsConstructor
-public class AppUserPrincipal {
-    private String userId;
-    private String username;
-    private String email;
-    private String appId;
-}
-```
-
----
-
-# 6. Post-login controller
-
-## `PostLoginController.java`
-
-```java
-package com.example.app.auth.controller;
-
-import com.example.app.auth.dto.HandoffExchangeResponse;
-import com.example.app.auth.service.PostLoginService;
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
-import lombok.RequiredArgsConstructor;
-import org.springframework.stereotype.Controller;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestParam;
-
-import java.io.IOException;
-
-@Controller
-@RequiredArgsConstructor
-public class PostLoginController {
-
-    private final PostLoginService postLoginService;
-
-    @GetMapping("/post-login")
-    public void postLogin(
-            @RequestParam("code") String code,
+    @Override
+    protected void doFilterInternal(
             HttpServletRequest request,
-            HttpServletResponse response
-    ) throws IOException {
+            HttpServletResponse response,
+            FilterChain filterChain
+    ) throws ServletException, IOException {
 
-        HandoffExchangeResponse login = postLoginService.loginWithHandoffCode(code, request);
+        log.info("Incoming request method={} uri={} query={}",
+                request.getMethod(),
+                request.getRequestURI(),
+                request.getQueryString());
 
-        response.sendRedirect("/home");
+        filterChain.doFilter(request, response);
+
+        log.info("Response status={} for uri={}", response.getStatus(), request.getRequestURI());
     }
 }
 ```
 
-You can later redirect based on `login.getAppId()` or user role.
+Put this in:
+
+* Arthur Core
+* Lancelot
+* stub-server
+
+Very useful.
 
 ---
 
-# 7. Minimal security config
+# 8. Add SecurityContext logger in stub-server
 
-This allows `/post-login` and requires auth for the rest.
-
-## `SecurityConfig.java`
+To prove login worked there.
 
 ```java
-package com.example.app.auth.config;
+@Component
+@Slf4j
+public class SecurityContextLoggingFilter extends OncePerRequestFilter {
 
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.security.config.Customizer;
-import org.springframework.security.config.annotation.web.builders.HttpSecurity;
-import org.springframework.security.web.SecurityFilterChain;
+    @Override
+    protected void doFilterInternal(
+            HttpServletRequest request,
+            HttpServletResponse response,
+            FilterChain filterChain
+    ) throws ServletException, IOException {
 
-@Configuration
-public class SecurityConfig {
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
 
-    @Bean
-    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
-        http
-            .csrf(csrf -> csrf.disable())
-            .authorizeHttpRequests(auth -> auth
-                    .requestMatchers("/post-login").permitAll()
-                    .requestMatchers("/error").permitAll()
-                    .anyRequest().authenticated()
-            )
-            .formLogin(form -> form.disable())
-            .httpBasic(Customizer.withDefaults());
+        if (auth != null) {
+            log.info("SecurityContext authentication name={}, authorities={}",
+                    auth.getName(), auth.getAuthorities());
+        } else {
+            log.info("SecurityContext is empty");
+        }
 
-        return http.build();
+        filterChain.doFilter(request, response);
     }
 }
 ```
 
-If you do not want `httpBasic`, you can remove it.
+This is most useful in **stub-server**.
 
 ---
 
-# 8. Test controller
+# 9. Use MDC in log pattern
 
-## `HomeController.java`
+In `application.yml` for all apps:
+
+```yaml
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} [flowId=%X{flowId}] - %msg%n"
+```
+
+Then every log line shows:
+
+```text
+[flowId=abc-123]
+```
+
+That makes the whole login chain readable.
+
+---
+
+# 10. Good logger levels by app
+
+## Arthur Core
+
+Use:
+
+* your package: `DEBUG`
+* Spring Security: `DEBUG`
+* WebClient/reactor: `DEBUG`
+
+```yaml
+logging:
+  level:
+    com.yourcompany.arthurcore: DEBUG
+    org.springframework.security: DEBUG
+    org.springframework.web.reactive.function.client: DEBUG
+    reactor.netty.http.client: DEBUG
+```
+
+## Lancelot
+
+Use:
+
+* your package: `DEBUG`
+* Spring web/jpa if needed
+
+```yaml
+logging:
+  level:
+    com.yourcompany.lancelot: DEBUG
+    org.springframework.web: INFO
+    org.hibernate.SQL: DEBUG
+```
+
+If you want SQL params too:
+
+```yaml
+logging:
+  level:
+    org.hibernate.orm.jdbc.bind: TRACE
+```
+
+## stub-server
+
+Use:
+
+* your package: `DEBUG`
+* Spring Security: `DEBUG`
+* WebClient/reactor: `DEBUG`
+
+```yaml
+logging:
+  level:
+    com.yourcompany.stubserver: DEBUG
+    org.springframework.security: DEBUG
+    org.springframework.web.reactive.function.client: DEBUG
+    reactor.netty.http.client: DEBUG
+```
+
+---
+
+# 11. What not to log
+
+Do **not** log:
+
+* access token
+* refresh token
+* client secret
+* full JWT
+* passwords
+* internal secret headers
+
+Safe to log:
+
+* appId
+* userId
+* username
+* state/code presence
+* sessionId partially
+* handoff code partially
+
+For example:
 
 ```java
-package com.example.app.web;
-
-import com.example.app.auth.service.AppUserPrincipal;
-import org.springframework.security.core.Authentication;
-import org.springframework.stereotype.Controller;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.ResponseBody;
-
-@Controller
-public class HomeController {
-
-    @GetMapping("/home")
-    @ResponseBody
-    public String home(Authentication authentication) {
-        AppUserPrincipal principal = (AppUserPrincipal) authentication.getPrincipal();
-
-        return "Logged in user: " + principal.getUsername()
-                + ", userId=" + principal.getUserId()
-                + ", appId=" + principal.getAppId();
-    }
-}
+log.info("Created session sessionId={}", sessionId.substring(0, 8));
 ```
 
 ---
 
-# 9. What Arthur Core must already have
+# 12. Smallest useful set to add first
 
-Arthur Core should now:
+If you want the fastest path, add just these:
 
-* redirect to:
+## Arthur Core
 
-  ```text
-  https://actual-app/post-login?code=abc123
-  ```
-* expose:
+* logs in `/auth/start`
+* logs in `/auth/callback`
+* logs in `/auth/handoff/exchange`
 
-  ```text
-  POST /auth/handoff/exchange
-  ```
-* return:
+## Lancelot
 
-  ```json
-  {
-    "userId": "testuser",
-    "username": "testuser",
-    "email": "testuser@test.local",
-    "roles": ["SELLER"],
-    "appId": "B2BOOST_BE"
-  }
-  ```
+* logs in `getApp`
+* logs in `getUserById`
 
----
+## stub-server
 
-# 10. End-to-end result
+* logs in `/post-login`
+* logs in homepage
+* `org.springframework.security=DEBUG`
 
-Now the flow becomes:
+That alone will make the full flow readable.
 
-1. User logs in through Arthur Core
-2. Arthur Core redirects to:
-
-   ```text
-   /post-login?code=...
-   ```
-3. Other app exchanges code with Arthur Core
-4. Other app creates Spring Security session
-5. Other app redirects to `/home`
-6. `/home` sees authenticated user
-
----
-
-# 11. Next hardening steps
-
-After this works, add these next:
-
-* validate `X-INTERNAL-APP-SECRET` in Arthur Core
-* delete handoff code after first use
-* reject expired handoff codes
-* add logout
-* add richer user context from Lancelot
-
----
-
-# 12. One thing to watch
-
-If your other app is a SPA and not a server-rendered Spring MVC app, the pattern changes a bit:
-
-* frontend reads `code`
-* frontend sends code to its backend
-* backend calls Arthur Core exchange
-* backend creates session
-
-If your other app is Spring MVC or Spring Boot backend first, the code above is the right starting point.
-
-If you want, next I’ll give you the **Arthur Core exchange endpoint validation with `X-INTERNAL-APP-SECRET`** so both sides match.
+If you want, I can give you a **copy-paste logging checklist per class** next.
