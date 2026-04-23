@@ -1,35 +1,132 @@
-@ExtendWith(MockitoExtension.class)
-class AuthControllerTest {
+Found it exactly from your screenshot.
 
-    @Mock
-    private AuthService authService;
+## Root Cause
 
-    @Mock
-    private HandoffService handoffService;
+Your controller line **49** is calling:
 
-    @Mock
-    private LancelotClient lancelotClient;
+```java
+session.getAttribute(...)
+```
 
-    @Mock
-    private HttpServletRequest request;
+and in the failing test:
 
-    @InjectMocks
-    private AuthController authController;
+```java
+shouldStartAuthenticationUsingQueryAppId()
+```
 
-    @Test
-    void shouldStartAuthenticationUsingQueryAppId() {
+`session` is null because your mocked `HttpServletRequest` does **not** return a mocked `HttpSession`.
 
-        when(authService.startAuthentication("B2BOOST_NL"))
-                .thenReturn("http://ping/login");
+---
 
-        ResponseEntity<Void> result =
-                authController.startAuthentication(
-                        null,
-                        "B2BOOST_NL",
-                        request
-                );
+# Fix Immediately
 
-        assertEquals(302, result.getStatusCode().value());
-        verify(authService).startAuthentication("B2BOOST_NL");
-    }
+Add a mock session.
+
+## In test class:
+
+```java id="7j6ll8"
+@Mock
+private HttpServletRequest request;
+
+@Mock
+private HttpSession session;
+```
+
+Import:
+
+```java id="j7kp8u"
+import jakarta.servlet.http.HttpSession;
+```
+
+---
+
+# Then in failing test add:
+
+```java id="v2fd0r"
+when(request.getSession()).thenReturn(session);
+```
+
+or if code uses:
+
+```java id="i1o0it"
+request.getSession(false)
+```
+
+then:
+
+```java id="8nhsl8"
+when(request.getSession(false)).thenReturn(session);
+```
+
+---
+
+# Full Fixed Test
+
+```java id="lrz9r6"
+@Test
+void shouldStartAuthenticationUsingQueryAppId() {
+
+    when(request.getSession()).thenReturn(session);
+
+    when(authService.startAuthentication("B2BOOST_NL"))
+            .thenReturn("http://ping/login");
+
+    ResponseEntity<Void> result =
+            authController.startAuthentication(
+                    null,
+                    "B2BOOST_NL",
+                    request
+            );
+
+    assertEquals(302, result.getStatusCode().value());
+
+    verify(authService)
+            .startAuthentication("B2BOOST_NL");
 }
+```
+
+---
+
+# Why Callback Tests Passed
+
+Because callback method uses:
+
+```java
+HttpServletResponse
+```
+
+No session involved.
+
+---
+
+# Better Permanent Fix
+
+Put in `@BeforeEach`
+
+```java id="1aw8b1"
+@BeforeEach
+void setup() {
+    when(request.getSession()).thenReturn(session);
+}
+```
+
+Then all tests work.
+
+---
+
+# My Guess About Your Controller
+
+You likely added:
+
+```java id="jlwmte"
+HttpSession session = request.getSession();
+session.getAttribute("...");
+```
+
+for tracking duplicate auth calls or storing state.
+
+---
+
+# Send me line 49 of AuthController
+
+I’ll tell you exactly what to mock and whether logic is good.
