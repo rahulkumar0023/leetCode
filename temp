@@ -1,242 +1,322 @@
-Yes — we can make `/auth/start` duplicate-safe **without breaking multiple users or multiple browsers**.
+Yes — now is the right time.
+You’ve built enough flow that **JUnit tests will protect future refactors**.
 
-The trick is:
+# Best approach now
 
-👉 lock only **per browser session**, not globally.
+Write tests in layers:
 
-So:
+## Arthur Core
 
-* User A browser works normally ✅
-* User B browser works normally ✅
-* 100 users same time works ✅
-* only duplicate rapid clicks from the **same browser session** are ignored/reused ✅
+1. `AuthService`
+2. `HandoffService`
+3. `AuthController`
+4. Redis services (light tests)
 
----
+## Lancelot
 
-# Best Solution: Session-scoped auth pending guard
+1. `UserService`
+2. `AppConfigService`
+3. controller tests
 
-Use the existing `HttpSession`.
+## Stub-server
 
-Each browser gets its own session cookie.
-
-So duplicates are isolated naturally.
-
----
-
-# How it works
-
-When `/auth/start` is called:
-
-## First request from browser
-
-```text id="th3a9o"
-No pending auth
-→ create transaction
-→ mark AUTH_PENDING
-→ redirect to Keycloak
-```
-
-## Second duplicate request 300ms later (same browser)
-
-```text id="40lv7n"
-AUTH_PENDING exists
-→ reuse existing redirect OR ignore
-```
-
-## Another user in another browser
-
-Different session:
-
-```text id="f3pj76"
-No pending auth
-→ proceeds normally
-```
+1. `PostLoginService`
+2. `PostLoginController`
 
 ---
 
-# Will it break multiple users?
+# Highest-value tests first (Arthur Core)
 
-## NO
-
-Because session storage is separate per browser cookie.
-
-User A:
-
-```text id="e5x2mu"
-session=ABC123
-```
-
-User B:
-
-```text id="nyfvg0"
-session=XYZ999
-```
-
-Each gets own lock.
+These will give immediate value.
 
 ---
 
-# Implementation (Recommended)
+# 1. `AuthServiceTest`
 
-## In `startAuthentication(...)`
+Test:
+
+## startAuthentication()
+
+✅ loads app config
+✅ creates state
+✅ saves transaction
+✅ returns redirect URL
+
+## handleCallback()
+
+✅ valid state loads transaction
+✅ token exchange succeeds
+✅ claims extracted
+✅ getUserById called
+✅ session saved
+✅ handoff saved
+✅ redirect URL returned
+
+## negative cases
+
+❌ invalid state
+❌ token exchange fails
+❌ user not found
+
+---
+
+# Example
+
+## `AuthServiceTest.java`
 
 ```java
-@GetMapping("/start")
-public ResponseEntity<Void> startAuthentication(
-        @RequestHeader(value = "APP_ID", required = false) String headerAppId,
-        @RequestParam(value = "appId", required = false) String queryAppId,
-        HttpServletRequest request
-) {
+@ExtendWith(MockitoExtension.class)
+class AuthServiceTest {
 
-    String appId = headerAppId != null && !headerAppId.isBlank()
-            ? headerAppId
-            : queryAppId;
+    @InjectMocks
+    private AuthService authService;
 
-    HttpSession session = request.getSession(true);
+    @Mock
+    private LancelotClient lancelotClient;
 
-    String pendingRedirect =
-            (String) session.getAttribute("AUTH_PENDING_REDIRECT");
+    @Mock
+    private RedisAuthTransactionService txService;
 
-    Long pendingTime =
-            (Long) session.getAttribute("AUTH_PENDING_TIME");
+    @Test
+    void shouldStartAuthentication() {
 
-    // if duplicate within 10 sec, reuse existing redirect
-    if (pendingRedirect != null && pendingTime != null) {
+        AppConfigResponse app = new AppConfigResponse();
+        app.setClientId("b2boost");
+        app.setIssuerUri("http://keycloak/realm");
+        app.setRedirectUri("http://callback");
 
-        long age = System.currentTimeMillis() - pendingTime;
+        when(lancelotClient.getApp("B2BOOST_BE")).thenReturn(app);
 
-        if (age < 10000) {
-            log.info("Duplicate auth/start detected, reusing redirect");
-            HttpHeaders headers = new HttpHeaders();
-            headers.setLocation(URI.create(pendingRedirect));
-            return new ResponseEntity<>(headers, HttpStatus.FOUND);
-        }
+        String redirect = authService.startAuthentication("B2BOOST_BE");
+
+        assertNotNull(redirect);
+        verify(txService).save(any());
     }
-
-    String redirectUrl = authService.startAuthentication(appId);
-
-    session.setAttribute("AUTH_PENDING_REDIRECT", redirectUrl);
-    session.setAttribute("AUTH_PENDING_TIME", System.currentTimeMillis());
-
-    HttpHeaders headers = new HttpHeaders();
-    headers.setLocation(URI.create(redirectUrl));
-    return new ResponseEntity<>(headers, HttpStatus.FOUND);
 }
 ```
 
 ---
 
-# Clear it after callback
+# 2. `HandoffServiceTest`
 
-In `/callback`
+Very important now.
+
+## Success case
+
+```text
+valid code
+→ load handoff
+→ load session
+→ delete handoff
+→ return response
+```
+
+## Failures
+
+❌ invalid code
+❌ expired code
+❌ reused code
+❌ missing session
+
+---
+
+## Example
 
 ```java
-HttpSession session = request.getSession(false);
+@ExtendWith(MockitoExtension.class)
+class HandoffServiceTest {
 
-if (session != null) {
-    session.removeAttribute("AUTH_PENDING_REDIRECT");
-    session.removeAttribute("AUTH_PENDING_TIME");
+    @InjectMocks
+    private HandoffService service;
+
+    @Mock
+    private RedisLoginHandoffService handoffRedis;
+
+    @Mock
+    private RedisSessionService sessionRedis;
+
+    @Test
+    void shouldExchangeCode() {
+
+        LoginHandoff handoff = new LoginHandoff();
+        handoff.setSessionId("abc");
+
+        UserSession session = new UserSession();
+        session.setUserId("testuser");
+        session.setUsername("testuser");
+
+        when(handoffRedis.findByCode("123")).thenReturn(handoff);
+        when(sessionRedis.findBySessionId("abc")).thenReturn(session);
+
+        HandoffExchangeResponse response =
+                service.exchange("123");
+
+        assertEquals("testuser", response.getUserId());
+
+        verify(handoffRedis).delete("123");
+    }
 }
 ```
 
-This resets for future logins.
-
 ---
 
-# Why this is safe
+# 3. `AuthControllerTest`
 
-## Same browser accidental double hit
+Use `MockMvc`
 
-Second request reuses same redirect.
+Test:
 
-## Different browser / user
-
-Different session, unaffected.
-
-## Real login again later
-
-After callback, lock cleared.
-
----
-
-# Better than global Redis lock
-
-Do **NOT** lock by appId globally.
-
-Bad:
-
-```text id="gn7n9g"
-B2BOOST_BE locked
+```text
+GET /auth/start?appId=B2BOOST_BE
+→ 302 redirect
 ```
 
-That would break many users.
+```text
+GET /auth/callback?code=x&state=y
+→ 302 redirect to post-login
+```
 
 ---
 
-# If no session yet?
-
-Calling:
+## Example
 
 ```java
-request.getSession(true)
+@WebMvcTest(AuthController.class)
+class AuthControllerTest {
+
+    @Autowired
+    MockMvc mvc;
+
+    @MockBean
+    AuthService authService;
+
+    @Test
+    void shouldRedirectStart() throws Exception {
+
+        when(authService.startAuthentication("B2BOOST_BE"))
+                .thenReturn("http://keycloak");
+
+        mvc.perform(get("/auth/start")
+                .param("appId", "B2BOOST_BE"))
+           .andExpect(status().isFound());
+    }
+}
 ```
 
-creates one.
+---
 
-Perfectly fine for auth start.
+# 4. Stub-server tests
+
+## `PostLoginServiceTest`
+
+Test:
+
+* exchangeCode called
+* SecurityContext created
+* session stored
+
+## `PostLoginControllerTest`
+
+```text
+GET /post-login?code=123
+→ redirects /B2BOOST
+```
 
 ---
 
-# Even stronger version (recommended)
+# 5. Lancelot tests
 
-Instead of storing redirect URL only, store generated `state`.
+## `UserServiceTest`
 
-Then if duplicate comes, reuse exact pending state transaction.
+```text
+getUserById(testuser)
+→ returns mapped response
+```
 
----
-
-# What if user opens two tabs intentionally?
-
-Same browser session usually same cookie.
-
-Then second tab within 10 sec reuses same auth request.
-
-This is usually acceptable.
-
-If you want separate tabs independent, we can use a **tab token** later.
+This protects your snake_case / camelCase issues.
 
 ---
 
-# My recommendation for your case
+# Dependencies
+
+## Maven
+
+```xml
+<dependency>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-test</artifactId>
+  <scope>test</scope>
+</dependency>
+
+<dependency>
+  <groupId>org.mockito</groupId>
+  <artifactId>mockito-junit-jupiter</artifactId>
+  <scope>test</scope>
+</dependency>
+```
+
+---
+
+# Best priority order (my recommendation)
+
+## Phase 1 (today)
+
+1. `HandoffServiceTest`
+2. `AuthServiceTest`
+3. `AuthControllerTest`
+
+## Phase 2
+
+4. Stub-server login tests
+5. Lancelot mapping tests
+
+---
+
+# What gives biggest ROI
+
+Right now your risky areas are:
+
+## Handoff flow
+
+code/session/expiry
+
+## Callback flow
+
+many integrations
+
+## DTO mapping
+
+already caused bugs
+
+So test those first.
+
+---
+
+# My honest suggestion
+
+Skip Redis integration tests for now.
+Mock Redis services first.
+
+Later add Testcontainers Redis.
+
+---
+
+# If you want production-grade suite later
 
 Use:
 
-## 10-second duplicate window
-
-Enough to catch browser double requests.
-
----
-
-# Logs to add
-
-```java
-log.info("Session={} pending auth age={}ms", session.getId(), age);
-```
-
-You’ll see duplicate suppression clearly.
+* JUnit5
+* Mockito
+* MockMvc
+* Testcontainers (Redis/Postgres)
+* WireMock (Keycloak/Lancelot stubs)
 
 ---
 
 # One-line answer
 
-Yes, we can fix duplicate `/auth/start` safely by locking only per browser session, so multiple users and different browsers are not affected.
+Yes — start with **AuthService + HandoffService + Controller tests**. Those will protect 80% of your flow immediately.
 
 ---
 
-# My honest advice
-
-For enterprise auth flows, this is standard defensive coding. Browsers do weird duplicate navigations.
-
----
-
-# If you’d like, I can give you an even cleaner **Redis distributed version for Kubernetes multi-pod Arthur Core**, which is better than HttpSession if you scale pods.
+# If you’d like, I can generate a **complete Arthur Core JUnit package structure with 15 test cases** based on the classes you built.
