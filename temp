@@ -1,322 +1,307 @@
-Yes — now is the right time.
-You’ve built enough flow that **JUnit tests will protect future refactors**.
-
-# Best approach now
-
-Write tests in layers:
-
-## Arthur Core
-
-1. `AuthService`
-2. `HandoffService`
-3. `AuthController`
-4. Redis services (light tests)
-
-## Lancelot
-
-1. `UserService`
-2. `AppConfigService`
-3. controller tests
-
-## Stub-server
-
-1. `PostLoginService`
-2. `PostLoginController`
-
----
-
-# Highest-value tests first (Arthur Core)
-
-These will give immediate value.
-
----
-
-# 1. `AuthServiceTest`
-
-Test:
-
-## startAuthentication()
-
-✅ loads app config
-✅ creates state
-✅ saves transaction
-✅ returns redirect URL
-
-## handleCallback()
-
-✅ valid state loads transaction
-✅ token exchange succeeds
-✅ claims extracted
-✅ getUserById called
-✅ session saved
-✅ handoff saved
-✅ redirect URL returned
-
-## negative cases
-
-❌ invalid state
-❌ token exchange fails
-❌ user not found
-
----
-
-# Example
-
-## `AuthServiceTest.java`
-
 ```java
-@ExtendWith(MockitoExtension.class)
-class AuthServiceTest {
+package com.bnpp.pf.arthur.core.controller;
 
-    @InjectMocks
+import com.bnpp.pf.arthur.core.model.AuthResult;
+import com.bnpp.pf.arthur.core.model.HandoffExchangeRequest;
+import com.bnpp.pf.arthur.core.model.HandoffExchangeResponse;
+import com.bnpp.pf.arthur.core.service.AuthService;
+import com.bnpp.pf.arthur.core.service.HandoffService;
+import jakarta.servlet.http.Cookie;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.ResponseEntity;
+
+import java.io.IOException;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class AuthControllerTest {
+
+    @Mock
     private AuthService authService;
 
     @Mock
-    private LancelotClient lancelotClient;
+    private HandoffService handoffService;
 
     @Mock
-    private RedisAuthTransactionService txService;
+    private HttpServletRequest request;
 
-    @Test
-    void shouldStartAuthentication() {
-
-        AppConfigResponse app = new AppConfigResponse();
-        app.setClientId("b2boost");
-        app.setIssuerUri("http://keycloak/realm");
-        app.setRedirectUri("http://callback");
-
-        when(lancelotClient.getApp("B2BOOST_BE")).thenReturn(app);
-
-        String redirect = authService.startAuthentication("B2BOOST_BE");
-
-        assertNotNull(redirect);
-        verify(txService).save(any());
-    }
-}
-```
-
----
-
-# 2. `HandoffServiceTest`
-
-Very important now.
-
-## Success case
-
-```text
-valid code
-→ load handoff
-→ load session
-→ delete handoff
-→ return response
-```
-
-## Failures
-
-❌ invalid code
-❌ expired code
-❌ reused code
-❌ missing session
-
----
-
-## Example
-
-```java
-@ExtendWith(MockitoExtension.class)
-class HandoffServiceTest {
+    @Mock
+    private HttpServletResponse response;
 
     @InjectMocks
-    private HandoffService service;
+    private AuthController authController;
 
-    @Mock
-    private RedisLoginHandoffService handoffRedis;
+    private AuthResult authResult;
 
-    @Mock
-    private RedisSessionService sessionRedis;
-
-    @Test
-    void shouldExchangeCode() {
-
-        LoginHandoff handoff = new LoginHandoff();
-        handoff.setSessionId("abc");
-
-        UserSession session = new UserSession();
-        session.setUserId("testuser");
-        session.setUsername("testuser");
-
-        when(handoffRedis.findByCode("123")).thenReturn(handoff);
-        when(sessionRedis.findBySessionId("abc")).thenReturn(session);
-
-        HandoffExchangeResponse response =
-                service.exchange("123");
-
-        assertEquals("testuser", response.getUserId());
-
-        verify(handoffRedis).delete("123");
+    @BeforeEach
+    void setup() {
+        authResult = new AuthResult();
+        authResult.setSessionId("SESSION123");
+        authResult.setPostLoginRedirectUrl("http://localhost:3000/home");
+        authResult.setHandoffCode("CODE999");
     }
-}
-```
-
----
-
-# 3. `AuthControllerTest`
-
-Use `MockMvc`
-
-Test:
-
-```text
-GET /auth/start?appId=B2BOOST_BE
-→ 302 redirect
-```
-
-```text
-GET /auth/callback?code=x&state=y
-→ 302 redirect to post-login
-```
-
----
-
-## Example
-
-```java
-@WebMvcTest(AuthController.class)
-class AuthControllerTest {
-
-    @Autowired
-    MockMvc mvc;
-
-    @MockBean
-    AuthService authService;
 
     @Test
-    void shouldRedirectStart() throws Exception {
-
+    void shouldStartAuthenticationUsingHeaderAppId() {
         when(authService.startAuthentication("B2BOOST_BE"))
-                .thenReturn("http://keycloak");
+                .thenReturn("http://ping/login");
 
-        mvc.perform(get("/auth/start")
-                .param("appId", "B2BOOST_BE"))
-           .andExpect(status().isFound());
+        ResponseEntity<Void> result =
+                authController.startAuthentication(
+                        "B2BOOST_BE",
+                        null,
+                        request
+                );
+
+        assertEquals(302, result.getStatusCode().value());
+        assertEquals("http://ping/login",
+                result.getHeaders().getLocation().toString());
+
+        verify(authService).startAuthentication("B2BOOST_BE");
     }
+
+    @Test
+    void shouldStartAuthenticationUsingQueryAppId() {
+        when(authService.startAuthentication("B2BOOST_NL"))
+                .thenReturn("http://ping/login");
+
+        ResponseEntity<Void> result =
+                authController.startAuthentication(
+                        null,
+                        "B2BOOST_NL",
+                        request
+                );
+
+        assertEquals(302, result.getStatusCode().value());
+        verify(authService).startAuthentication("B2BOOST_NL");
+    }
+
+    @Test
+    void shouldThrowExceptionWhenAppIdMissing() {
+        IllegalArgumentException ex =
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () -> authController.startAuthentication(
+                                null,
+                                null,
+                                request
+                        )
+                );
+
+        assertEquals(
+                "APP_ID header or appId query param is empty",
+                ex.getMessage()
+        );
+    }
+
+    @Test
+    void shouldHandleCallbackAndSetCookieAndRedirect()
+            throws IOException {
+
+        when(authService.handleCallback("abc123", "state999"))
+                .thenReturn(authResult);
+
+        authController.callback(
+                "abc123",
+                "state999",
+                response
+        );
+
+        ArgumentCaptor<Cookie> cookieCaptor =
+                ArgumentCaptor.forClass(Cookie.class);
+
+        verify(response).addCookie(cookieCaptor.capture());
+
+        Cookie cookie = cookieCaptor.getValue();
+
+        assertEquals("ARTHUR_SESSION", cookie.getName());
+        assertEquals("SESSION123", cookie.getValue());
+        assertTrue(cookie.isHttpOnly());
+        assertEquals("/", cookie.getPath());
+        assertEquals(3600, cookie.getMaxAge());
+
+        verify(response)
+                .sendRedirect(
+                        "http://localhost:3000/home?code=CODE999"
+                );
+    }
+
+    @Test
+    void shouldHandleCallbackWhenRedirectUrlAlreadyHasQueryParams()
+            throws IOException {
+
+        authResult.setPostLoginRedirectUrl(
+                "http://localhost:3000/home?lang=en"
+        );
+
+        when(authService.handleCallback("abc", "xyz"))
+                .thenReturn(authResult);
+
+        authController.callback(
+                "abc",
+                "xyz",
+                response
+        );
+
+        verify(response)
+                .sendRedirect(
+                        "http://localhost:3000/home?lang=en&code=CODE999"
+                );
+    }
+
+    @Test
+    void shouldExchangeHandoffCode() {
+
+        HandoffExchangeRequest request =
+                new HandoffExchangeRequest();
+
+        request.setCode("CODE123");
+
+        HandoffExchangeResponse serviceResponse =
+                new HandoffExchangeResponse();
+
+        when(handoffService.exchange("CODE123"))
+                .thenReturn(serviceResponse);
+
+        ResponseEntity<HandoffExchangeResponse> response =
+                authController.exchange(request);
+
+        assertEquals(200, response.getStatusCode().value());
+        assertEquals(serviceResponse, response.getBody());
+
+        verify(handoffService).exchange("CODE123");
+    }
+}
+```
+
+
+--------------------
+
+I can see this is the **callback + handoffExchange** part of `AuthController`, but I already covered most of it in the JUnit I sent.
+
+From this screenshot, I notice one **important update** missing from the previous test:
+
+```java id="s9ow8p"
+cookie.setDomain("kubernetes.localhost");
+cookie.setSecure(true);
+```
+
+So let me give you the **corrected callback test** with full assertions.
+
+---
+
+## Replace callback test with this improved version
+
+```java id="82qg0k"
+@Test
+void shouldHandleCallbackAndSetCookieAndRedirect()
+        throws IOException {
+
+    when(authService.handleCallback("abc123", "state999"))
+            .thenReturn(authResult);
+
+    authController.callback(
+            "abc123",
+            "state999",
+            response
+    );
+
+    ArgumentCaptor<Cookie> cookieCaptor =
+            ArgumentCaptor.forClass(Cookie.class);
+
+    verify(response).addCookie(cookieCaptor.capture());
+
+    Cookie cookie = cookieCaptor.getValue();
+
+    assertEquals("ARTHUR_SESSION", cookie.getName());
+    assertEquals("SESSION123", cookie.getValue());
+
+    assertTrue(cookie.isHttpOnly());
+    assertTrue(cookie.getSecure());
+
+    assertEquals("/", cookie.getPath());
+    assertEquals("kubernetes.localhost", cookie.getDomain());
+    assertEquals(3600, cookie.getMaxAge());
+
+    verify(response)
+            .sendRedirect(
+                    "http://localhost:3000/home?code=CODE999"
+            );
 }
 ```
 
 ---
 
-# 4. Stub-server tests
+# Also Add This Test
 
-## `PostLoginServiceTest`
+## Verify callback delegates to service
 
-Test:
+```java id="xkr0r0"
+@Test
+void shouldCallHandleCallbackService() throws IOException {
 
-* exchangeCode called
-* SecurityContext created
-* session stored
+    when(authService.handleCallback("CODE1", "STATE1"))
+            .thenReturn(authResult);
 
-## `PostLoginControllerTest`
+    authController.callback(
+            "CODE1",
+            "STATE1",
+            response
+    );
 
-```text
-GET /post-login?code=123
-→ redirects /B2BOOST
+    verify(authService)
+            .handleCallback("CODE1", "STATE1");
+}
 ```
 
 ---
 
-# 5. Lancelot tests
+# Controller Review (Senior Advice)
 
-## `UserServiceTest`
+Your controller is good, but move cookie creation to helper/service:
 
-```text
-getUserById(testuser)
-→ returns mapped response
+Instead of:
+
+```java id="fs2r1l"
+Cookie cookie = new Cookie(...)
+cookie.set...
 ```
-
-This protects your snake_case / camelCase issues.
-
----
-
-# Dependencies
-
-## Maven
-
-```xml
-<dependency>
-  <groupId>org.springframework.boot</groupId>
-  <artifactId>spring-boot-starter-test</artifactId>
-  <scope>test</scope>
-</dependency>
-
-<dependency>
-  <groupId>org.mockito</groupId>
-  <artifactId>mockito-junit-jupiter</artifactId>
-  <scope>test</scope>
-</dependency>
-```
-
----
-
-# Best priority order (my recommendation)
-
-## Phase 1 (today)
-
-1. `HandoffServiceTest`
-2. `AuthServiceTest`
-3. `AuthControllerTest`
-
-## Phase 2
-
-4. Stub-server login tests
-5. Lancelot mapping tests
-
----
-
-# What gives biggest ROI
-
-Right now your risky areas are:
-
-## Handoff flow
-
-code/session/expiry
-
-## Callback flow
-
-many integrations
-
-## DTO mapping
-
-already caused bugs
-
-So test those first.
-
----
-
-# My honest suggestion
-
-Skip Redis integration tests for now.
-Mock Redis services first.
-
-Later add Testcontainers Redis.
-
----
-
-# If you want production-grade suite later
 
 Use:
 
-* JUnit5
-* Mockito
-* MockMvc
-* Testcontainers (Redis/Postgres)
-* WireMock (Keycloak/Lancelot stubs)
+```java id="gh7aq0"
+cookieService.createSessionCookie(...)
+```
+
+Cleaner + easier testing.
 
 ---
 
-# One-line answer
+# Next Best Class to Test
 
-Yes — start with **AuthService + HandoffService + Controller tests**. Those will protect 80% of your flow immediately.
+Send:
 
----
+### `AuthService.java`
 
-# If you’d like, I can generate a **complete Arthur Core JUnit package structure with 15 test cases** based on the classes you built.
+That is the most critical file now.
+
+I’ll write enterprise-grade JUnits for:
+
+* startAuthentication()
+* handleCallback()
+* Redis state validation
+* token exchange
+* handoff code generation
+* failures
+
+Send it next.
