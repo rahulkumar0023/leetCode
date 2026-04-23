@@ -1,457 +1,242 @@
-Yes — add logs in all 3 apps. The best setup is:
+Yes — we can make `/auth/start` duplicate-safe **without breaking multiple users or multiple browsers**.
 
-* **business flow logs** you add manually
-* **Spring Security / WebClient debug logs** from config
-* **request correlation id** so one login flow is easy to follow
+The trick is:
 
-Here’s the clean version.
+👉 lock only **per browser session**, not globally.
 
-# 1. Add one flow id across the request
+So:
 
-Use one id like `flowId` or `traceId` and log it everywhere.
-
-## Arthur Core
-
-At `/auth/start`, generate one:
-
-```java
-String flowId = UUID.randomUUID().toString();
-MDC.put("flowId", flowId);
-log.info("Auth flow started for appId={}", appId);
-```
-
-Store it in `AuthTransaction` too:
-
-```java
-transaction.setFlowId(flowId);
-```
-
-Then in callback, restore it:
-
-```java
-MDC.put("flowId", tx.getFlowId());
-log.info("Auth callback received");
-```
-
-Also copy it into:
-
-* `UserSession`
-* `LoginHandoff`
-
-Then when stub-server calls Arthur Core exchange, pass it as header too.
+* User A browser works normally ✅
+* User B browser works normally ✅
+* 100 users same time works ✅
+* only duplicate rapid clicks from the **same browser session** are ignored/reused ✅
 
 ---
 
-# 2. Add business logs in Arthur Core
+# Best Solution: Session-scoped auth pending guard
 
-These are the most useful places.
+Use the existing `HttpSession`.
 
-## In `/auth/start`
+Each browser gets its own session cookie.
 
-Log:
-
-* appId
-* redirectUri
-* issuerUri
-* generated state
-* PKCE generated
-* auth transaction saved
-
-Example:
-
-```java
-log.info("Starting authentication for appId={}", appId);
-log.info("Loaded app config redirectUri={}, issuerUri={}", appConfig.getRedirectUri(), appConfig.getIssuerUri());
-log.info("Generated state={}, nonce={}", state, nonce);
-log.info("Saved auth transaction for state={}", state);
-log.info("Redirecting to IdP");
-```
-
-## In `/auth/callback`
-
-Log:
-
-* code received
-* state received
-* auth transaction found
-* token exchange started/succeeded
-* claims extracted
-* user id used for Lancelot call
-* user returned from Lancelot
-* session created
-* handoff created
-* redirect target
-
-Example:
-
-```java
-log.info("Callback received with state={}", state);
-log.info("Auth transaction found for appId={}", tx.getAppId());
-log.info("Exchanging code for token");
-log.info("Token exchange succeeded");
-log.info("JWT claims extracted subject={}, preferredUsername={}", claims.getSub(), claims.getPreferredUsername());
-log.info("Calling Lancelot getUserById userId={}", userId);
-log.info("Loaded user from Lancelot userId={}, username={}", user.getUserId(), user.getUsername());
-log.info("Arthur session created sessionId={}", session.getSessionId());
-log.info("Login handoff created code={} for appId={}", handoffCode, tx.getAppId());
-log.info("Redirecting to postLoginRedirectUrl={}", appConfig.getPostLoginRedirectUrl());
-```
-
-## In `/auth/handoff/exchange`
-
-Log:
-
-* code received
-* handoff found
-* session found
-* handoff invalidated
-* response sent
-
-```java
-log.info("Handoff exchange requested for code={}", code);
-log.info("Handoff found for sessionId={}", handoff.getSessionId());
-log.info("Arthur session loaded userId={}, appId={}", session.getUserId(), session.getAppId());
-log.info("Handoff code invalidated");
-log.info("Returning handoff exchange response for userId={}", session.getUserId());
-```
-
-## In Redis services
-
-Log:
-
-* save key
-* lookup key
-* delete key
-* ttl if useful
+So duplicates are isolated naturally.
 
 ---
 
-# 3. Add business logs in Lancelot
+# How it works
 
-## In `getApp`
+When `/auth/start` is called:
 
-Log:
+## First request from browser
 
-* appId requested
-* app found
-* redirectUri / postLoginRedirectUrl / issuerUri
-
-```java
-log.info("getApp called with appId={}", appId);
-log.info("Returning app config appId={}, redirectUri={}, postLoginRedirectUrl={}",
-        app.getAppId(), app.getRedirectUri(), app.getPostLoginRedirectUrl());
+```text id="th3a9o"
+No pending auth
+→ create transaction
+→ mark AUTH_PENDING
+→ redirect to Keycloak
 ```
 
-## In `getUserById`
+## Second duplicate request 300ms later (same browser)
 
-Log:
-
-* userId requested
-* DB row found
-* response fields returned
-
-```java
-log.info("getUserById called with userId={}", userId);
-log.info("User entity found userId={}, username={}", user.getUserId(), user.getUsername());
-log.info("Returning user response userId={}, username={}", response.getUserId(), response.getUsername());
+```text id="40lv7n"
+AUTH_PENDING exists
+→ reuse existing redirect OR ignore
 ```
 
-This is especially useful because you already had mapping issues.
+## Another user in another browser
 
----
+Different session:
 
-# 4. Add business logs in stub-server
-
-## In `/post-login`
-
-Log:
-
-* code received
-* Arthur exchange start
-* Arthur exchange success
-* local session/security context created
-* redirect to `/B2BOOST`
-
-```java
-log.info("Received /post-login with code={}", code);
-log.info("Calling Arthur Core handoff exchange");
-log.info("Handoff exchange succeeded for userId={}, username={}", login.getUserId(), login.getUsername());
-log.info("Security context created for username={}", login.getUsername());
-log.info("Redirecting to {}", request.getContextPath() + "/B2BOOST");
-```
-
-## In homepage controller
-
-Log authenticated principal:
-
-```java
-log.info("Accessing B2BOOST with principal={}", authentication.getName());
+```text id="f3pj76"
+No pending auth
+→ proceeds normally
 ```
 
 ---
 
-# 5. Enable Spring Security logs
+# Will it break multiple users?
 
-In each app’s `application.yml`, add:
+## NO
 
-```yaml
-logging:
-  level:
-    org.springframework.security: DEBUG
+Because session storage is separate per browser cookie.
+
+User A:
+
+```text id="e5x2mu"
+session=ABC123
 ```
 
-If you want very detailed logs:
+User B:
 
-```yaml
-logging:
-  level:
-    org.springframework.security: TRACE
+```text id="nyfvg0"
+session=XYZ999
 ```
 
-Use `TRACE` only temporarily. It gets noisy.
-
-This is useful in:
-
-* **Arthur Core**
-* **stub-server**
-
-Usually not needed in Lancelot unless it also has security.
+Each gets own lock.
 
 ---
 
-# 6. Enable WebClient / HTTP client logs
+# Implementation (Recommended)
 
-For backend-to-backend calls.
-
-## Arthur Core
-
-Useful for:
-
-* Keycloak discovery
-* token exchange
-* Lancelot calls
-
-## stub-server
-
-Useful for:
-
-* Arthur handoff exchange
-
-In `application.yml`:
-
-```yaml
-logging:
-  level:
-    org.springframework.web.reactive.function.client: DEBUG
-    reactor.netty.http.client: DEBUG
-```
-
-This shows request/response activity, but not always body content.
-
----
-
-# 7. Add request logging filter
-
-In all apps, add a simple servlet filter to log incoming requests.
+## In `startAuthentication(...)`
 
 ```java
-@Component
-@Slf4j
-public class RequestLoggingFilter extends OncePerRequestFilter {
+@GetMapping("/start")
+public ResponseEntity<Void> startAuthentication(
+        @RequestHeader(value = "APP_ID", required = false) String headerAppId,
+        @RequestParam(value = "appId", required = false) String queryAppId,
+        HttpServletRequest request
+) {
 
-    @Override
-    protected void doFilterInternal(
-            HttpServletRequest request,
-            HttpServletResponse response,
-            FilterChain filterChain
-    ) throws ServletException, IOException {
+    String appId = headerAppId != null && !headerAppId.isBlank()
+            ? headerAppId
+            : queryAppId;
 
-        log.info("Incoming request method={} uri={} query={}",
-                request.getMethod(),
-                request.getRequestURI(),
-                request.getQueryString());
+    HttpSession session = request.getSession(true);
 
-        filterChain.doFilter(request, response);
+    String pendingRedirect =
+            (String) session.getAttribute("AUTH_PENDING_REDIRECT");
 
-        log.info("Response status={} for uri={}", response.getStatus(), request.getRequestURI());
-    }
-}
-```
+    Long pendingTime =
+            (Long) session.getAttribute("AUTH_PENDING_TIME");
 
-Put this in:
+    // if duplicate within 10 sec, reuse existing redirect
+    if (pendingRedirect != null && pendingTime != null) {
 
-* Arthur Core
-* Lancelot
-* stub-server
+        long age = System.currentTimeMillis() - pendingTime;
 
-Very useful.
-
----
-
-# 8. Add SecurityContext logger in stub-server
-
-To prove login worked there.
-
-```java
-@Component
-@Slf4j
-public class SecurityContextLoggingFilter extends OncePerRequestFilter {
-
-    @Override
-    protected void doFilterInternal(
-            HttpServletRequest request,
-            HttpServletResponse response,
-            FilterChain filterChain
-    ) throws ServletException, IOException {
-
-        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
-
-        if (auth != null) {
-            log.info("SecurityContext authentication name={}, authorities={}",
-                    auth.getName(), auth.getAuthorities());
-        } else {
-            log.info("SecurityContext is empty");
+        if (age < 10000) {
+            log.info("Duplicate auth/start detected, reusing redirect");
+            HttpHeaders headers = new HttpHeaders();
+            headers.setLocation(URI.create(pendingRedirect));
+            return new ResponseEntity<>(headers, HttpStatus.FOUND);
         }
-
-        filterChain.doFilter(request, response);
     }
+
+    String redirectUrl = authService.startAuthentication(appId);
+
+    session.setAttribute("AUTH_PENDING_REDIRECT", redirectUrl);
+    session.setAttribute("AUTH_PENDING_TIME", System.currentTimeMillis());
+
+    HttpHeaders headers = new HttpHeaders();
+    headers.setLocation(URI.create(redirectUrl));
+    return new ResponseEntity<>(headers, HttpStatus.FOUND);
 }
 ```
 
-This is most useful in **stub-server**.
-
 ---
 
-# 9. Use MDC in log pattern
+# Clear it after callback
 
-In `application.yml` for all apps:
-
-```yaml
-logging:
-  pattern:
-    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} [flowId=%X{flowId}] - %msg%n"
-```
-
-Then every log line shows:
-
-```text
-[flowId=abc-123]
-```
-
-That makes the whole login chain readable.
-
----
-
-# 10. Good logger levels by app
-
-## Arthur Core
-
-Use:
-
-* your package: `DEBUG`
-* Spring Security: `DEBUG`
-* WebClient/reactor: `DEBUG`
-
-```yaml
-logging:
-  level:
-    com.yourcompany.arthurcore: DEBUG
-    org.springframework.security: DEBUG
-    org.springframework.web.reactive.function.client: DEBUG
-    reactor.netty.http.client: DEBUG
-```
-
-## Lancelot
-
-Use:
-
-* your package: `DEBUG`
-* Spring web/jpa if needed
-
-```yaml
-logging:
-  level:
-    com.yourcompany.lancelot: DEBUG
-    org.springframework.web: INFO
-    org.hibernate.SQL: DEBUG
-```
-
-If you want SQL params too:
-
-```yaml
-logging:
-  level:
-    org.hibernate.orm.jdbc.bind: TRACE
-```
-
-## stub-server
-
-Use:
-
-* your package: `DEBUG`
-* Spring Security: `DEBUG`
-* WebClient/reactor: `DEBUG`
-
-```yaml
-logging:
-  level:
-    com.yourcompany.stubserver: DEBUG
-    org.springframework.security: DEBUG
-    org.springframework.web.reactive.function.client: DEBUG
-    reactor.netty.http.client: DEBUG
-```
-
----
-
-# 11. What not to log
-
-Do **not** log:
-
-* access token
-* refresh token
-* client secret
-* full JWT
-* passwords
-* internal secret headers
-
-Safe to log:
-
-* appId
-* userId
-* username
-* state/code presence
-* sessionId partially
-* handoff code partially
-
-For example:
+In `/callback`
 
 ```java
-log.info("Created session sessionId={}", sessionId.substring(0, 8));
+HttpSession session = request.getSession(false);
+
+if (session != null) {
+    session.removeAttribute("AUTH_PENDING_REDIRECT");
+    session.removeAttribute("AUTH_PENDING_TIME");
+}
 ```
+
+This resets for future logins.
 
 ---
 
-# 12. Smallest useful set to add first
+# Why this is safe
 
-If you want the fastest path, add just these:
+## Same browser accidental double hit
 
-## Arthur Core
+Second request reuses same redirect.
 
-* logs in `/auth/start`
-* logs in `/auth/callback`
-* logs in `/auth/handoff/exchange`
+## Different browser / user
 
-## Lancelot
+Different session, unaffected.
 
-* logs in `getApp`
-* logs in `getUserById`
+## Real login again later
 
-## stub-server
+After callback, lock cleared.
 
-* logs in `/post-login`
-* logs in homepage
-* `org.springframework.security=DEBUG`
+---
 
-That alone will make the full flow readable.
+# Better than global Redis lock
 
-If you want, I can give you a **copy-paste logging checklist per class** next.
+Do **NOT** lock by appId globally.
+
+Bad:
+
+```text id="gn7n9g"
+B2BOOST_BE locked
+```
+
+That would break many users.
+
+---
+
+# If no session yet?
+
+Calling:
+
+```java
+request.getSession(true)
+```
+
+creates one.
+
+Perfectly fine for auth start.
+
+---
+
+# Even stronger version (recommended)
+
+Instead of storing redirect URL only, store generated `state`.
+
+Then if duplicate comes, reuse exact pending state transaction.
+
+---
+
+# What if user opens two tabs intentionally?
+
+Same browser session usually same cookie.
+
+Then second tab within 10 sec reuses same auth request.
+
+This is usually acceptable.
+
+If you want separate tabs independent, we can use a **tab token** later.
+
+---
+
+# My recommendation for your case
+
+Use:
+
+## 10-second duplicate window
+
+Enough to catch browser double requests.
+
+---
+
+# Logs to add
+
+```java
+log.info("Session={} pending auth age={}ms", session.getId(), age);
+```
+
+You’ll see duplicate suppression clearly.
+
+---
+
+# One-line answer
+
+Yes, we can fix duplicate `/auth/start` safely by locking only per browser session, so multiple users and different browsers are not affected.
+
+---
+
+# My honest advice
+
+For enterprise auth flows, this is standard defensive coding. Browsers do weird duplicate navigations.
+
+---
+
+# If you’d like, I can give you an even cleaner **Redis distributed version for Kubernetes multi-pod Arthur Core**, which is better than HttpSession if you scale pods.
