@@ -1,81 +1,59 @@
-```java id="jwt21a"
-@ExtendWith(MockitoExtension.class)
-class JwtServiceTest {
+```java
+class PkceServiceTest {
 
-    @Mock
-    private JwtDecoder jwtDecoder;
-
-    @Mock
-    private Jwt jwt;
-
-    private JwtService jwtService;
-
-    @BeforeEach
-    void setup() {
-        jwtService = new JwtService(jwtDecoder);
-    }
+    private final PkceService pkceService = new PkceService();
 
     @Test
-    void shouldExtractAllClaims() {
-        when(jwtDecoder.decode("TOKEN123"))
-                .thenReturn(jwt);
-
-        when(jwt.getSubject()).thenReturn("user-001");
-        when(jwt.getClaimAsString("preferred_username"))
-                .thenReturn("rahul");
-        when(jwt.getClaimAsString("email"))
-                .thenReturn("rahul@test.com");
-        when(jwt.getClaimAsString("given_name"))
-                .thenReturn("Rahul");
-        when(jwt.getClaimAsString("family_name"))
-                .thenReturn("Kumar");
-
-        JwtUserClaims result =
-                jwtService.extractClaims("TOKEN123");
+    void shouldGenerateCodeChallenge() {
+        String result =
+                pkceService.generateCodeChallenge("VERIFIER123");
 
         assertNotNull(result);
-        assertEquals("user-001", result.getSub());
-        assertEquals("rahul", result.getPreferredUsername());
-        assertEquals("rahul@test.com", result.getEmail());
-        assertEquals("Rahul", result.getGivenName());
-        assertEquals("Kumar", result.getFamilyName());
+        assertFalse(result.isBlank());
+
+        // Base64 URL-safe, no padding
+        assertFalse(result.contains("="));
+        assertFalse(result.contains("+"));
+        assertFalse(result.contains("/"));
     }
 
     @Test
-    void shouldAllowMissingOptionalClaims() {
-        when(jwtDecoder.decode("TOKEN123"))
-                .thenReturn(jwt);
+    void shouldGenerateSameChallengeForSameVerifier() {
+        String first =
+                pkceService.generateCodeChallenge("VERIFIER123");
 
-        when(jwt.getSubject()).thenReturn("user-001");
-        when(jwt.getClaimAsString("preferred_username"))
-                .thenReturn(null);
-        when(jwt.getClaimAsString("email"))
-                .thenReturn(null);
-        when(jwt.getClaimAsString("given_name"))
-                .thenReturn(null);
-        when(jwt.getClaimAsString("family_name"))
-                .thenReturn(null);
+        String second =
+                pkceService.generateCodeChallenge("VERIFIER123");
 
-        JwtUserClaims result =
-                jwtService.extractClaims("TOKEN123");
-
-        assertNotNull(result);
-        assertEquals("user-001", result.getSub());
-        assertNull(result.getPreferredUsername());
-        assertNull(result.getEmail());
-        assertNull(result.getGivenName());
-        assertNull(result.getFamilyName());
+        assertEquals(first, second);
     }
 
     @Test
-    void shouldThrowWhenTokenInvalid() {
-        when(jwtDecoder.decode("BAD_TOKEN"))
-                .thenThrow(new JwtException("Invalid token"));
-
-        assertThrows(
-                JwtException.class,
-                () -> jwtService.extractClaims("BAD_TOKEN")
+    void shouldThrowWhenVerifierIsNull() {
+        IllegalArgumentException ex = assertThrows(
+                IllegalArgumentException.class,
+                () -> pkceService.generateCodeChallenge(null)
         );
+
+        assertEquals("codeVerifier must not be blank", ex.getMessage());
+    }
+
+    @Test
+    void shouldThrowWhenVerifierIsBlank() {
+        IllegalArgumentException ex = assertThrows(
+                IllegalArgumentException.class,
+                () -> pkceService.generateCodeChallenge(" ")
+        );
+
+        assertEquals("codeVerifier must not be blank", ex.getMessage());
     }
 }
+```
+
+Imports:
+
+```java
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.*;
 ```
