@@ -1,126 +1,97 @@
+Yes — cover only `getApp`, `getUserById`, and validation.
+
 ```java
 @ExtendWith(MockitoExtension.class)
-class HandoffServiceTest {
+class LancelotClientTest {
 
     @Mock
-    private RedisLoginHandoffService redisLoginHandoffService;
+    private WebClient webClient;
 
     @Mock
-    private RedisSessionService redisSessionService;
+    private WebClient.RequestHeadersUriSpec requestHeadersUriSpec;
+
+    @Mock
+    private WebClient.RequestHeadersSpec requestHeadersSpec;
+
+    @Mock
+    private WebClient.ResponseSpec responseSpec;
 
     @InjectMocks
-    private HandoffService handoffService;
+    private LancelotClient lancelotClient;
 
-    @Test
-    void shouldExchangeHandoffCodeSuccessfully() {
-        LoginHandoff handoff = new LoginHandoff();
-        handoff.setCode("CODE123");
-        handoff.setSessionId("SESSION123");
-        handoff.setUsed(false);
-        handoff.setExpiresAt(Instant.now().plusSeconds(60));
-
-        UserSession session = new UserSession();
-        session.setUserId("testuser");
-        session.setUsername("testuser");
-        session.setEmail("testuser@test.local");
-        session.setRoles(List.of("SELLER"));
-        session.setAppId("B2BOOST_BE");
-
-        when(redisLoginHandoffService.findByCode("CODE123"))
-                .thenReturn(handoff);
-
-        when(redisSessionService.findBySessionId("SESSION123"))
-                .thenReturn(session);
-
-        HandoffExchangeResponse response =
-                handoffService.exchange("CODE123");
-
-        assertEquals("testuser", response.getUserId());
-        assertEquals("testuser", response.getUsername());
-        assertEquals("testuser@test.local", response.getEmail());
-        assertEquals(List.of("SELLER"), response.getRoles());
-        assertEquals("B2BOOST_BE", response.getAppId());
-
-        verify(redisLoginHandoffService).delete("CODE123");
+    @BeforeEach
+    void setup() {
+        ReflectionTestUtils.setField(
+                lancelotClient,
+                "baseUrl",
+                "http://lancelot"
+        );
     }
 
     @Test
-    void shouldThrowWhenHandoffCodeInvalidOrExpired() {
-        when(redisLoginHandoffService.findByCode("BAD_CODE"))
-                .thenReturn(null);
+    void shouldGetAppSuccessfully() {
+        AppConfigResponse appConfig = new AppConfigResponse();
+        appConfig.setAppId("B2BOOST_BE");
+        appConfig.setClientId("client-1");
 
-        IllegalStateException ex = assertThrows(
-                IllegalStateException.class,
-                () -> handoffService.exchange("BAD_CODE")
-        );
+        when(webClient.get()).thenReturn(requestHeadersUriSpec);
+        when(requestHeadersUriSpec.uri(
+                "http://lancelot/apps/{appId}",
+                "B2BOOST_BE"
+        )).thenReturn(requestHeadersSpec);
+        when(requestHeadersSpec.retrieve()).thenReturn(responseSpec);
+        when(responseSpec.bodyToMono(AppConfigResponse.class))
+                .thenReturn(Mono.just(appConfig));
 
-        assertEquals("Invalid or expired handoff code", ex.getMessage());
-        verify(redisSessionService, never()).findBySessionId(anyString());
+        AppConfigResponse result =
+                lancelotClient.getApp("B2BOOST_BE");
+
+        assertEquals("B2BOOST_BE", result.getAppId());
+        assertEquals("client-1", result.getClientId());
     }
 
     @Test
-    void shouldThrowWhenHandoffCodeAlreadyUsed() {
-        LoginHandoff handoff = new LoginHandoff();
-        handoff.setCode("CODE123");
-        handoff.setSessionId("SESSION123");
-        handoff.setUsed(true);
+    void shouldGetUserByIdSuccessfully() {
+        UserResponse user = new UserResponse();
+        user.setUserId("testuser");
+        user.setUsername("testuser");
 
-        when(redisLoginHandoffService.findByCode("CODE123"))
-                .thenReturn(handoff);
+        when(webClient.get()).thenReturn(requestHeadersUriSpec);
+        when(requestHeadersUriSpec.uri(
+                "http://lancelot/users/{userId}",
+                "testuser"
+        )).thenReturn(requestHeadersSpec);
+        when(requestHeadersSpec.retrieve()).thenReturn(responseSpec);
+        when(responseSpec.bodyToMono(UserResponse.class))
+                .thenReturn(Mono.just(user));
 
-        IllegalStateException ex = assertThrows(
-                IllegalStateException.class,
-                () -> handoffService.exchange("CODE123")
-        );
+        UserResponse result =
+                lancelotClient.getUserById("testuser");
 
-        assertEquals("Handoff code already used", ex.getMessage());
-        verify(redisSessionService, never()).findBySessionId(anyString());
+        assertEquals("testuser", result.getUserId());
+        assertEquals("testuser", result.getUsername());
     }
 
     @Test
-    void shouldThrowAndDeleteWhenHandoffCodeExpired() {
-        LoginHandoff handoff = new LoginHandoff();
-        handoff.setCode("CODE123");
-        handoff.setSessionId("SESSION123");
-        handoff.setUsed(false);
-        handoff.setExpiresAt(Instant.now().minusSeconds(60));
-
-        when(redisLoginHandoffService.findByCode("CODE123"))
-                .thenReturn(handoff);
-
-        IllegalStateException ex = assertThrows(
-                IllegalStateException.class,
-                () -> handoffService.exchange("CODE123")
+    void shouldThrowWhenGetAppAppIdIsBlank() {
+        IllegalArgumentException ex = assertThrows(
+                IllegalArgumentException.class,
+                () -> lancelotClient.getApp(" ")
         );
 
-        assertEquals("Handoff code expired", ex.getMessage());
-
-        verify(redisLoginHandoffService).delete("CODE123");
-        verify(redisSessionService, never()).findBySessionId(anyString());
+        assertEquals("appId must not be blank", ex.getMessage());
+        verifyNoInteractions(webClient);
     }
 
     @Test
-    void shouldThrowAndDeleteWhenSessionNotFound() {
-        LoginHandoff handoff = new LoginHandoff();
-        handoff.setCode("CODE123");
-        handoff.setSessionId("SESSION123");
-        handoff.setUsed(false);
-        handoff.setExpiresAt(Instant.now().plusSeconds(60));
-
-        when(redisLoginHandoffService.findByCode("CODE123"))
-                .thenReturn(handoff);
-
-        when(redisSessionService.findBySessionId("SESSION123"))
-                .thenReturn(null);
-
-        IllegalStateException ex = assertThrows(
-                IllegalStateException.class,
-                () -> handoffService.exchange("CODE123")
+    void shouldThrowWhenGetAppAppIdIsNull() {
+        IllegalArgumentException ex = assertThrows(
+                IllegalArgumentException.class,
+                () -> lancelotClient.getApp(null)
         );
 
-        assertEquals("Session not found for handoff code", ex.getMessage());
-
-        verify(redisLoginHandoffService).delete("CODE123");
+        assertEquals("appId must not be blank", ex.getMessage());
+        verifyNoInteractions(webClient);
     }
 }
 ```
@@ -128,15 +99,30 @@ class HandoffServiceTest {
 Imports:
 
 ```java
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-
-import java.time.Instant;
-import java.util.List;
+import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Mono;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
+```
+
+One small issue in your production code: `getUserById()` can throw `NullPointerException` here if Lancelot returns null:
+
+```java
+log.info("user id : {}", userResponse.getUserId());
+```
+
+Safer:
+
+```java
+if (userResponse == null) {
+    throw new IllegalStateException("User not found: " + userId);
+}
 ```
