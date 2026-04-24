@@ -1,153 +1,81 @@
-Yes. Start with these **AuthService unit tests** first.
-
 ```java
-@ExtendWith(MockitoExtension.class)
-class AuthServiceTest {
+@Test
+void shouldHandleCallbackSuccessfully() {
 
-    @Mock private LancelotClient lancelotClient;
-    @Mock private OidcDiscoveryClient oidcDiscoveryClient;
-    @Mock private RandomValueGenerator randomValueGenerator;
-    @Mock private PkceService pkceService;
-    @Mock private RedisAuthTransactionService redisAuthTransactionService;
-    @Mock private RedisLoginHandoffService redisLoginHandoffService;
-    @Mock private WebClient webClient;
-    @Mock private JwtService jwtService;
-    @Mock private RedisSessionService redisSessionService;
+    AuthTransaction tx = new AuthTransaction();
+    tx.setAppId("B2BOOST_BE");
+    tx.setRedirectUri("http://arthur/callback");
+    tx.setCodeVerifier("VERIFIER123");
 
-    @InjectMocks
-    private AuthService authService;
+    AppConfigResponse appConfig = validAppConfig();
 
-    @Test
-    void shouldThrowWhenAppIdBlank() {
-        IllegalArgumentException ex = assertThrows(
-                IllegalArgumentException.class,
-                () -> authService.startAuthentication(" ")
-        );
+    OidcMetadata metadata = new OidcMetadata();
+    metadata.setTokenEndpoint(
+            "http://keycloak.kubernetes.localhost/token"
+    );
 
-        assertEquals("APP_ID must not be blank", ex.getMessage());
-        verifyNoInteractions(lancelotClient);
-    }
+    Map<String, Object> tokenResponse = new HashMap<>();
+    tokenResponse.put("access_token", "ACCESS123");
+    tokenResponse.put("id_token", "ID123");
+    tokenResponse.put("refresh_token", "REFRESH123");
 
-    @Test
-    void shouldThrowWhenAppConfigNotFound() {
-        when(lancelotClient.getApp("B2BOOST_BE")).thenReturn(null);
+    JwtUserClaims claims = new JwtUserClaims();
+    claims.setSub("user-1");
+    claims.setPreferredUsername("rahul");
 
-        IllegalStateException ex = assertThrows(
-                IllegalStateException.class,
-                () -> authService.startAuthentication("B2BOOST_BE")
-        );
+    UserResponse user = new UserResponse();
+    user.setUserId("user-1");
+    user.setUsername("rahul");
+    user.setRoles(List.of("ADMIN"));
 
-        assertEquals("App config not found", ex.getMessage());
-    }
+    when(redisAuthTransactionService.findByState("STATE123"))
+            .thenReturn(tx);
 
-    @Test
-    void shouldThrowWhenAppIsDisabled() {
-        AppConfigResponse appConfig = validAppConfig();
-        appConfig.setEnabled(false);
+    when(lancelotClient.getApp("B2BOOST_BE"))
+            .thenReturn(appConfig);
 
-        when(lancelotClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
+    when(oidcDiscoveryClient.loadMetadata("http://issuer"))
+            .thenReturn(metadata);
 
-        IllegalStateException ex = assertThrows(
-                IllegalStateException.class,
-                () -> authService.startAuthentication("B2BOOST_BE")
-        );
+    /*
+      Spy AuthService so we can bypass WebClient chain
+    */
+    AuthService spyService = spy(authService);
 
-        assertEquals("App is disabled", ex.getMessage());
-    }
+    doReturn(tokenResponse)
+            .when(spyService)
+            .exchangeToken(
+                    eq("CODE123"),
+                    anyString(),
+                    eq(appConfig),
+                    eq(tx)
+            );
 
-    @Test
-    void shouldStartAuthenticationSuccessfully() {
-        AppConfigResponse appConfig = validAppConfig();
-        OidcMetadata metadata = validMetadata();
+    when(jwtService.extractClaims("ID123"))
+            .thenReturn(claims);
 
-        when(lancelotClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
-        when(oidcDiscoveryClient.loadMetadata("http://issuer")).thenReturn(metadata);
+    when(lancelotClient.getUserById("rahul"))
+            .thenReturn(user);
 
-        when(randomValueGenerator.generate())
-                .thenReturn("STATE123")
-                .thenReturn("NONCE123")
-                .thenReturn("VERIFIER123");
+    AuthResult result =
+            spyService.handleCallback(
+                    "CODE123",
+                    "STATE123"
+            );
 
-        when(pkceService.generateCodeChallenge("VERIFIER123"))
-                .thenReturn("CHALLENGE123");
+    assertNotNull(result);
+    assertNotNull(result.getSessionId());
+    assertEquals(
+            "http://frontend/home",
+            result.getPostLoginRedirectUrl()
+    );
+    assertNotNull(result.getHandoffCode());
 
-        String redirectUrl = authService.startAuthentication("B2BOOST_BE");
+    verify(redisSessionService).save(any(UserSession.class));
+    verify(redisLoginHandoffService)
+            .save(any(LoginHandoff.class));
 
-        assertTrue(redirectUrl.contains("http://keycloak/auth"));
-        assertTrue(redirectUrl.contains("client_id=client-1"));
-        assertTrue(redirectUrl.contains("response_type=code"));
-        assertTrue(redirectUrl.contains("state=STATE123"));
-        assertTrue(redirectUrl.contains("nonce=NONCE123"));
-        assertTrue(redirectUrl.contains("code_challenge=CHALLENGE123"));
-        assertTrue(redirectUrl.contains("code_challenge_method=S256"));
-
-        ArgumentCaptor<AuthTransaction> captor =
-                ArgumentCaptor.forClass(AuthTransaction.class);
-
-        verify(redisAuthTransactionService).save(captor.capture());
-
-        AuthTransaction tx = captor.getValue();
-
-        assertEquals("STATE123", tx.getState());
-        assertEquals("NONCE123", tx.getNonce());
-        assertEquals("VERIFIER123", tx.getCodeVerifier());
-        assertEquals("B2BOOST_BE", tx.getAppId());
-        assertEquals("http://arthur/callback", tx.getRedirectUri());
-        assertEquals("http://frontend/home", tx.getPostLoginRedirectUrl());
-    }
-
-    @Test
-    void shouldThrowWhenCallbackStateInvalid() {
-        when(redisAuthTransactionService.findByState("BAD_STATE"))
-                .thenReturn(null);
-
-        IllegalStateException ex = assertThrows(
-                IllegalStateException.class,
-                () -> authService.handleCallback("CODE123", "BAD_STATE")
-        );
-
-        assertEquals("Invalid or expired state", ex.getMessage());
-        verify(redisAuthTransactionService).findByState("BAD_STATE");
-        verifyNoInteractions(redisSessionService);
-    }
-
-    private AppConfigResponse validAppConfig() {
-        AppConfigResponse appConfig = new AppConfigResponse();
-        appConfig.setAppId("B2BOOST_BE");
-        appConfig.setEnabled(true);
-        appConfig.setClientId("client-1");
-        appConfig.setClientSecret("secret-1");
-        appConfig.setIssuerUri("http://issuer");
-        appConfig.setRedirectUri("http://arthur/callback");
-        appConfig.setPostLoginRedirectUrl("http://frontend/home");
-        appConfig.setScopes(List.of("openid", "profile", "email"));
-        return appConfig;
-    }
-
-    private OidcMetadata validMetadata() {
-        OidcMetadata metadata = new OidcMetadata();
-        metadata.setAuthorizationEndpoint("http://keycloak/auth");
-        metadata.setTokenEndpoint("http://keycloak/token");
-        return metadata;
-    }
+    verify(redisAuthTransactionService)
+            .delete("STATE123");
 }
 ```
-
-Imports you’ll need:
-
-```java
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.ArgumentCaptor;
-import org.mockito.InjectMocks;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.web.reactive.function.client.WebClient;
-
-import java.util.List;
-
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
-```
-
-For `handleCallback` success test, your current `exchangeToken()` uses a chained `WebClient`, so I’d either refactor token exchange into a separate `TokenClient` or we mock the full WebClient chain next.
