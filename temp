@@ -1,127 +1,142 @@
-Yes. To cover those red lines, add these tests.
-
-## 1. Cover `validateAppConfig(...)`
-
 ```java
-@Test
-void shouldThrowWhenClientIdMissing() {
-    AppConfigResponse appConfig = validAppConfig();
-    appConfig.setClientId(null);
+@ExtendWith(MockitoExtension.class)
+class HandoffServiceTest {
 
-    when(lancelotClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
+    @Mock
+    private RedisLoginHandoffService redisLoginHandoffService;
 
-    IllegalStateException ex = assertThrows(
-            IllegalStateException.class,
-            () -> authService.startAuthentication("B2BOOST_BE")
-    );
+    @Mock
+    private RedisSessionService redisSessionService;
 
-    assertEquals("Missing clientId", ex.getMessage());
-}
+    @InjectMocks
+    private HandoffService handoffService;
 
-@Test
-void shouldThrowWhenIssuerUriMissing() {
-    AppConfigResponse appConfig = validAppConfig();
-    appConfig.setIssuerUri(null);
+    @Test
+    void shouldExchangeHandoffCodeSuccessfully() {
+        LoginHandoff handoff = new LoginHandoff();
+        handoff.setCode("CODE123");
+        handoff.setSessionId("SESSION123");
+        handoff.setUsed(false);
+        handoff.setExpiresAt(Instant.now().plusSeconds(60));
 
-    when(lancelotClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
+        UserSession session = new UserSession();
+        session.setUserId("testuser");
+        session.setUsername("testuser");
+        session.setEmail("testuser@test.local");
+        session.setRoles(List.of("SELLER"));
+        session.setAppId("B2BOOST_BE");
 
-    IllegalStateException ex = assertThrows(
-            IllegalStateException.class,
-            () -> authService.startAuthentication("B2BOOST_BE")
-    );
+        when(redisLoginHandoffService.findByCode("CODE123"))
+                .thenReturn(handoff);
 
-    assertEquals("Missing issuerUri", ex.getMessage());
-}
+        when(redisSessionService.findBySessionId("SESSION123"))
+                .thenReturn(session);
 
-@Test
-void shouldThrowWhenRedirectUriMissing() {
-    AppConfigResponse appConfig = validAppConfig();
-    appConfig.setRedirectUri(null);
+        HandoffExchangeResponse response =
+                handoffService.exchange("CODE123");
 
-    when(lancelotClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
+        assertEquals("testuser", response.getUserId());
+        assertEquals("testuser", response.getUsername());
+        assertEquals("testuser@test.local", response.getEmail());
+        assertEquals(List.of("SELLER"), response.getRoles());
+        assertEquals("B2BOOST_BE", response.getAppId());
 
-    IllegalStateException ex = assertThrows(
-            IllegalStateException.class,
-            () -> authService.startAuthentication("B2BOOST_BE")
-    );
+        verify(redisLoginHandoffService).delete("CODE123");
+    }
 
-    assertEquals("Missing redirectUri", ex.getMessage());
+    @Test
+    void shouldThrowWhenHandoffCodeInvalidOrExpired() {
+        when(redisLoginHandoffService.findByCode("BAD_CODE"))
+                .thenReturn(null);
+
+        IllegalStateException ex = assertThrows(
+                IllegalStateException.class,
+                () -> handoffService.exchange("BAD_CODE")
+        );
+
+        assertEquals("Invalid or expired handoff code", ex.getMessage());
+        verify(redisSessionService, never()).findBySessionId(anyString());
+    }
+
+    @Test
+    void shouldThrowWhenHandoffCodeAlreadyUsed() {
+        LoginHandoff handoff = new LoginHandoff();
+        handoff.setCode("CODE123");
+        handoff.setSessionId("SESSION123");
+        handoff.setUsed(true);
+
+        when(redisLoginHandoffService.findByCode("CODE123"))
+                .thenReturn(handoff);
+
+        IllegalStateException ex = assertThrows(
+                IllegalStateException.class,
+                () -> handoffService.exchange("CODE123")
+        );
+
+        assertEquals("Handoff code already used", ex.getMessage());
+        verify(redisSessionService, never()).findBySessionId(anyString());
+    }
+
+    @Test
+    void shouldThrowAndDeleteWhenHandoffCodeExpired() {
+        LoginHandoff handoff = new LoginHandoff();
+        handoff.setCode("CODE123");
+        handoff.setSessionId("SESSION123");
+        handoff.setUsed(false);
+        handoff.setExpiresAt(Instant.now().minusSeconds(60));
+
+        when(redisLoginHandoffService.findByCode("CODE123"))
+                .thenReturn(handoff);
+
+        IllegalStateException ex = assertThrows(
+                IllegalStateException.class,
+                () -> handoffService.exchange("CODE123")
+        );
+
+        assertEquals("Handoff code expired", ex.getMessage());
+
+        verify(redisLoginHandoffService).delete("CODE123");
+        verify(redisSessionService, never()).findBySessionId(anyString());
+    }
+
+    @Test
+    void shouldThrowAndDeleteWhenSessionNotFound() {
+        LoginHandoff handoff = new LoginHandoff();
+        handoff.setCode("CODE123");
+        handoff.setSessionId("SESSION123");
+        handoff.setUsed(false);
+        handoff.setExpiresAt(Instant.now().plusSeconds(60));
+
+        when(redisLoginHandoffService.findByCode("CODE123"))
+                .thenReturn(handoff);
+
+        when(redisSessionService.findBySessionId("SESSION123"))
+                .thenReturn(null);
+
+        IllegalStateException ex = assertThrows(
+                IllegalStateException.class,
+                () -> handoffService.exchange("CODE123")
+        );
+
+        assertEquals("Session not found for handoff code", ex.getMessage());
+
+        verify(redisLoginHandoffService).delete("CODE123");
+    }
 }
 ```
 
-## 2. Cover handoff creation in `handleCallback`
-
-This requires mocking the `WebClient` chain. Add mocks:
+Imports:
 
 ```java
-@Mock private WebClient.RequestBodyUriSpec requestBodyUriSpec;
-@Mock private WebClient.RequestBodySpec requestBodySpec;
-@Mock private WebClient.RequestHeadersSpec<?> requestHeadersSpec;
-@Mock private WebClient.ResponseSpec responseSpec;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.time.Instant;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 ```
-
-Then test:
-
-```java
-@Test
-void shouldCreateSessionAndLoginHandoffDuringCallback() {
-    AuthTransaction tx = new AuthTransaction();
-    tx.setAppId("B2BOOST_BE");
-    tx.setRedirectUri("http://arthur/callback");
-    tx.setCodeVerifier("VERIFIER123");
-
-    AppConfigResponse appConfig = validAppConfig();
-
-    OidcMetadata metadata = new OidcMetadata();
-    metadata.setTokenEndpoint("http://keycloak.kubernetes.localhost/token");
-
-    JwtUserClaims claims = new JwtUserClaims();
-    claims.setPreferredUsername("testuser");
-
-    UserResponse user = new UserResponse();
-    user.setUserId("testuser");
-    user.setUsername("testuser");
-    user.setRoles(List.of("SELLER"));
-
-    Map<String, Object> tokenResponse = new HashMap<>();
-    tokenResponse.put("access_token", "ACCESS_TOKEN");
-    tokenResponse.put("id_token", "ID_TOKEN");
-    tokenResponse.put("refresh_token", "REFRESH_TOKEN");
-
-    when(redisAuthTransactionService.findByState("STATE123")).thenReturn(tx);
-    when(lancelotClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
-    when(oidcDiscoveryClient.loadMetadata("http://issuer")).thenReturn(metadata);
-
-    when(webClient.post()).thenReturn(requestBodyUriSpec);
-    when(requestBodyUriSpec.uri(anyString())).thenReturn(requestBodySpec);
-    when(requestBodySpec.contentType(any())).thenReturn(requestBodySpec);
-    when(requestBodySpec.body(any())).thenReturn((WebClient.RequestHeadersSpec) requestHeadersSpec);
-    when(requestHeadersSpec.retrieve()).thenReturn(responseSpec);
-    when(responseSpec.onStatus(any(), any())).thenReturn(responseSpec);
-    when(responseSpec.bodyToMono(any(ParameterizedTypeReference.class)))
-            .thenReturn(Mono.just(tokenResponse));
-
-    when(jwtService.extractClaims("ID_TOKEN")).thenReturn(claims);
-    when(lancelotClient.getUserById("testuser")).thenReturn(user);
-
-    AuthResult result = authService.handleCallback("CODE123", "STATE123");
-
-    assertNotNull(result.getSessionId());
-    assertEquals("http://frontend/home", result.getPostLoginRedirectUrl());
-    assertNotNull(result.getHandoffCode());
-
-    verify(redisSessionService).save(any(UserSession.class));
-    verify(redisLoginHandoffService).save(any(LoginHandoff.class));
-    verify(redisAuthTransactionService).delete("STATE123");
-}
-```
-
-Required imports:
-
-```java
-import org.springframework.core.ParameterizedTypeReference;
-import reactor.core.publisher.Mono;
-import static org.mockito.ArgumentMatchers.*;
-```
-
-This should cover the session creation, handoff creation, Redis save/delete, and most of `exchangeToken()`.
