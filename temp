@@ -1,91 +1,81 @@
-```java
+```java id="jwt21a"
 @ExtendWith(MockitoExtension.class)
-class RedisLoginHandoffServiceTest {
+class JwtServiceTest {
 
     @Mock
-    private RedisTemplate<String, Object> redisTemplate;
+    private JwtDecoder jwtDecoder;
 
     @Mock
-    private ValueOperations<String, Object> valueOperations;
+    private Jwt jwt;
 
-    @InjectMocks
-    private RedisLoginHandoffService redisLoginHandoffService;
+    private JwtService jwtService;
 
-    @Test
-    void shouldSaveLoginHandoff() {
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-
-        LoginHandoff handoff = new LoginHandoff();
-        handoff.setCode("CODE123");
-
-        redisLoginHandoffService.save(handoff);
-
-        verify(valueOperations).set(
-                eq("handoff:CODE123"),
-                eq(handoff),
-                eq(Duration.ofMinutes(1))
-        );
+    @BeforeEach
+    void setup() {
+        jwtService = new JwtService(jwtDecoder);
     }
 
     @Test
-    void shouldFindByCodeWhenStoredAsObject() {
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+    void shouldExtractAllClaims() {
+        when(jwtDecoder.decode("TOKEN123"))
+                .thenReturn(jwt);
 
-        LoginHandoff handoff = new LoginHandoff();
-        handoff.setCode("CODE123");
-        handoff.setSessionId("SESSION123");
+        when(jwt.getSubject()).thenReturn("user-001");
+        when(jwt.getClaimAsString("preferred_username"))
+                .thenReturn("rahul");
+        when(jwt.getClaimAsString("email"))
+                .thenReturn("rahul@test.com");
+        when(jwt.getClaimAsString("given_name"))
+                .thenReturn("Rahul");
+        when(jwt.getClaimAsString("family_name"))
+                .thenReturn("Kumar");
 
-        when(valueOperations.get("handoff:CODE123"))
-                .thenReturn(handoff);
-
-        LoginHandoff result =
-                redisLoginHandoffService.findByCode("CODE123");
+        JwtUserClaims result =
+                jwtService.extractClaims("TOKEN123");
 
         assertNotNull(result);
-        assertEquals("CODE123", result.getCode());
-        assertEquals("SESSION123", result.getSessionId());
+        assertEquals("user-001", result.getSub());
+        assertEquals("rahul", result.getPreferredUsername());
+        assertEquals("rahul@test.com", result.getEmail());
+        assertEquals("Rahul", result.getGivenName());
+        assertEquals("Kumar", result.getFamilyName());
     }
 
     @Test
-    void shouldReturnNullWhenCodeMissing() {
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+    void shouldAllowMissingOptionalClaims() {
+        when(jwtDecoder.decode("TOKEN123"))
+                .thenReturn(jwt);
 
-        when(valueOperations.get("handoff:MISSING"))
+        when(jwt.getSubject()).thenReturn("user-001");
+        when(jwt.getClaimAsString("preferred_username"))
+                .thenReturn(null);
+        when(jwt.getClaimAsString("email"))
+                .thenReturn(null);
+        when(jwt.getClaimAsString("given_name"))
+                .thenReturn(null);
+        when(jwt.getClaimAsString("family_name"))
                 .thenReturn(null);
 
-        LoginHandoff result =
-                redisLoginHandoffService.findByCode("MISSING");
-
-        assertNull(result);
-    }
-
-    @Test
-    void shouldConvertMapToLoginHandoff() {
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-
-        Map<String, Object> map = new HashMap<>();
-        map.put("code", "CODE123");
-        map.put("sessionId", "SESSION123");
-        map.put("used", false);
-
-        when(valueOperations.get("handoff:CODE123"))
-                .thenReturn(map);
-
-        LoginHandoff result =
-                redisLoginHandoffService.findByCode("CODE123");
+        JwtUserClaims result =
+                jwtService.extractClaims("TOKEN123");
 
         assertNotNull(result);
-        assertEquals("CODE123", result.getCode());
-        assertEquals("SESSION123", result.getSessionId());
-        assertFalse(result.isUsed());
+        assertEquals("user-001", result.getSub());
+        assertNull(result.getPreferredUsername());
+        assertNull(result.getEmail());
+        assertNull(result.getGivenName());
+        assertNull(result.getFamilyName());
     }
 
     @Test
-    void shouldDeleteCode() {
-        redisLoginHandoffService.delete("CODE123");
+    void shouldThrowWhenTokenInvalid() {
+        when(jwtDecoder.decode("BAD_TOKEN"))
+                .thenThrow(new JwtException("Invalid token"));
 
-        verify(redisTemplate)
-                .delete("handoff:CODE123");
+        assertThrows(
+                JwtException.class,
+                () -> jwtService.extractClaims("BAD_TOKEN")
+        );
     }
 }
 ```
