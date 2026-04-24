@@ -1,132 +1,153 @@
-Found it exactly from your screenshot.
-
-## Root Cause
-
-Your controller line **49** is calling:
+Yes. Start with these **AuthService unit tests** first.
 
 ```java
-session.getAttribute(...)
-```
+@ExtendWith(MockitoExtension.class)
+class AuthServiceTest {
 
-and in the failing test:
+    @Mock private LancelotClient lancelotClient;
+    @Mock private OidcDiscoveryClient oidcDiscoveryClient;
+    @Mock private RandomValueGenerator randomValueGenerator;
+    @Mock private PkceService pkceService;
+    @Mock private RedisAuthTransactionService redisAuthTransactionService;
+    @Mock private RedisLoginHandoffService redisLoginHandoffService;
+    @Mock private WebClient webClient;
+    @Mock private JwtService jwtService;
+    @Mock private RedisSessionService redisSessionService;
 
-```java
-shouldStartAuthenticationUsingQueryAppId()
-```
+    @InjectMocks
+    private AuthService authService;
 
-`session` is null because your mocked `HttpServletRequest` does **not** return a mocked `HttpSession`.
+    @Test
+    void shouldThrowWhenAppIdBlank() {
+        IllegalArgumentException ex = assertThrows(
+                IllegalArgumentException.class,
+                () -> authService.startAuthentication(" ")
+        );
 
----
+        assertEquals("APP_ID must not be blank", ex.getMessage());
+        verifyNoInteractions(lancelotClient);
+    }
 
-# Fix Immediately
+    @Test
+    void shouldThrowWhenAppConfigNotFound() {
+        when(lancelotClient.getApp("B2BOOST_BE")).thenReturn(null);
 
-Add a mock session.
+        IllegalStateException ex = assertThrows(
+                IllegalStateException.class,
+                () -> authService.startAuthentication("B2BOOST_BE")
+        );
 
-## In test class:
+        assertEquals("App config not found", ex.getMessage());
+    }
 
-```java id="7j6ll8"
-@Mock
-private HttpServletRequest request;
+    @Test
+    void shouldThrowWhenAppIsDisabled() {
+        AppConfigResponse appConfig = validAppConfig();
+        appConfig.setEnabled(false);
 
-@Mock
-private HttpSession session;
-```
+        when(lancelotClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
 
-Import:
+        IllegalStateException ex = assertThrows(
+                IllegalStateException.class,
+                () -> authService.startAuthentication("B2BOOST_BE")
+        );
 
-```java id="j7kp8u"
-import jakarta.servlet.http.HttpSession;
-```
+        assertEquals("App is disabled", ex.getMessage());
+    }
 
----
+    @Test
+    void shouldStartAuthenticationSuccessfully() {
+        AppConfigResponse appConfig = validAppConfig();
+        OidcMetadata metadata = validMetadata();
 
-# Then in failing test add:
+        when(lancelotClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
+        when(oidcDiscoveryClient.loadMetadata("http://issuer")).thenReturn(metadata);
 
-```java id="v2fd0r"
-when(request.getSession()).thenReturn(session);
-```
+        when(randomValueGenerator.generate())
+                .thenReturn("STATE123")
+                .thenReturn("NONCE123")
+                .thenReturn("VERIFIER123");
 
-or if code uses:
+        when(pkceService.generateCodeChallenge("VERIFIER123"))
+                .thenReturn("CHALLENGE123");
 
-```java id="i1o0it"
-request.getSession(false)
-```
+        String redirectUrl = authService.startAuthentication("B2BOOST_BE");
 
-then:
+        assertTrue(redirectUrl.contains("http://keycloak/auth"));
+        assertTrue(redirectUrl.contains("client_id=client-1"));
+        assertTrue(redirectUrl.contains("response_type=code"));
+        assertTrue(redirectUrl.contains("state=STATE123"));
+        assertTrue(redirectUrl.contains("nonce=NONCE123"));
+        assertTrue(redirectUrl.contains("code_challenge=CHALLENGE123"));
+        assertTrue(redirectUrl.contains("code_challenge_method=S256"));
 
-```java id="8nhsl8"
-when(request.getSession(false)).thenReturn(session);
-```
+        ArgumentCaptor<AuthTransaction> captor =
+                ArgumentCaptor.forClass(AuthTransaction.class);
 
----
+        verify(redisAuthTransactionService).save(captor.capture());
 
-# Full Fixed Test
+        AuthTransaction tx = captor.getValue();
 
-```java id="lrz9r6"
-@Test
-void shouldStartAuthenticationUsingQueryAppId() {
+        assertEquals("STATE123", tx.getState());
+        assertEquals("NONCE123", tx.getNonce());
+        assertEquals("VERIFIER123", tx.getCodeVerifier());
+        assertEquals("B2BOOST_BE", tx.getAppId());
+        assertEquals("http://arthur/callback", tx.getRedirectUri());
+        assertEquals("http://frontend/home", tx.getPostLoginRedirectUrl());
+    }
 
-    when(request.getSession()).thenReturn(session);
+    @Test
+    void shouldThrowWhenCallbackStateInvalid() {
+        when(redisAuthTransactionService.findByState("BAD_STATE"))
+                .thenReturn(null);
 
-    when(authService.startAuthentication("B2BOOST_NL"))
-            .thenReturn("http://ping/login");
+        IllegalStateException ex = assertThrows(
+                IllegalStateException.class,
+                () -> authService.handleCallback("CODE123", "BAD_STATE")
+        );
 
-    ResponseEntity<Void> result =
-            authController.startAuthentication(
-                    null,
-                    "B2BOOST_NL",
-                    request
-            );
+        assertEquals("Invalid or expired state", ex.getMessage());
+        verify(redisAuthTransactionService).findByState("BAD_STATE");
+        verifyNoInteractions(redisSessionService);
+    }
 
-    assertEquals(302, result.getStatusCode().value());
+    private AppConfigResponse validAppConfig() {
+        AppConfigResponse appConfig = new AppConfigResponse();
+        appConfig.setAppId("B2BOOST_BE");
+        appConfig.setEnabled(true);
+        appConfig.setClientId("client-1");
+        appConfig.setClientSecret("secret-1");
+        appConfig.setIssuerUri("http://issuer");
+        appConfig.setRedirectUri("http://arthur/callback");
+        appConfig.setPostLoginRedirectUrl("http://frontend/home");
+        appConfig.setScopes(List.of("openid", "profile", "email"));
+        return appConfig;
+    }
 
-    verify(authService)
-            .startAuthentication("B2BOOST_NL");
+    private OidcMetadata validMetadata() {
+        OidcMetadata metadata = new OidcMetadata();
+        metadata.setAuthorizationEndpoint("http://keycloak/auth");
+        metadata.setTokenEndpoint("http://keycloak/token");
+        return metadata;
+    }
 }
 ```
 
----
-
-# Why Callback Tests Passed
-
-Because callback method uses:
+Imports you’ll need:
 
 ```java
-HttpServletResponse
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.web.reactive.function.client.WebClient;
+
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 ```
 
-No session involved.
-
----
-
-# Better Permanent Fix
-
-Put in `@BeforeEach`
-
-```java id="1aw8b1"
-@BeforeEach
-void setup() {
-    when(request.getSession()).thenReturn(session);
-}
-```
-
-Then all tests work.
-
----
-
-# My Guess About Your Controller
-
-You likely added:
-
-```java id="jlwmte"
-HttpSession session = request.getSession();
-session.getAttribute("...");
-```
-
-for tracking duplicate auth calls or storing state.
-
----
-
-# Send me line 49 of AuthController
-
-I’ll tell you exactly what to mock and whether logic is good.
+For `handleCallback` success test, your current `exchangeToken()` uses a chained `WebClient`, so I’d either refactor token exchange into a separate `TokenClient` or we mock the full WebClient chain next.
