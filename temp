@@ -1,7 +1,70 @@
+Yes. To cover those red lines, add these tests.
+
+## 1. Cover `validateAppConfig(...)`
+
 ```java
 @Test
-void shouldHandleCallbackSuccessfully() {
+void shouldThrowWhenClientIdMissing() {
+    AppConfigResponse appConfig = validAppConfig();
+    appConfig.setClientId(null);
 
+    when(lancelotClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
+
+    IllegalStateException ex = assertThrows(
+            IllegalStateException.class,
+            () -> authService.startAuthentication("B2BOOST_BE")
+    );
+
+    assertEquals("Missing clientId", ex.getMessage());
+}
+
+@Test
+void shouldThrowWhenIssuerUriMissing() {
+    AppConfigResponse appConfig = validAppConfig();
+    appConfig.setIssuerUri(null);
+
+    when(lancelotClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
+
+    IllegalStateException ex = assertThrows(
+            IllegalStateException.class,
+            () -> authService.startAuthentication("B2BOOST_BE")
+    );
+
+    assertEquals("Missing issuerUri", ex.getMessage());
+}
+
+@Test
+void shouldThrowWhenRedirectUriMissing() {
+    AppConfigResponse appConfig = validAppConfig();
+    appConfig.setRedirectUri(null);
+
+    when(lancelotClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
+
+    IllegalStateException ex = assertThrows(
+            IllegalStateException.class,
+            () -> authService.startAuthentication("B2BOOST_BE")
+    );
+
+    assertEquals("Missing redirectUri", ex.getMessage());
+}
+```
+
+## 2. Cover handoff creation in `handleCallback`
+
+This requires mocking the `WebClient` chain. Add mocks:
+
+```java
+@Mock private WebClient.RequestBodyUriSpec requestBodyUriSpec;
+@Mock private WebClient.RequestBodySpec requestBodySpec;
+@Mock private WebClient.RequestHeadersSpec<?> requestHeadersSpec;
+@Mock private WebClient.ResponseSpec responseSpec;
+```
+
+Then test:
+
+```java
+@Test
+void shouldCreateSessionAndLoginHandoffDuringCallback() {
     AuthTransaction tx = new AuthTransaction();
     tx.setAppId("B2BOOST_BE");
     tx.setRedirectUri("http://arthur/callback");
@@ -10,72 +73,55 @@ void shouldHandleCallbackSuccessfully() {
     AppConfigResponse appConfig = validAppConfig();
 
     OidcMetadata metadata = new OidcMetadata();
-    metadata.setTokenEndpoint(
-            "http://keycloak.kubernetes.localhost/token"
-    );
-
-    Map<String, Object> tokenResponse = new HashMap<>();
-    tokenResponse.put("access_token", "ACCESS123");
-    tokenResponse.put("id_token", "ID123");
-    tokenResponse.put("refresh_token", "REFRESH123");
+    metadata.setTokenEndpoint("http://keycloak.kubernetes.localhost/token");
 
     JwtUserClaims claims = new JwtUserClaims();
-    claims.setSub("user-1");
-    claims.setPreferredUsername("rahul");
+    claims.setPreferredUsername("testuser");
 
     UserResponse user = new UserResponse();
-    user.setUserId("user-1");
-    user.setUsername("rahul");
-    user.setRoles(List.of("ADMIN"));
+    user.setUserId("testuser");
+    user.setUsername("testuser");
+    user.setRoles(List.of("SELLER"));
 
-    when(redisAuthTransactionService.findByState("STATE123"))
-            .thenReturn(tx);
+    Map<String, Object> tokenResponse = new HashMap<>();
+    tokenResponse.put("access_token", "ACCESS_TOKEN");
+    tokenResponse.put("id_token", "ID_TOKEN");
+    tokenResponse.put("refresh_token", "REFRESH_TOKEN");
 
-    when(lancelotClient.getApp("B2BOOST_BE"))
-            .thenReturn(appConfig);
+    when(redisAuthTransactionService.findByState("STATE123")).thenReturn(tx);
+    when(lancelotClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
+    when(oidcDiscoveryClient.loadMetadata("http://issuer")).thenReturn(metadata);
 
-    when(oidcDiscoveryClient.loadMetadata("http://issuer"))
-            .thenReturn(metadata);
+    when(webClient.post()).thenReturn(requestBodyUriSpec);
+    when(requestBodyUriSpec.uri(anyString())).thenReturn(requestBodySpec);
+    when(requestBodySpec.contentType(any())).thenReturn(requestBodySpec);
+    when(requestBodySpec.body(any())).thenReturn((WebClient.RequestHeadersSpec) requestHeadersSpec);
+    when(requestHeadersSpec.retrieve()).thenReturn(responseSpec);
+    when(responseSpec.onStatus(any(), any())).thenReturn(responseSpec);
+    when(responseSpec.bodyToMono(any(ParameterizedTypeReference.class)))
+            .thenReturn(Mono.just(tokenResponse));
 
-    /*
-      Spy AuthService so we can bypass WebClient chain
-    */
-    AuthService spyService = spy(authService);
+    when(jwtService.extractClaims("ID_TOKEN")).thenReturn(claims);
+    when(lancelotClient.getUserById("testuser")).thenReturn(user);
 
-    doReturn(tokenResponse)
-            .when(spyService)
-            .exchangeToken(
-                    eq("CODE123"),
-                    anyString(),
-                    eq(appConfig),
-                    eq(tx)
-            );
+    AuthResult result = authService.handleCallback("CODE123", "STATE123");
 
-    when(jwtService.extractClaims("ID123"))
-            .thenReturn(claims);
-
-    when(lancelotClient.getUserById("rahul"))
-            .thenReturn(user);
-
-    AuthResult result =
-            spyService.handleCallback(
-                    "CODE123",
-                    "STATE123"
-            );
-
-    assertNotNull(result);
     assertNotNull(result.getSessionId());
-    assertEquals(
-            "http://frontend/home",
-            result.getPostLoginRedirectUrl()
-    );
+    assertEquals("http://frontend/home", result.getPostLoginRedirectUrl());
     assertNotNull(result.getHandoffCode());
 
     verify(redisSessionService).save(any(UserSession.class));
-    verify(redisLoginHandoffService)
-            .save(any(LoginHandoff.class));
-
-    verify(redisAuthTransactionService)
-            .delete("STATE123");
+    verify(redisLoginHandoffService).save(any(LoginHandoff.class));
+    verify(redisAuthTransactionService).delete("STATE123");
 }
 ```
+
+Required imports:
+
+```java
+import org.springframework.core.ParameterizedTypeReference;
+import reactor.core.publisher.Mono;
+import static org.mockito.ArgumentMatchers.*;
+```
+
+This should cover the session creation, handoff creation, Redis save/delete, and most of `exchangeToken()`.
