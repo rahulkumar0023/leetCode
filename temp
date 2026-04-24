@@ -1,128 +1,89 @@
-Yes — cover only `getApp`, `getUserById`, and validation.
-
 ```java
 @ExtendWith(MockitoExtension.class)
-class LancelotClientTest {
+class RedisSessionServiceTest {
 
     @Mock
-    private WebClient webClient;
+    private RedisTemplate<String, Object> redisTemplate;
 
     @Mock
-    private WebClient.RequestHeadersUriSpec requestHeadersUriSpec;
-
-    @Mock
-    private WebClient.RequestHeadersSpec requestHeadersSpec;
-
-    @Mock
-    private WebClient.ResponseSpec responseSpec;
+    private ValueOperations<String, Object> valueOperations;
 
     @InjectMocks
-    private LancelotClient lancelotClient;
+    private RedisSessionService redisSessionService;
 
     @BeforeEach
     void setup() {
-        ReflectionTestUtils.setField(
-                lancelotClient,
-                "baseUrl",
-                "http://lancelot"
+        when(redisTemplate.opsForValue())
+                .thenReturn(valueOperations);
+    }
+
+    @Test
+    void shouldSaveSession() {
+        UserSession session = new UserSession();
+        session.setSessionId("SESSION123");
+
+        redisSessionService.save(session);
+
+        verify(valueOperations).set(
+                eq("session:SESSION123"),
+                eq(session),
+                eq(Duration.ofMinutes(5))
         );
     }
 
     @Test
-    void shouldGetAppSuccessfully() {
-        AppConfigResponse appConfig = new AppConfigResponse();
-        appConfig.setAppId("B2BOOST_BE");
-        appConfig.setClientId("client-1");
+    void shouldFindSessionWhenStoredAsUserSession() {
+        UserSession stored = new UserSession();
+        stored.setSessionId("SESSION123");
+        stored.setUserId("user1");
 
-        when(webClient.get()).thenReturn(requestHeadersUriSpec);
-        when(requestHeadersUriSpec.uri(
-                "http://lancelot/apps/{appId}",
-                "B2BOOST_BE"
-        )).thenReturn(requestHeadersSpec);
-        when(requestHeadersSpec.retrieve()).thenReturn(responseSpec);
-        when(responseSpec.bodyToMono(AppConfigResponse.class))
-                .thenReturn(Mono.just(appConfig));
+        when(valueOperations.get("session:SESSION123"))
+                .thenReturn(stored);
 
-        AppConfigResponse result =
-                lancelotClient.getApp("B2BOOST_BE");
+        UserSession result =
+                redisSessionService.findBySessionId("SESSION123");
 
-        assertEquals("B2BOOST_BE", result.getAppId());
-        assertEquals("client-1", result.getClientId());
+        assertNotNull(result);
+        assertEquals("SESSION123", result.getSessionId());
+        assertEquals("user1", result.getUserId());
     }
 
     @Test
-    void shouldGetUserByIdSuccessfully() {
-        UserResponse user = new UserResponse();
-        user.setUserId("testuser");
-        user.setUsername("testuser");
+    void shouldReturnNullWhenSessionMissing() {
+        when(valueOperations.get("session:MISSING"))
+                .thenReturn(null);
 
-        when(webClient.get()).thenReturn(requestHeadersUriSpec);
-        when(requestHeadersUriSpec.uri(
-                "http://lancelot/users/{userId}",
-                "testuser"
-        )).thenReturn(requestHeadersSpec);
-        when(requestHeadersSpec.retrieve()).thenReturn(responseSpec);
-        when(responseSpec.bodyToMono(UserResponse.class))
-                .thenReturn(Mono.just(user));
+        UserSession result =
+                redisSessionService.findBySessionId("MISSING");
 
-        UserResponse result =
-                lancelotClient.getUserById("testuser");
-
-        assertEquals("testuser", result.getUserId());
-        assertEquals("testuser", result.getUsername());
+        assertNull(result);
     }
 
     @Test
-    void shouldThrowWhenGetAppAppIdIsBlank() {
-        IllegalArgumentException ex = assertThrows(
-                IllegalArgumentException.class,
-                () -> lancelotClient.getApp(" ")
-        );
+    void shouldConvertMapValueToUserSession() {
+        Map<String, Object> map = new HashMap<>();
+        map.put("sessionId", "SESSION123");
+        map.put("userId", "user1");
+        map.put("username", "rahul");
 
-        assertEquals("appId must not be blank", ex.getMessage());
-        verifyNoInteractions(webClient);
+        when(valueOperations.get("session:SESSION123"))
+                .thenReturn(map);
+
+        UserSession result =
+                redisSessionService.findBySessionId("SESSION123");
+
+        assertNotNull(result);
+        assertEquals("SESSION123", result.getSessionId());
+        assertEquals("user1", result.getUserId());
+        assertEquals("rahul", result.getUsername());
     }
 
     @Test
-    void shouldThrowWhenGetAppAppIdIsNull() {
-        IllegalArgumentException ex = assertThrows(
-                IllegalArgumentException.class,
-                () -> lancelotClient.getApp(null)
-        );
+    void shouldDeleteSession() {
+        redisSessionService.delete("SESSION123");
 
-        assertEquals("appId must not be blank", ex.getMessage());
-        verifyNoInteractions(webClient);
+        verify(redisTemplate)
+                .delete("session:SESSION123");
     }
-}
-```
-
-Imports:
-
-```java
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.test.util.ReflectionTestUtils;
-import org.springframework.web.reactive.function.client.WebClient;
-import reactor.core.publisher.Mono;
-
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
-```
-
-One small issue in your production code: `getUserById()` can throw `NullPointerException` here if Lancelot returns null:
-
-```java
-log.info("user id : {}", userResponse.getUserId());
-```
-
-Safer:
-
-```java
-if (userResponse == null) {
-    throw new IllegalStateException("User not found: " + userId);
 }
 ```
