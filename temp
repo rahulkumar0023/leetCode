@@ -1,6 +1,6 @@
 ```java
 @ExtendWith(MockitoExtension.class)
-class RedisSessionServiceTest {
+class RedisAuthTransactionServiceTest {
 
     @Mock
     private RedisTemplate<String, Object> redisTemplate;
@@ -8,82 +8,109 @@ class RedisSessionServiceTest {
     @Mock
     private ValueOperations<String, Object> valueOperations;
 
-    @InjectMocks
-    private RedisSessionService redisSessionService;
+    @Mock
+    private ObjectMapper objectMapper;
 
-    @BeforeEach
-    void setup() {
-        when(redisTemplate.opsForValue())
-                .thenReturn(valueOperations);
-    }
+    @InjectMocks
+    private RedisAuthTransactionService redisAuthTransactionService;
 
     @Test
-    void shouldSaveSession() {
-        UserSession session = new UserSession();
-        session.setSessionId("SESSION123");
+    void shouldSaveAuthTransaction() {
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
 
-        redisSessionService.save(session);
+        AuthTransaction tx = new AuthTransaction();
+        tx.setState("STATE123");
+
+        redisAuthTransactionService.save(tx);
 
         verify(valueOperations).set(
-                eq("session:SESSION123"),
-                eq(session),
+                eq("auth:state:STATE123"),
+                eq(tx),
                 eq(Duration.ofMinutes(5))
         );
     }
 
     @Test
-    void shouldFindSessionWhenStoredAsUserSession() {
-        UserSession stored = new UserSession();
-        stored.setSessionId("SESSION123");
-        stored.setUserId("user1");
+    void shouldFindByStateWhenStoredAsObject() {
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
 
-        when(valueOperations.get("session:SESSION123"))
-                .thenReturn(stored);
+        AuthTransaction tx = new AuthTransaction();
+        tx.setState("STATE123");
 
-        UserSession result =
-                redisSessionService.findBySessionId("SESSION123");
+        when(valueOperations.get("auth:state:STATE123"))
+                .thenReturn(tx);
+
+        AuthTransaction result =
+                redisAuthTransactionService.findByState("STATE123");
 
         assertNotNull(result);
-        assertEquals("SESSION123", result.getSessionId());
-        assertEquals("user1", result.getUserId());
+        assertEquals("STATE123", result.getState());
     }
 
     @Test
-    void shouldReturnNullWhenSessionMissing() {
-        when(valueOperations.get("session:MISSING"))
+    void shouldReturnNullWhenStateMissing() {
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+
+        when(valueOperations.get("auth:state:MISSING"))
                 .thenReturn(null);
 
-        UserSession result =
-                redisSessionService.findBySessionId("MISSING");
+        AuthTransaction result =
+                redisAuthTransactionService.findByState("MISSING");
 
         assertNull(result);
     }
 
     @Test
-    void shouldConvertMapValueToUserSession() {
-        Map<String, Object> map = new HashMap<>();
-        map.put("sessionId", "SESSION123");
-        map.put("userId", "user1");
-        map.put("username", "rahul");
+    void shouldConvertMapToAuthTransaction() {
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
 
-        when(valueOperations.get("session:SESSION123"))
+        Map<String, Object> map = new HashMap<>();
+        map.put("state", "STATE123");
+        map.put("appId", "B2BOOST_BE");
+
+        AuthTransaction converted = new AuthTransaction();
+        converted.setState("STATE123");
+        converted.setAppId("B2BOOST_BE");
+
+        when(valueOperations.get("auth:state:STATE123"))
                 .thenReturn(map);
 
-        UserSession result =
-                redisSessionService.findBySessionId("SESSION123");
+        when(objectMapper.convertValue(
+                map,
+                AuthTransaction.class
+        )).thenReturn(converted);
+
+        AuthTransaction result =
+                redisAuthTransactionService.findByState("STATE123");
 
         assertNotNull(result);
-        assertEquals("SESSION123", result.getSessionId());
-        assertEquals("user1", result.getUserId());
-        assertEquals("rahul", result.getUsername());
+        assertEquals("STATE123", result.getState());
+        assertEquals("B2BOOST_BE", result.getAppId());
     }
 
     @Test
-    void shouldDeleteSession() {
-        redisSessionService.delete("SESSION123");
+    void shouldThrowWhenUnexpectedTypeReturned() {
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+
+        when(valueOperations.get("auth:state:STATE123"))
+                .thenReturn("BAD_VALUE");
+
+        IllegalStateException ex = assertThrows(
+                IllegalStateException.class,
+                () -> redisAuthTransactionService
+                        .findByState("STATE123")
+        );
+
+        assertTrue(ex.getMessage()
+                .contains("Unexpected auth transaction type"));
+    }
+
+    @Test
+    void shouldDeleteState() {
+        redisAuthTransactionService.delete("STATE123");
 
         verify(redisTemplate)
-                .delete("session:SESSION123");
+                .delete("auth:state:STATE123");
     }
 }
 ```
