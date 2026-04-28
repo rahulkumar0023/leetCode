@@ -1,59 +1,90 @@
 ```java
-class PkceServiceTest {
+@ExtendWith(MockitoExtension.class)
+class OidcDiscoveryClientTest {
 
-    private final PkceService pkceService = new PkceService();
+    @Mock
+    private WebClient webClient;
+
+    @Mock
+    private WebClient.RequestHeadersUriSpec<?> uriSpec;
+
+    @Mock
+    private WebClient.RequestHeadersSpec<?> headersSpec;
+
+    @Mock
+    private WebClient.ResponseSpec responseSpec;
+
+    private OidcDiscoveryClient oidcDiscoveryClient;
+
+    @BeforeEach
+    void setup() {
+        oidcDiscoveryClient = new OidcDiscoveryClient(webClient);
+    }
 
     @Test
-    void shouldGenerateCodeChallenge() {
-        String result =
-                pkceService.generateCodeChallenge("VERIFIER123");
+    void shouldLoadMetadataSuccessfully() {
+        OidcMetadata metadata = new OidcMetadata();
+        metadata.setAuthorizationEndpoint("http://auth");
+        metadata.setTokenEndpoint("http://token");
+
+        when(webClient.get()).thenReturn(uriSpec);
+        when(uriSpec.uri(
+                "https://issuer/.well-known/openid-configuration"))
+                .thenReturn(headersSpec);
+        when(headersSpec.retrieve()).thenReturn(responseSpec);
+        when(responseSpec.bodyToMono(OidcMetadata.class))
+                .thenReturn(Mono.just(metadata));
+
+        OidcMetadata result =
+                oidcDiscoveryClient.loadMetadata("https://issuer");
 
         assertNotNull(result);
-        assertFalse(result.isBlank());
-
-        // Base64 URL-safe, no padding
-        assertFalse(result.contains("="));
-        assertFalse(result.contains("+"));
-        assertFalse(result.contains("/"));
+        assertEquals("http://auth",
+                result.getAuthorizationEndpoint());
+        assertEquals("http://token",
+                result.getTokenEndpoint());
     }
 
     @Test
-    void shouldGenerateSameChallengeForSameVerifier() {
-        String first =
-                pkceService.generateCodeChallenge("VERIFIER123");
-
-        String second =
-                pkceService.generateCodeChallenge("VERIFIER123");
-
-        assertEquals(first, second);
-    }
-
-    @Test
-    void shouldThrowWhenVerifierIsNull() {
+    void shouldThrowWhenIssuerUriIsNull() {
         IllegalArgumentException ex = assertThrows(
                 IllegalArgumentException.class,
-                () -> pkceService.generateCodeChallenge(null)
+                () -> oidcDiscoveryClient.loadMetadata(null)
         );
 
-        assertEquals("codeVerifier must not be blank", ex.getMessage());
+        assertEquals("issuerUri must not be blank",
+                ex.getMessage());
     }
 
     @Test
-    void shouldThrowWhenVerifierIsBlank() {
+    void shouldThrowWhenIssuerUriIsBlank() {
         IllegalArgumentException ex = assertThrows(
                 IllegalArgumentException.class,
-                () -> pkceService.generateCodeChallenge(" ")
+                () -> oidcDiscoveryClient.loadMetadata(" ")
         );
 
-        assertEquals("codeVerifier must not be blank", ex.getMessage());
+        assertEquals("issuerUri must not be blank",
+                ex.getMessage());
+    }
+
+    @Test
+    void shouldPropagateWebClientError() {
+        when(webClient.get()).thenReturn(uriSpec);
+        when(uriSpec.uri(
+                "https://issuer/.well-known/openid-configuration"))
+                .thenReturn(headersSpec);
+        when(headersSpec.retrieve()).thenReturn(responseSpec);
+        when(responseSpec.bodyToMono(OidcMetadata.class))
+                .thenReturn(Mono.error(
+                        new RuntimeException("Connection failed")));
+
+        RuntimeException ex = assertThrows(
+                RuntimeException.class,
+                () -> oidcDiscoveryClient
+                        .loadMetadata("https://issuer")
+        );
+
+        assertEquals("Connection failed", ex.getMessage());
     }
 }
-```
-
-Imports:
-
-```java
-import org.junit.jupiter.api.Test;
-
-import static org.junit.jupiter.api.Assertions.*;
 ```
