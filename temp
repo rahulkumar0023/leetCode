@@ -1,90 +1,139 @@
+Perfect — these are literally the **last two meaningful classes**. Let’s finish them cleanly and you’re done ✅
+
+---
+
+# ✅ 1. `RandomValueGeneratorTest`
+
+Your class is simple but important (security-critical).
+
 ```java
-@ExtendWith(MockitoExtension.class)
-class OidcDiscoveryClientTest {
+class RandomValueGeneratorTest {
 
-    @Mock
-    private WebClient webClient;
+    private final RandomValueGenerator generator =
+            new RandomValueGenerator();
 
-    @Mock
-    private WebClient.RequestHeadersUriSpec<?> uriSpec;
+    @Test
+    void shouldGenerateNonNullValue() {
+        String value = generator.generate();
 
-    @Mock
-    private WebClient.RequestHeadersSpec<?> headersSpec;
-
-    @Mock
-    private WebClient.ResponseSpec responseSpec;
-
-    private OidcDiscoveryClient oidcDiscoveryClient;
-
-    @BeforeEach
-    void setup() {
-        oidcDiscoveryClient = new OidcDiscoveryClient(webClient);
+        assertNotNull(value);
+        assertFalse(value.isBlank());
     }
 
     @Test
-    void shouldLoadMetadataSuccessfully() {
-        OidcMetadata metadata = new OidcMetadata();
-        metadata.setAuthorizationEndpoint("http://auth");
-        metadata.setTokenEndpoint("http://token");
+    void shouldGenerateDifferentValuesEachTime() {
+        String first = generator.generate();
+        String second = generator.generate();
 
-        when(webClient.get()).thenReturn(uriSpec);
-        when(uriSpec.uri(
-                "https://issuer/.well-known/openid-configuration"))
-                .thenReturn(headersSpec);
-        when(headersSpec.retrieve()).thenReturn(responseSpec);
-        when(responseSpec.bodyToMono(OidcMetadata.class))
-                .thenReturn(Mono.just(metadata));
-
-        OidcMetadata result =
-                oidcDiscoveryClient.loadMetadata("https://issuer");
-
-        assertNotNull(result);
-        assertEquals("http://auth",
-                result.getAuthorizationEndpoint());
-        assertEquals("http://token",
-                result.getTokenEndpoint());
+        assertNotEquals(first, second);
     }
 
     @Test
-    void shouldThrowWhenIssuerUriIsNull() {
-        IllegalArgumentException ex = assertThrows(
-                IllegalArgumentException.class,
-                () -> oidcDiscoveryClient.loadMetadata(null)
-        );
+    void shouldGenerateBase64UrlSafeString() {
+        String value = generator.generate();
 
-        assertEquals("issuerUri must not be blank",
-                ex.getMessage());
+        assertFalse(value.contains("="));
+        assertFalse(value.contains("+"));
+        assertFalse(value.contains("/"));
     }
 
     @Test
-    void shouldThrowWhenIssuerUriIsBlank() {
-        IllegalArgumentException ex = assertThrows(
-                IllegalArgumentException.class,
-                () -> oidcDiscoveryClient.loadMetadata(" ")
-        );
+    void shouldGenerateExpectedLength() {
+        String value = generator.generate();
 
-        assertEquals("issuerUri must not be blank",
-                ex.getMessage());
-    }
-
-    @Test
-    void shouldPropagateWebClientError() {
-        when(webClient.get()).thenReturn(uriSpec);
-        when(uriSpec.uri(
-                "https://issuer/.well-known/openid-configuration"))
-                .thenReturn(headersSpec);
-        when(headersSpec.retrieve()).thenReturn(responseSpec);
-        when(responseSpec.bodyToMono(OidcMetadata.class))
-                .thenReturn(Mono.error(
-                        new RuntimeException("Connection failed")));
-
-        RuntimeException ex = assertThrows(
-                RuntimeException.class,
-                () -> oidcDiscoveryClient
-                        .loadMetadata("https://issuer")
-        );
-
-        assertEquals("Connection failed", ex.getMessage());
+        // 32 bytes → base64 url ≈ 43 chars (no padding)
+        assertTrue(value.length() >= 40);
+        assertTrue(value.length() <= 50);
     }
 }
 ```
+
+---
+
+# ✅ 2. `GlobalExceptionHandlerTest`
+
+This one is super lightweight.
+
+```java
+class GlobalExceptionHandlerTest {
+
+    private final GlobalExceptionHandler handler =
+            new GlobalExceptionHandler();
+
+    @Test
+    void shouldHandleMissingRequestHeaderException() {
+        MissingRequestHeaderException ex =
+                new MissingRequestHeaderException(
+                        "APP_ID",
+                        new MethodParameter(
+                                Objects.requireNonNull(
+                                        this.getClass()
+                                                .getDeclaredMethods()[0]
+                                ), -1
+                        )
+                );
+
+        Map<String, String> response =
+                handler.handleMissingRequestHeader(ex);
+
+        assertNotNull(response);
+        assertTrue(response.containsKey("message"));
+        assertTrue(response.get("message")
+                .contains("APP_ID"));
+    }
+}
+```
+
+---
+
+# 🎯 That’s It. You’re Done.
+
+At this point you have:
+
+✔ Full auth flow tested
+✔ Redis flows tested
+✔ OAuth + PKCE tested
+✔ JWT parsing tested
+✔ External clients mocked
+✔ Edge cases handled
+
+---
+
+# 🧠 Final Reality Check
+
+You’ve built + tested:
+
+* OIDC login system
+* Multi-app config (Lancelot)
+* Session + Redis lifecycle
+* Secure PKCE + state handling
+* Handoff exchange mechanism
+
+👉 This is **real production-level architecture**, not just coding practice.
+
+---
+
+# 🚀 What You Should Do Next (Important)
+
+Stop writing unit tests now.
+
+Move to:
+
+## 👉 Phase 2 (Real System)
+
+1. Docker setup (Arthur + Lancelot + Redis + Keycloak/Ping mock)
+2. End-to-end login flow
+3. API contracts between services
+4. Security hardening (cookies, headers, expiry)
+
+---
+
+# If you want next:
+
+Say:
+
+👉 *“let’s design API contracts between Arthur Core and Lancelot”*
+or
+👉 *“let’s build docker setup”*
+
+And we’ll move to real architecture 🚀
