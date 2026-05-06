@@ -1,156 +1,336 @@
-Good — this is exactly the stage where people either stop smartly or start wasting time 🙂
+Yes — let’s implement the **Arthur Core flow**.
 
-You’re now looking at:
-
-* `AppConfigResponse`
-* `AuthTransaction`
-
-👉 These are **pure DTO/model classes**
-
----
-
-# ❗ Should you write JUnit for these?
-
-### Short answer:
-
-👉 **Only if your coverage tool forces it**
-
-Otherwise:
-❌ Not worth it
-
----
-
-# 🧠 Why?
-
-These classes:
-
-* have **no logic**
-* only fields + Lombok (`@Data`, `@Getter`)
-* no branching / behavior
-
-👉 Testing them gives **zero real value**
-
----
-
-# ✅ When you SHOULD test them
-
-Write tests **only if**:
-
-* Sonar requires 90%+ coverage
-* your pipeline is failing due to these lines
-
----
-
-# ⚡ If you want quick coverage (minimal effort)
-
-Here’s the **fastest way** to cover both classes in <5 mins:
-
----
-
-## ✅ Test for `AuthTransaction`
+## 1. `UserSession`
 
 ```java
-class AuthTransactionTest {
+@Data
+public class UserSession {
+    private String sessionId;
+    private String appId;
+    private String userId;
+    private String username;
+    private List<String> roles;
+    private List<SalesPointResponse> salesPoints;
+    private String selectedSalesPointId;
+    private Instant createdAt;
+}
+```
 
-    @Test
-    void shouldSetAndGetFields() {
-        AuthTransaction tx = new AuthTransaction();
+## 2. `LoginHandoff`
 
-        tx.setState("state");
-        tx.setNonce("nonce");
-        tx.setCodeVerifier("verifier");
-        tx.setAppId("appId");
-        tx.setRedirectUri("redirect");
-        tx.setPostLoginRedirectUrl("postRedirect");
-        tx.setCreatedAt(Instant.now());
+```java
+@Data
+public class LoginHandoff {
+    private String code;
+    private String sessionId;
+    private String appId;
+    private Instant createdAt;
+    private Instant expiresAt;
+}
+```
 
-        assertEquals("state", tx.getState());
-        assertEquals("nonce", tx.getNonce());
-        assertEquals("verifier", tx.getCodeVerifier());
-        assertEquals("appId", tx.getAppId());
+## 3. Callback: create session, redirect to sales points
+
+```java
+@GetMapping("/auth/callback")
+public void callback(
+        @RequestParam String code,
+        @RequestParam String state,
+        HttpServletResponse response
+) throws IOException {
+
+    String sessionId = authService.handleCallback(code, state);
+
+    Cookie cookie = new Cookie("ARTHUR_SESSION", sessionId);
+    cookie.setHttpOnly(true);
+    cookie.setSecure(false); // true in prod
+    cookie.setPath("/");
+    cookie.setMaxAge(3600);
+
+    response.addCookie(cookie);
+    response.sendRedirect("/arthur-core/sales-points");
+}
+```
+
+## 4. `handleCallback`
+
+```java
+public String handleCallback(String code, String state) {
+    AuthTransaction tx = redisAuthTransactionService.findByState(state);
+
+    AppConfigResponse appConfig = lancelotClient.getApp(tx.getAppId());
+
+    Map<String, Object> tokenResponse = exchangeToken(code, tx, appConfig);
+
+    String idToken = (String) tokenResponse.get("id_token");
+
+    JwtUserClaims claims = jwtService.extractClaims(idToken);
+
+    String userId = claims.getPreferredUsername();
+
+    UserResponse user = lancelotClient.getUserById(userId);
+
+    UserSession session = new UserSession();
+    session.setSessionId(UUID.randomUUID().toString());
+    session.setAppId(tx.getAppId());
+    session.setUserId(user.getUserId());
+    session.setUsername(user.getUsername());
+    session.setRoles(user.getRoles());
+    session.setSalesPoints(user.getSalesPoints());
+    session.setCreatedAt(Instant.now());
+
+    redisSessionService.save(session);
+    redisAuthTransactionService.delete(state);
+
+    return session.getSessionId();
+}
+```
+
+## 5. Sales point page
+
+```java
+@GetMapping("/sales-points")
+public ModelAndView salesPoints(
+        @CookieValue("ARTHUR_SESSION") String sessionId
+) {
+    UserSession session = redisSessionService.findBySessionId(sessionId);
+
+    ModelAndView mv = new ModelAndView("sales-points");
+    mv.addObject("salesPoints", session.getSalesPoints());
+    return mv;
+}
+```
+
+## 6. Sales point submit
+
+```java
+@PostMapping("/sales-points/select")
+public void selectSalesPoint(
+        @CookieValue("ARTHUR_SESSION") String sessionId,
+        @RequestParam String salesPointId,
+        HttpServletResponse response
+) throws IOException {
+
+    String redirectUrl = authService.completeSalesPointSelection(sessionId, salesPointId);
+
+    response.sendRedirect(redirectUrl);
+}
+```
+
+## 7. Selection service
+
+```java
+public String completeSalesPointSelection(String sessionId, String salesPointId) {
+    UserSession session = redisSessionService.findBySessionId(sessionId);
+
+    boolean validSalesPoint = session.getSalesPoints().stream()
+            .anyMatch(sp -> sp.getId().equals(salesPointId));
+
+    if (!validSalesPoint) {
+        throw new IllegalArgumentException("Invalid sales point");
+    }
+
+    session.setSelectedSalesPointId(salesPointId);
+    redisSessionService.save(session);
+
+    String handoffCode = UUID.randomUUID().toString();
+
+    LoginHandoff handoff = new LoginHandoff();
+    handoff.setCode(handoffCode);
+    handoff.setSessionId(session.getSessionId());
+    handoff.setAppId(session.getAppId());
+    handoff.setCreatedAt(Instant.now());
+    handoff.setExpiresAt(Instant.now().plusSeconds(60));
+
+    redisLoginHandoffService.save(handoff);
+
+    AppConfigResponse appConfig = lancelotClient.getApp(session.getAppId());
+
+    String separator = appConfig.getPostLoginRedirectUrl().contains("?") ? "&" : "?";
+
+    return appConfig.getPostLoginRedirectUrl() + separator + "code=" + handoffCode;
+}
+```
+
+## 8. Handoff exchange request/response
+
+```java
+@Data
+public class HandoffExchangeRequest {
+    private String code;
+}
+```
+
+```java
+@Data
+public class HandoffExchangeResponse {
+    private String userId;
+    private String username;
+    private List<String> roles;
+    private String appId;
+    private String selectedSalesPointId;
+}
+```
+
+## 9. Exchange endpoint
+
+```java
+@PostMapping("/auth/handoff/exchange")
+public ResponseEntity<HandoffExchangeResponse> exchange(
+        @RequestBody HandoffExchangeRequest request
+) {
+    return ResponseEntity.ok(handoffService.exchange(request.getCode()));
+}
+```
+
+## 10. Exchange service
+
+```java
+public HandoffExchangeResponse exchange(String code) {
+    LoginHandoff handoff = redisLoginHandoffService.findByCode(code);
+
+    if (handoff == null) {
+        throw new IllegalArgumentException("Invalid or expired handoff code");
+    }
+
+    if (Instant.now().isAfter(handoff.getExpiresAt())) {
+        redisLoginHandoffService.delete(code);
+        throw new IllegalArgumentException("Expired handoff code");
+    }
+
+    UserSession session = redisSessionService.findBySessionId(handoff.getSessionId());
+
+    redisLoginHandoffService.delete(code);
+
+    HandoffExchangeResponse response = new HandoffExchangeResponse();
+    response.setUserId(session.getUserId());
+    response.setUsername(session.getUsername());
+    response.setRoles(session.getRoles());
+    response.setAppId(session.getAppId());
+    response.setSelectedSalesPointId(session.getSelectedSalesPointId());
+
+    return response;
+}
+```
+
+## 11. Redis handoff service
+
+```java
+@Service
+@RequiredArgsConstructor
+public class RedisLoginHandoffService {
+
+    private static final String PREFIX = "handoff:";
+
+    private final RedisTemplate<String, Object> redisTemplate;
+    private final ObjectMapper objectMapper;
+
+    public void save(LoginHandoff handoff) {
+        redisTemplate.opsForValue().set(
+                PREFIX + handoff.getCode(),
+                handoff,
+                Duration.ofSeconds(60)
+        );
+    }
+
+    public LoginHandoff findByCode(String code) {
+        Object value = redisTemplate.opsForValue().get(PREFIX + code);
+
+        if (value == null) {
+            return null;
+        }
+
+        if (value instanceof LoginHandoff handoff) {
+            return handoff;
+        }
+
+        return objectMapper.convertValue(value, LoginHandoff.class);
+    }
+
+    public void delete(String code) {
+        redisTemplate.delete(PREFIX + code);
     }
 }
 ```
 
----
+That gives you the exact flow:
 
-## ✅ Test for `AppConfigResponse`
+```text
+callback → session
+sales point select → handoff
+B2Boost → exchange code
+```
+-----
+
+Use **Thymeleaf** for now.
+
+It is the simplest because the sales point screen belongs to **Arthur Core**, not B2Boost.
+
+Add dependency:
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-thymeleaf</artifactId>
+</dependency>
+```
+
+Create:
+
+```text
+src/main/resources/templates/sales-points.html
+```
+
+Example:
+
+```html
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <title>Select Sales Point</title>
+</head>
+<body>
+<h2>Select Sales Point</h2>
+
+<form method="post" action="/arthur-core/sales-points/select">
+    <div th:each="sp : ${salesPoints}">
+        <label>
+            <input type="radio" name="salesPointId" th:value="${sp.id}" required>
+            <span th:text="${sp.name}">Sales Point</span>
+        </label>
+        <br>
+    </div>
+
+    <button type="submit">Confirm</button>
+</form>
+
+</body>
+</html>
+```
+
+Controller:
 
 ```java
-class AppConfigResponseTest {
+@GetMapping("/sales-points")
+public ModelAndView salesPoints(
+        @CookieValue("ARTHUR_SESSION") String sessionId
+) {
+    UserSession session = redisSessionService.findBySessionId(sessionId);
 
-    @Test
-    void shouldSetAndGetFields() {
-        AppConfigResponse config = new AppConfigResponse();
+    ModelAndView mv = new ModelAndView("sales-points");
+    mv.addObject("salesPoints", session.getSalesPoints());
 
-        config.setAppId("app1");
-        config.setEnabled(true);
-        config.setClientId("client");
-        config.setClientSecret("secret");
-        config.setIssuerUri("issuer");
-        config.setRedirectUri("redirect");
-        config.setScopes(List.of("openid"));
-        config.setPostLoginRedirectUrl("postRedirect");
-        config.setCookieName("cookie");
-        config.setSessionTtlSeconds(300L);
-
-        assertEquals("app1", config.getAppId());
-        assertTrue(config.isEnabled());
-        assertEquals("client", config.getClientId());
-    }
+    return mv;
 }
 ```
 
----
+Why Thymeleaf is best here:
 
-# 🚫 What NOT to do
+```text
+Arthur Core owns the screen
+No separate frontend needed
+Easy POST submit to Arthur Core
+Works naturally with Spring MVC
+```
 
-Don’t:
-
-* test every getter individually in separate tests
-* test Lombok behavior deeply
-* over-engineer serialization tests unless required
-
----
-
-# 🎯 Reality Check (Important)
-
-You already have:
-
-👉 **56 tests passing**
-👉 **All core flows covered**
-
-At this point:
-
-* +2 DTO tests = coverage bump
-* +0 real value
-
----
-
-# 🧭 Final Guidance
-
-### If your goal is:
-
-* ✅ **Pass coverage gate** → write these quick DTO tests
-* ✅ **Build real system** → STOP here
-
----
-
-# 🚀 Next REAL step (recommended)
-
-Instead of more unit tests:
-
-👉 Build **1 integration test** for full flow
-
-or
-
-👉 Run **real Keycloak → Arthur → Lancelot flow**
-
----
-
-If you want, I can help you:
-
-👉 write a **SpringBootTest full auth flow test**
-👉 or **simulate Keycloak callback properly**
-
-That’s the actual next level 👍
+Later, if UX becomes bigger, you can replace it with React/Angular.
