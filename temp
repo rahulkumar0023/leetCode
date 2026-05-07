@@ -1,117 +1,8 @@
-Great. Since **Lancelot is now `partner-repository`**, we’ll add sales points there and return them from `getUserById`.
+Yes. Use this structure now.
 
-Implement this simple first version:
+## Partner Repository changes
 
-## 1. Add `sales_points` table
-
-Liquibase YAML:
-
-```yaml
-databaseChangeLog:
-  - changeSet:
-      id: 003-create-sales-points-table
-      author: rahul
-      changes:
-        - createTable:
-            tableName: sales_points
-            columns:
-              - column:
-                  name: id
-                  type: BIGINT
-                  autoIncrement: true
-                  constraints:
-                    primaryKey: true
-                    nullable: false
-
-              - column:
-                  name: sales_point_id
-                  type: VARCHAR(100)
-                  constraints:
-                    nullable: false
-                    unique: true
-
-              - column:
-                  name: name
-                  type: VARCHAR(200)
-                  constraints:
-                    nullable: false
-
-              - column:
-                  name: user_id
-                  type: VARCHAR(100)
-                  constraints:
-                    nullable: false
-```
-
-## 2. Insert test sales points
-
-```yaml
-  - changeSet:
-      id: 004-insert-test-sales-points
-      author: rahul
-      changes:
-        - insert:
-            tableName: sales_points
-            columns:
-              - column:
-                  name: sales_point_id
-                  value: SP001
-              - column:
-                  name: name
-                  value: Sales Point 1
-              - column:
-                  name: user_id
-                  value: testuser
-
-        - insert:
-            tableName: sales_points
-            columns:
-              - column:
-                  name: sales_point_id
-                  value: SP002
-              - column:
-                  name: name
-                  value: Sales Point 2
-              - column:
-                  name: user_id
-                  value: testuser
-```
-
-## 3. Create entity
-
-```java
-@Entity
-@Table(name = "sales_points")
-@Getter
-@Setter
-public class SalesPointEntity {
-
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
-
-    @Column(name = "sales_point_id", nullable = false, unique = true)
-    private String salesPointId;
-
-    @Column(name = "name", nullable = false)
-    private String name;
-
-    @Column(name = "user_id", nullable = false)
-    private String userId;
-}
-```
-
-## 4. Repository
-
-```java
-public interface SalesPointRepository extends JpaRepository<SalesPointEntity, Long> {
-    List<SalesPointEntity> findByUserId(String userId);
-}
-```
-
-## 5. DTO
-
-Use your existing response shape:
+### 1. Update `SalesPointResponse`
 
 ```java
 @Data
@@ -120,93 +11,211 @@ Use your existing response shape:
 public class SalesPointResponse {
     private String id;
     private String name;
+    private String orgUnitId;
 }
 ```
 
-## 6. Update `UserService`
+### 2. For now, update `mapToResponse()`
+
+Replace your hardcoded sales point block with:
 
 ```java
-@Service
-@RequiredArgsConstructor
-public class UserService {
+response.setSalesPoints(List.of(
+        new SalesPointResponse("SP001", "Sales Point 1", "ORG_UNIT_001"),
+        new SalesPointResponse("SP002", "Sales Point 2", "ORG_UNIT_002"),
+        new SalesPointResponse("SP003", "Sales Point 3", "ORG_UNIT_003")
+));
+```
 
-    private final UserRepository userRepository;
-    private final SalesPointRepository salesPointRepository;
+So your method becomes:
 
-    public UserResponse getUserById(String userId) {
-        UserEntity user = userRepository.findByUserId(userId)
-                .orElseThrow(() -> new IllegalArgumentException("User not found: " + userId));
+```java
+private UserResponse mapToResponse(UserEntity user) {
+    UserResponse response = new UserResponse();
 
-        return mapToResponse(user);
-    }
+    response.setUserId(user.getUserId());
+    response.setUsername(user.getUsername());
 
-    private UserResponse mapToResponse(UserEntity user) {
-        UserResponse response = new UserResponse();
+    UserInfoResponse userInfo = new UserInfoResponse();
+    userInfo.setFirstName(user.getFirstName());
+    userInfo.setLastName(user.getLastName());
+    userInfo.setPhoneNumbers(
+            user.getPhoneNumber() == null ? List.of() : List.of(user.getPhoneNumber())
+    );
+    userInfo.setEmails(
+            user.getEmail() == null ? List.of() : List.of(user.getEmail())
+    );
 
-        response.setUserId(user.getUserId());
-        response.setUsername(user.getUsername());
+    response.setUserInfo(userInfo);
 
-        UserInfoResponse userInfo = new UserInfoResponse();
-        userInfo.setFirstName(user.getFirstName());
-        userInfo.setLastName(user.getLastName());
-        userInfo.setEmails(user.getEmail() == null ? List.of() : List.of(user.getEmail()));
-        userInfo.setPhoneNumbers(user.getPhoneNumber() == null ? List.of() : List.of(user.getPhoneNumber()));
-        response.setUserInfo(userInfo);
+    response.setSalesPoints(List.of(
+            new SalesPointResponse("SP001", "Sales Point 1", "ORG_UNIT_001"),
+            new SalesPointResponse("SP002", "Sales Point 2", "ORG_UNIT_002"),
+            new SalesPointResponse("SP003", "Sales Point 3", "ORG_UNIT_003")
+    ));
 
-        List<SalesPointResponse> salesPoints = salesPointRepository
-                .findByUserId(user.getUserId())
-                .stream()
-                .map(sp -> new SalesPointResponse(
-                        sp.getSalesPointId(),
-                        sp.getName()
-                ))
-                .toList();
+    response.setRelatedDealer(new RelatedPartyResponse("DLR001", "Dealer 1"));
+    response.setRelatedZoneManager(new RelatedPartyResponse("ZM001", "Zone Manager 1"));
+    response.setRoles(List.of("SELLER"));
 
-        response.setSalesPoints(salesPoints);
-
-        response.setRoles(List.of("SELLER"));
-
-        return response;
-    }
+    return response;
 }
 ```
 
-## 7. Expected `partner-repository` response
+For now this is enough to unblock the UI.
+
+---
+
+## Arthur Core changes
+
+### 1. Update `SalesPointResponse`
+
+Make sure Arthur Core DTO matches Partner Repository JSON.
+
+If Partner Repository sends snake case:
 
 ```json
 {
-  "user_id": "testuser",
-  "username": "testuser",
-  "user_info": {
-    "first_name": "Test",
-    "last_name": "User",
-    "emails": ["testuser@test.local"],
-    "phone_numbers": ["+33123456789"]
-  },
-  "sales_points": [
-    {
-      "id": "SP001",
-      "name": "Sales Point 1"
-    },
-    {
-      "id": "SP002",
-      "name": "Sales Point 2"
-    }
-  ],
-  "roles": ["SELLER"]
+  "id": "SP001",
+  "name": "Sales Point 1",
+  "org_unit_id": "ORG_UNIT_001"
 }
 ```
 
-Then Arthur Core will store:
+Then use:
+
+```java
+@Data
+@JsonIgnoreProperties(ignoreUnknown = true)
+public class SalesPointResponse {
+
+    @JsonProperty("id")
+    private String id;
+
+    @JsonProperty("name")
+    private String name;
+
+    @JsonProperty("org_unit_id")
+    private String orgUnitId;
+}
+```
+
+If it sends camel case:
+
+```json
+{
+  "id": "SP001",
+  "name": "Sales Point 1",
+  "orgUnitId": "ORG_UNIT_001"
+}
+```
+
+then use:
+
+```java
+@Data
+@JsonIgnoreProperties(ignoreUnknown = true)
+public class SalesPointResponse {
+    private String id;
+    private String name;
+    private String orgUnitId;
+}
+```
+
+### 2. Update `UserSession`
+
+```java
+@Data
+public class UserSession {
+    private String sessionId;
+    private String appId;
+    private String userId;
+    private String username;
+    private List<String> roles;
+    private List<SalesPointResponse> salesPoints;
+
+    private String selectedSalesPointId;
+    private String selectedOrgUnitId;
+
+    private String accessToken;
+    private String refreshToken;
+    private Instant refreshTokenExpiresAt;
+    private Instant createdAt;
+}
+```
+
+### 3. In callback, store sales points
 
 ```java
 session.setSalesPoints(user.getSalesPoints());
 ```
 
-And your page:
+### 4. In sales point selection, store both IDs
 
 ```java
-mv.addObject("salesPoints", session.getSalesPoints());
+public String completeSalesPointSelection(String sessionId, String salesPointId) {
+    UserSession session = redisSessionService.findBySessionId(sessionId);
+
+    SalesPointResponse selectedSalesPoint = session.getSalesPoints().stream()
+            .filter(sp -> sp.getId().equals(salesPointId))
+            .findFirst()
+            .orElseThrow(() -> new IllegalArgumentException("Invalid sales point"));
+
+    session.setSelectedSalesPointId(selectedSalesPoint.getId());
+    session.setSelectedOrgUnitId(selectedSalesPoint.getOrgUnitId());
+
+    redisSessionService.save(session);
+
+    String handoffCode = UUID.randomUUID().toString();
+
+    LoginHandoff handoff = new LoginHandoff();
+    handoff.setCode(handoffCode);
+    handoff.setSessionId(session.getSessionId());
+    handoff.setAppId(session.getAppId());
+    handoff.setCreatedAt(Instant.now());
+    handoff.setExpiresAt(Instant.now().plusSeconds(60));
+    handoff.setUsed(false);
+
+    AppConfigResponse appConfig = partnerRepositoryClient.getApp(session.getAppId());
+    handoff.setRedirectUrl(appConfig.getPostLoginRedirectUrl());
+
+    redisLoginHandoffService.save(handoff);
+
+    String separator = appConfig.getPostLoginRedirectUrl().contains("?") ? "&" : "?";
+
+    return appConfig.getPostLoginRedirectUrl() + separator + "code=" + handoffCode;
+}
 ```
 
-will finally show the radio buttons.
+### 5. Update handoff exchange response
+
+```java
+@Data
+public class HandoffExchangeResponse {
+    private String userId;
+    private String username;
+    private List<String> roles;
+    private String appId;
+    private String selectedSalesPointId;
+    private String selectedOrgUnitId;
+}
+```
+
+In exchange service:
+
+```java
+response.setSelectedSalesPointId(session.getSelectedSalesPointId());
+response.setSelectedOrgUnitId(session.getSelectedOrgUnitId());
+```
+
+That’s it for now.
+
+The important change is:
+
+```text
+Partner Repository returns salesPoints with orgUnitId
+Arthur Core stores salesPoints in session
+User selects salesPoint
+Arthur Core stores selectedSalesPointId + selectedOrgUnitId
+B2Boost receives both during handoff exchange
+```
