@@ -1,74 +1,132 @@
-Add **3** inside `handleCallback()` in `AuthService`, right after you fetch the user from Partner Repository and before `redisSessionService.save(session)`.
+Your flow is actually working correctly now.
 
-```java
-UserResponse user = partnerRepositoryClient.getUserById(userId);
+The problem is only this:
 
-UserSession session = new UserSession();
-session.setSessionId(UUID.randomUUID().toString());
-session.setAppId(tx.getAppId());
-session.setUserId(user.getUserId());
-session.setUsername(user.getUsername());
-session.setRoles(user.getRoles());
-
-// ADD HERE
-session.setSalesPoints(user.getSalesPoints());
-
-session.setAccessToken(accessToken);
-session.setRefreshToken(refreshToken);
-session.setCreatedAt(Instant.now());
-
-redisSessionService.save(session);
+```text
+POST /arthur-core/sales-points/select
+→ 404 Not Found
 ```
 
-Add **4** in the method that handles sales point submit — probably `completeSalesPointSelection(...)` in `AuthService`.
+Which means your HTML form action and controller mapping do not match.
 
-If you don’t have that method yet, create it in `AuthService`:
+From logs:
+
+```text
+POST /arthur-core/sales-points/select
+404
+```
+
+So either:
+
+* controller path is wrong
+* or class-level `@RequestMapping` is missing/mismatched
+
+---
+
+# Most likely fix
+
+Your controller probably has:
 
 ```java
-public String completeSalesPointSelection(String sessionId, String salesPointId) {
-    UserSession session = redisSessionService.findBySessionId(sessionId);
+@Controller
+@RequestMapping("/sales-points")
+public class SalesPointController
+```
 
-    SalesPointResponse selectedSalesPoint = session.getSalesPoints().stream()
-            .filter(sp -> sp.getId().equals(salesPointId))
-            .findFirst()
-            .orElseThrow(() -> new IllegalArgumentException("Invalid sales point"));
+Then method:
 
-    session.setSelectedSalesPointId(selectedSalesPoint.getId());
-    session.setSelectedOrgUnitId(selectedSalesPoint.getOrgUnitId());
+```java
+@PostMapping("/select")
+```
 
-    redisSessionService.save(session);
+Final URL becomes:
 
-    String handoffCode = UUID.randomUUID().toString();
+```text
+/sales-points/select
+```
 
-    AppConfigResponse appConfig = partnerRepositoryClient.getApp(session.getAppId());
+BUT your application already has context path:
 
-    LoginHandoff handoff = new LoginHandoff();
-    handoff.setCode(handoffCode);
-    handoff.setSessionId(session.getSessionId());
-    handoff.setAppId(session.getAppId());
-    handoff.setRedirectUrl(appConfig.getPostLoginRedirectUrl());
-    handoff.setCreatedAt(Instant.now());
-    handoff.setExpiresAt(Instant.now().plusSeconds(60));
-    handoff.setUsed(false);
+```text
+/arthur-core
+```
 
-    redisLoginHandoffService.save(handoff);
+So Thymeleaf form should be:
 
-    String separator = appConfig.getPostLoginRedirectUrl().contains("?") ? "&" : "?";
-    return appConfig.getPostLoginRedirectUrl() + separator + "code=" + handoffCode;
+```html
+<form method="post" th:action="@{/sales-points/select}">
+```
+
+NOT:
+
+```html
+<form action="/arthur-core/sales-points/select">
+```
+
+Because Spring automatically prefixes the context path.
+
+---
+
+# Correct Thymeleaf
+
+Use:
+
+```html
+<form method="post" th:action="@{/sales-points/select}">
+```
+
+And radio:
+
+```html
+<input type="radio"
+       name="salesPointId"
+       th:value="${sp.id}"
+       required>
+```
+
+---
+
+# Correct controller
+
+```java
+@Controller
+@RequestMapping("/sales-points")
+@RequiredArgsConstructor
+public class SalesPointController {
+
+    private final AuthService authService;
+
+    @PostMapping("/select")
+    public void selectSalesPoint(
+            @CookieValue("ARTHUR_SESSION") String sessionId,
+            @RequestParam String salesPointId,
+            HttpServletResponse response
+    ) throws IOException {
+
+        String redirectUrl =
+                authService.completeSalesPointSelection(sessionId, salesPointId);
+
+        response.sendRedirect(redirectUrl);
+    }
 }
 ```
 
-And your controller submit endpoint calls it:
+---
 
-```java
-@PostMapping("/sales-points/select")
-public void selectSalesPoint(
-        @CookieValue("ARTHUR_SESSION") String sessionId,
-        @RequestParam String salesPointId,
-        HttpServletResponse response
-) throws IOException {
+# Why this happened
 
-    String redirectUrl = authService.completeSalesPointSelection(sessionId, salesPointId);
-    response.sendRedirect(redirectUrl);
-}
+You currently have BOTH:
+
+```text
+context-path = /arthur-core
 ```
+
+AND probably hardcoded:
+
+```html
+action="/arthur-core/sales-points/select"
+```
+
+which can create mismatches depending on deployment.
+
+Using Thymeleaf `@{}` is the correct Spring way.
