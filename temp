@@ -1,156 +1,28 @@
-Yes. Use this structure now.
-
-## Partner Repository changes
-
-### 1. Update `SalesPointResponse`
+Add **3** inside `handleCallback()` in `AuthService`, right after you fetch the user from Partner Repository and before `redisSessionService.save(session)`.
 
 ```java
-@Data
-@AllArgsConstructor
-@NoArgsConstructor
-public class SalesPointResponse {
-    private String id;
-    private String name;
-    private String orgUnitId;
-}
-```
+UserResponse user = partnerRepositoryClient.getUserById(userId);
 
-### 2. For now, update `mapToResponse()`
+UserSession session = new UserSession();
+session.setSessionId(UUID.randomUUID().toString());
+session.setAppId(tx.getAppId());
+session.setUserId(user.getUserId());
+session.setUsername(user.getUsername());
+session.setRoles(user.getRoles());
 
-Replace your hardcoded sales point block with:
-
-```java
-response.setSalesPoints(List.of(
-        new SalesPointResponse("SP001", "Sales Point 1", "ORG_UNIT_001"),
-        new SalesPointResponse("SP002", "Sales Point 2", "ORG_UNIT_002"),
-        new SalesPointResponse("SP003", "Sales Point 3", "ORG_UNIT_003")
-));
-```
-
-So your method becomes:
-
-```java
-private UserResponse mapToResponse(UserEntity user) {
-    UserResponse response = new UserResponse();
-
-    response.setUserId(user.getUserId());
-    response.setUsername(user.getUsername());
-
-    UserInfoResponse userInfo = new UserInfoResponse();
-    userInfo.setFirstName(user.getFirstName());
-    userInfo.setLastName(user.getLastName());
-    userInfo.setPhoneNumbers(
-            user.getPhoneNumber() == null ? List.of() : List.of(user.getPhoneNumber())
-    );
-    userInfo.setEmails(
-            user.getEmail() == null ? List.of() : List.of(user.getEmail())
-    );
-
-    response.setUserInfo(userInfo);
-
-    response.setSalesPoints(List.of(
-            new SalesPointResponse("SP001", "Sales Point 1", "ORG_UNIT_001"),
-            new SalesPointResponse("SP002", "Sales Point 2", "ORG_UNIT_002"),
-            new SalesPointResponse("SP003", "Sales Point 3", "ORG_UNIT_003")
-    ));
-
-    response.setRelatedDealer(new RelatedPartyResponse("DLR001", "Dealer 1"));
-    response.setRelatedZoneManager(new RelatedPartyResponse("ZM001", "Zone Manager 1"));
-    response.setRoles(List.of("SELLER"));
-
-    return response;
-}
-```
-
-For now this is enough to unblock the UI.
-
----
-
-## Arthur Core changes
-
-### 1. Update `SalesPointResponse`
-
-Make sure Arthur Core DTO matches Partner Repository JSON.
-
-If Partner Repository sends snake case:
-
-```json
-{
-  "id": "SP001",
-  "name": "Sales Point 1",
-  "org_unit_id": "ORG_UNIT_001"
-}
-```
-
-Then use:
-
-```java
-@Data
-@JsonIgnoreProperties(ignoreUnknown = true)
-public class SalesPointResponse {
-
-    @JsonProperty("id")
-    private String id;
-
-    @JsonProperty("name")
-    private String name;
-
-    @JsonProperty("org_unit_id")
-    private String orgUnitId;
-}
-```
-
-If it sends camel case:
-
-```json
-{
-  "id": "SP001",
-  "name": "Sales Point 1",
-  "orgUnitId": "ORG_UNIT_001"
-}
-```
-
-then use:
-
-```java
-@Data
-@JsonIgnoreProperties(ignoreUnknown = true)
-public class SalesPointResponse {
-    private String id;
-    private String name;
-    private String orgUnitId;
-}
-```
-
-### 2. Update `UserSession`
-
-```java
-@Data
-public class UserSession {
-    private String sessionId;
-    private String appId;
-    private String userId;
-    private String username;
-    private List<String> roles;
-    private List<SalesPointResponse> salesPoints;
-
-    private String selectedSalesPointId;
-    private String selectedOrgUnitId;
-
-    private String accessToken;
-    private String refreshToken;
-    private Instant refreshTokenExpiresAt;
-    private Instant createdAt;
-}
-```
-
-### 3. In callback, store sales points
-
-```java
+// ADD HERE
 session.setSalesPoints(user.getSalesPoints());
+
+session.setAccessToken(accessToken);
+session.setRefreshToken(refreshToken);
+session.setCreatedAt(Instant.now());
+
+redisSessionService.save(session);
 ```
 
-### 4. In sales point selection, store both IDs
+Add **4** in the method that handles sales point submit — probably `completeSalesPointSelection(...)` in `AuthService`.
+
+If you don’t have that method yet, create it in `AuthService`:
 
 ```java
 public String completeSalesPointSelection(String sessionId, String salesPointId) {
@@ -168,54 +40,35 @@ public String completeSalesPointSelection(String sessionId, String salesPointId)
 
     String handoffCode = UUID.randomUUID().toString();
 
+    AppConfigResponse appConfig = partnerRepositoryClient.getApp(session.getAppId());
+
     LoginHandoff handoff = new LoginHandoff();
     handoff.setCode(handoffCode);
     handoff.setSessionId(session.getSessionId());
     handoff.setAppId(session.getAppId());
+    handoff.setRedirectUrl(appConfig.getPostLoginRedirectUrl());
     handoff.setCreatedAt(Instant.now());
     handoff.setExpiresAt(Instant.now().plusSeconds(60));
     handoff.setUsed(false);
 
-    AppConfigResponse appConfig = partnerRepositoryClient.getApp(session.getAppId());
-    handoff.setRedirectUrl(appConfig.getPostLoginRedirectUrl());
-
     redisLoginHandoffService.save(handoff);
 
     String separator = appConfig.getPostLoginRedirectUrl().contains("?") ? "&" : "?";
-
     return appConfig.getPostLoginRedirectUrl() + separator + "code=" + handoffCode;
 }
 ```
 
-### 5. Update handoff exchange response
+And your controller submit endpoint calls it:
 
 ```java
-@Data
-public class HandoffExchangeResponse {
-    private String userId;
-    private String username;
-    private List<String> roles;
-    private String appId;
-    private String selectedSalesPointId;
-    private String selectedOrgUnitId;
+@PostMapping("/sales-points/select")
+public void selectSalesPoint(
+        @CookieValue("ARTHUR_SESSION") String sessionId,
+        @RequestParam String salesPointId,
+        HttpServletResponse response
+) throws IOException {
+
+    String redirectUrl = authService.completeSalesPointSelection(sessionId, salesPointId);
+    response.sendRedirect(redirectUrl);
 }
-```
-
-In exchange service:
-
-```java
-response.setSelectedSalesPointId(session.getSelectedSalesPointId());
-response.setSelectedOrgUnitId(session.getSelectedOrgUnitId());
-```
-
-That’s it for now.
-
-The important change is:
-
-```text
-Partner Repository returns salesPoints with orgUnitId
-Arthur Core stores salesPoints in session
-User selects salesPoint
-Arthur Core stores selectedSalesPointId + selectedOrgUnitId
-B2Boost receives both during handoff exchange
 ```
