@@ -1,336 +1,212 @@
-Yes — let’s implement the **Arthur Core flow**.
+Great. Since **Lancelot is now `partner-repository`**, we’ll add sales points there and return them from `getUserById`.
 
-## 1. `UserSession`
+Implement this simple first version:
+
+## 1. Add `sales_points` table
+
+Liquibase YAML:
+
+```yaml
+databaseChangeLog:
+  - changeSet:
+      id: 003-create-sales-points-table
+      author: rahul
+      changes:
+        - createTable:
+            tableName: sales_points
+            columns:
+              - column:
+                  name: id
+                  type: BIGINT
+                  autoIncrement: true
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+
+              - column:
+                  name: sales_point_id
+                  type: VARCHAR(100)
+                  constraints:
+                    nullable: false
+                    unique: true
+
+              - column:
+                  name: name
+                  type: VARCHAR(200)
+                  constraints:
+                    nullable: false
+
+              - column:
+                  name: user_id
+                  type: VARCHAR(100)
+                  constraints:
+                    nullable: false
+```
+
+## 2. Insert test sales points
+
+```yaml
+  - changeSet:
+      id: 004-insert-test-sales-points
+      author: rahul
+      changes:
+        - insert:
+            tableName: sales_points
+            columns:
+              - column:
+                  name: sales_point_id
+                  value: SP001
+              - column:
+                  name: name
+                  value: Sales Point 1
+              - column:
+                  name: user_id
+                  value: testuser
+
+        - insert:
+            tableName: sales_points
+            columns:
+              - column:
+                  name: sales_point_id
+                  value: SP002
+              - column:
+                  name: name
+                  value: Sales Point 2
+              - column:
+                  name: user_id
+                  value: testuser
+```
+
+## 3. Create entity
 
 ```java
-@Data
-public class UserSession {
-    private String sessionId;
-    private String appId;
+@Entity
+@Table(name = "sales_points")
+@Getter
+@Setter
+public class SalesPointEntity {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(name = "sales_point_id", nullable = false, unique = true)
+    private String salesPointId;
+
+    @Column(name = "name", nullable = false)
+    private String name;
+
+    @Column(name = "user_id", nullable = false)
     private String userId;
-    private String username;
-    private List<String> roles;
-    private List<SalesPointResponse> salesPoints;
-    private String selectedSalesPointId;
-    private Instant createdAt;
 }
 ```
 
-## 2. `LoginHandoff`
+## 4. Repository
+
+```java
+public interface SalesPointRepository extends JpaRepository<SalesPointEntity, Long> {
+    List<SalesPointEntity> findByUserId(String userId);
+}
+```
+
+## 5. DTO
+
+Use your existing response shape:
 
 ```java
 @Data
-public class LoginHandoff {
-    private String code;
-    private String sessionId;
-    private String appId;
-    private Instant createdAt;
-    private Instant expiresAt;
+@AllArgsConstructor
+@NoArgsConstructor
+public class SalesPointResponse {
+    private String id;
+    private String name;
 }
 ```
 
-## 3. Callback: create session, redirect to sales points
-
-```java
-@GetMapping("/auth/callback")
-public void callback(
-        @RequestParam String code,
-        @RequestParam String state,
-        HttpServletResponse response
-) throws IOException {
-
-    String sessionId = authService.handleCallback(code, state);
-
-    Cookie cookie = new Cookie("ARTHUR_SESSION", sessionId);
-    cookie.setHttpOnly(true);
-    cookie.setSecure(false); // true in prod
-    cookie.setPath("/");
-    cookie.setMaxAge(3600);
-
-    response.addCookie(cookie);
-    response.sendRedirect("/arthur-core/sales-points");
-}
-```
-
-## 4. `handleCallback`
-
-```java
-public String handleCallback(String code, String state) {
-    AuthTransaction tx = redisAuthTransactionService.findByState(state);
-
-    AppConfigResponse appConfig = lancelotClient.getApp(tx.getAppId());
-
-    Map<String, Object> tokenResponse = exchangeToken(code, tx, appConfig);
-
-    String idToken = (String) tokenResponse.get("id_token");
-
-    JwtUserClaims claims = jwtService.extractClaims(idToken);
-
-    String userId = claims.getPreferredUsername();
-
-    UserResponse user = lancelotClient.getUserById(userId);
-
-    UserSession session = new UserSession();
-    session.setSessionId(UUID.randomUUID().toString());
-    session.setAppId(tx.getAppId());
-    session.setUserId(user.getUserId());
-    session.setUsername(user.getUsername());
-    session.setRoles(user.getRoles());
-    session.setSalesPoints(user.getSalesPoints());
-    session.setCreatedAt(Instant.now());
-
-    redisSessionService.save(session);
-    redisAuthTransactionService.delete(state);
-
-    return session.getSessionId();
-}
-```
-
-## 5. Sales point page
-
-```java
-@GetMapping("/sales-points")
-public ModelAndView salesPoints(
-        @CookieValue("ARTHUR_SESSION") String sessionId
-) {
-    UserSession session = redisSessionService.findBySessionId(sessionId);
-
-    ModelAndView mv = new ModelAndView("sales-points");
-    mv.addObject("salesPoints", session.getSalesPoints());
-    return mv;
-}
-```
-
-## 6. Sales point submit
-
-```java
-@PostMapping("/sales-points/select")
-public void selectSalesPoint(
-        @CookieValue("ARTHUR_SESSION") String sessionId,
-        @RequestParam String salesPointId,
-        HttpServletResponse response
-) throws IOException {
-
-    String redirectUrl = authService.completeSalesPointSelection(sessionId, salesPointId);
-
-    response.sendRedirect(redirectUrl);
-}
-```
-
-## 7. Selection service
-
-```java
-public String completeSalesPointSelection(String sessionId, String salesPointId) {
-    UserSession session = redisSessionService.findBySessionId(sessionId);
-
-    boolean validSalesPoint = session.getSalesPoints().stream()
-            .anyMatch(sp -> sp.getId().equals(salesPointId));
-
-    if (!validSalesPoint) {
-        throw new IllegalArgumentException("Invalid sales point");
-    }
-
-    session.setSelectedSalesPointId(salesPointId);
-    redisSessionService.save(session);
-
-    String handoffCode = UUID.randomUUID().toString();
-
-    LoginHandoff handoff = new LoginHandoff();
-    handoff.setCode(handoffCode);
-    handoff.setSessionId(session.getSessionId());
-    handoff.setAppId(session.getAppId());
-    handoff.setCreatedAt(Instant.now());
-    handoff.setExpiresAt(Instant.now().plusSeconds(60));
-
-    redisLoginHandoffService.save(handoff);
-
-    AppConfigResponse appConfig = lancelotClient.getApp(session.getAppId());
-
-    String separator = appConfig.getPostLoginRedirectUrl().contains("?") ? "&" : "?";
-
-    return appConfig.getPostLoginRedirectUrl() + separator + "code=" + handoffCode;
-}
-```
-
-## 8. Handoff exchange request/response
-
-```java
-@Data
-public class HandoffExchangeRequest {
-    private String code;
-}
-```
-
-```java
-@Data
-public class HandoffExchangeResponse {
-    private String userId;
-    private String username;
-    private List<String> roles;
-    private String appId;
-    private String selectedSalesPointId;
-}
-```
-
-## 9. Exchange endpoint
-
-```java
-@PostMapping("/auth/handoff/exchange")
-public ResponseEntity<HandoffExchangeResponse> exchange(
-        @RequestBody HandoffExchangeRequest request
-) {
-    return ResponseEntity.ok(handoffService.exchange(request.getCode()));
-}
-```
-
-## 10. Exchange service
-
-```java
-public HandoffExchangeResponse exchange(String code) {
-    LoginHandoff handoff = redisLoginHandoffService.findByCode(code);
-
-    if (handoff == null) {
-        throw new IllegalArgumentException("Invalid or expired handoff code");
-    }
-
-    if (Instant.now().isAfter(handoff.getExpiresAt())) {
-        redisLoginHandoffService.delete(code);
-        throw new IllegalArgumentException("Expired handoff code");
-    }
-
-    UserSession session = redisSessionService.findBySessionId(handoff.getSessionId());
-
-    redisLoginHandoffService.delete(code);
-
-    HandoffExchangeResponse response = new HandoffExchangeResponse();
-    response.setUserId(session.getUserId());
-    response.setUsername(session.getUsername());
-    response.setRoles(session.getRoles());
-    response.setAppId(session.getAppId());
-    response.setSelectedSalesPointId(session.getSelectedSalesPointId());
-
-    return response;
-}
-```
-
-## 11. Redis handoff service
+## 6. Update `UserService`
 
 ```java
 @Service
 @RequiredArgsConstructor
-public class RedisLoginHandoffService {
+public class UserService {
 
-    private static final String PREFIX = "handoff:";
+    private final UserRepository userRepository;
+    private final SalesPointRepository salesPointRepository;
 
-    private final RedisTemplate<String, Object> redisTemplate;
-    private final ObjectMapper objectMapper;
+    public UserResponse getUserById(String userId) {
+        UserEntity user = userRepository.findByUserId(userId)
+                .orElseThrow(() -> new IllegalArgumentException("User not found: " + userId));
 
-    public void save(LoginHandoff handoff) {
-        redisTemplate.opsForValue().set(
-                PREFIX + handoff.getCode(),
-                handoff,
-                Duration.ofSeconds(60)
-        );
+        return mapToResponse(user);
     }
 
-    public LoginHandoff findByCode(String code) {
-        Object value = redisTemplate.opsForValue().get(PREFIX + code);
+    private UserResponse mapToResponse(UserEntity user) {
+        UserResponse response = new UserResponse();
 
-        if (value == null) {
-            return null;
-        }
+        response.setUserId(user.getUserId());
+        response.setUsername(user.getUsername());
 
-        if (value instanceof LoginHandoff handoff) {
-            return handoff;
-        }
+        UserInfoResponse userInfo = new UserInfoResponse();
+        userInfo.setFirstName(user.getFirstName());
+        userInfo.setLastName(user.getLastName());
+        userInfo.setEmails(user.getEmail() == null ? List.of() : List.of(user.getEmail()));
+        userInfo.setPhoneNumbers(user.getPhoneNumber() == null ? List.of() : List.of(user.getPhoneNumber()));
+        response.setUserInfo(userInfo);
 
-        return objectMapper.convertValue(value, LoginHandoff.class);
-    }
+        List<SalesPointResponse> salesPoints = salesPointRepository
+                .findByUserId(user.getUserId())
+                .stream()
+                .map(sp -> new SalesPointResponse(
+                        sp.getSalesPointId(),
+                        sp.getName()
+                ))
+                .toList();
 
-    public void delete(String code) {
-        redisTemplate.delete(PREFIX + code);
+        response.setSalesPoints(salesPoints);
+
+        response.setRoles(List.of("SELLER"));
+
+        return response;
     }
 }
 ```
 
-That gives you the exact flow:
+## 7. Expected `partner-repository` response
 
-```text
-callback → session
-sales point select → handoff
-B2Boost → exchange code
-```
------
-
-Use **Thymeleaf** for now.
-
-It is the simplest because the sales point screen belongs to **Arthur Core**, not B2Boost.
-
-Add dependency:
-
-```xml
-<dependency>
-    <groupId>org.springframework.boot</groupId>
-    <artifactId>spring-boot-starter-thymeleaf</artifactId>
-</dependency>
-```
-
-Create:
-
-```text
-src/main/resources/templates/sales-points.html
+```json
+{
+  "user_id": "testuser",
+  "username": "testuser",
+  "user_info": {
+    "first_name": "Test",
+    "last_name": "User",
+    "emails": ["testuser@test.local"],
+    "phone_numbers": ["+33123456789"]
+  },
+  "sales_points": [
+    {
+      "id": "SP001",
+      "name": "Sales Point 1"
+    },
+    {
+      "id": "SP002",
+      "name": "Sales Point 2"
+    }
+  ],
+  "roles": ["SELLER"]
+}
 ```
 
-Example:
-
-```html
-<!DOCTYPE html>
-<html xmlns:th="http://www.thymeleaf.org">
-<head>
-    <title>Select Sales Point</title>
-</head>
-<body>
-<h2>Select Sales Point</h2>
-
-<form method="post" action="/arthur-core/sales-points/select">
-    <div th:each="sp : ${salesPoints}">
-        <label>
-            <input type="radio" name="salesPointId" th:value="${sp.id}" required>
-            <span th:text="${sp.name}">Sales Point</span>
-        </label>
-        <br>
-    </div>
-
-    <button type="submit">Confirm</button>
-</form>
-
-</body>
-</html>
-```
-
-Controller:
+Then Arthur Core will store:
 
 ```java
-@GetMapping("/sales-points")
-public ModelAndView salesPoints(
-        @CookieValue("ARTHUR_SESSION") String sessionId
-) {
-    UserSession session = redisSessionService.findBySessionId(sessionId);
-
-    ModelAndView mv = new ModelAndView("sales-points");
-    mv.addObject("salesPoints", session.getSalesPoints());
-
-    return mv;
-}
+session.setSalesPoints(user.getSalesPoints());
 ```
 
-Why Thymeleaf is best here:
+And your page:
 
-```text
-Arthur Core owns the screen
-No separate frontend needed
-Easy POST submit to Arthur Core
-Works naturally with Spring MVC
+```java
+mv.addObject("salesPoints", session.getSalesPoints());
 ```
 
-Later, if UX becomes bigger, you can replace it with React/Angular.
+will finally show the radio buttons.
