@@ -1,132 +1,322 @@
-Your flow is actually working correctly now.
-
-The problem is only this:
+Yes — switch from **user → sales points** to:
 
 ```text
-POST /arthur-core/sales-points/select
-→ 404 Not Found
+person → relationship → point_of_sales
 ```
 
-Which means your HTML form action and controller mapping do not match.
+## Partner Repository changes
 
-From logs:
+### 1. Tables
 
-```text
-POST /arthur-core/sales-points/select
-404
+```yaml
+databaseChangeLog:
+  - changeSet:
+      id: 003-create-point-of-sales
+      author: rahul
+      changes:
+        - createTable:
+            tableName: point_of_sales
+            columns:
+              - column:
+                  name: id
+                  type: BIGINT
+                  autoIncrement: true
+                  constraints:
+                    primaryKey: true
+              - column:
+                  name: point_of_sales_id
+                  type: VARCHAR(100)
+                  constraints:
+                    nullable: false
+                    unique: true
+              - column:
+                  name: label
+                  type: VARCHAR(200)
+                  constraints:
+                    nullable: false
+
+  - changeSet:
+      id: 004-create-person-pos-relationships
+      author: rahul
+      changes:
+        - createTable:
+            tableName: person_point_of_sales_relationships
+            columns:
+              - column:
+                  name: id
+                  type: BIGINT
+                  autoIncrement: true
+                  constraints:
+                    primaryKey: true
+              - column:
+                  name: person_user_id
+                  type: VARCHAR(100)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: point_of_sales_id
+                  type: VARCHAR(100)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: relationship_type
+                  type: VARCHAR(20)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: org_unit_id
+                  type: VARCHAR(100)
+                  constraints:
+                    nullable: false
 ```
 
-So either:
+### 2. Test data
 
-* controller path is wrong
-* or class-level `@RequestMapping` is missing/mismatched
+```yaml
+  - changeSet:
+      id: 005-insert-test-point-of-sales
+      author: rahul
+      changes:
+        - insert:
+            tableName: point_of_sales
+            columns:
+              - column:
+                  name: point_of_sales_id
+                  value: POS001
+              - column:
+                  name: label
+                  value: Sales Point 1
 
----
+        - insert:
+            tableName: point_of_sales
+            columns:
+              - column:
+                  name: point_of_sales_id
+                  value: POS002
+              - column:
+                  name: label
+                  value: Sales Point 2
 
-# Most likely fix
+  - changeSet:
+      id: 006-insert-test-person-pos-relationships
+      author: rahul
+      changes:
+        - insert:
+            tableName: person_point_of_sales_relationships
+            columns:
+              - column:
+                  name: person_user_id
+                  value: testuser
+              - column:
+                  name: point_of_sales_id
+                  value: POS001
+              - column:
+                  name: relationship_type
+                  value: "025"
+              - column:
+                  name: org_unit_id
+                  value: ORG001
 
-Your controller probably has:
+        - insert:
+            tableName: person_point_of_sales_relationships
+            columns:
+              - column:
+                  name: person_user_id
+                  value: testuser
+              - column:
+                  name: point_of_sales_id
+                  value: POS002
+              - column:
+                  name: relationship_type
+                  value: "025"
+              - column:
+                  name: org_unit_id
+                  value: ORG002
+```
+
+## 3. Entities
 
 ```java
-@Controller
-@RequestMapping("/sales-points")
-public class SalesPointController
-```
+@Entity
+@Table(name = "point_of_sales")
+@Getter
+@Setter
+public class PointOfSalesEntity {
 
-Then method:
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
 
-```java
-@PostMapping("/select")
-```
+    @Column(name = "point_of_sales_id")
+    private String pointOfSalesId;
 
-Final URL becomes:
-
-```text
-/sales-points/select
-```
-
-BUT your application already has context path:
-
-```text
-/arthur-core
-```
-
-So Thymeleaf form should be:
-
-```html
-<form method="post" th:action="@{/sales-points/select}">
-```
-
-NOT:
-
-```html
-<form action="/arthur-core/sales-points/select">
-```
-
-Because Spring automatically prefixes the context path.
-
----
-
-# Correct Thymeleaf
-
-Use:
-
-```html
-<form method="post" th:action="@{/sales-points/select}">
-```
-
-And radio:
-
-```html
-<input type="radio"
-       name="salesPointId"
-       th:value="${sp.id}"
-       required>
-```
-
----
-
-# Correct controller
-
-```java
-@Controller
-@RequestMapping("/sales-points")
-@RequiredArgsConstructor
-public class SalesPointController {
-
-    private final AuthService authService;
-
-    @PostMapping("/select")
-    public void selectSalesPoint(
-            @CookieValue("ARTHUR_SESSION") String sessionId,
-            @RequestParam String salesPointId,
-            HttpServletResponse response
-    ) throws IOException {
-
-        String redirectUrl =
-                authService.completeSalesPointSelection(sessionId, salesPointId);
-
-        response.sendRedirect(redirectUrl);
-    }
+    @Column(name = "label")
+    private String label;
 }
 ```
 
+```java
+@Entity
+@Table(name = "person_point_of_sales_relationships")
+@Getter
+@Setter
+public class PersonPointOfSalesRelationshipEntity {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(name = "person_user_id")
+    private String personUserId;
+
+    @Column(name = "point_of_sales_id")
+    private String pointOfSalesId;
+
+    @Column(name = "relationship_type")
+    private String relationshipType;
+
+    @Column(name = "org_unit_id")
+    private String orgUnitId;
+}
+```
+
+## 4. Repositories
+
+```java
+public interface PointOfSalesRepository extends JpaRepository<PointOfSalesEntity, Long> {
+    Optional<PointOfSalesEntity> findByPointOfSalesId(String pointOfSalesId);
+}
+```
+
+```java
+public interface PersonPointOfSalesRelationshipRepository
+        extends JpaRepository<PersonPointOfSalesRelationshipEntity, Long> {
+
+    List<PersonPointOfSalesRelationshipEntity> findByPersonUserId(String personUserId);
+}
+```
+
+## 5. DTO
+
+```java
+@Data
+@AllArgsConstructor
+@NoArgsConstructor
+public class SalesPointResponse {
+    private String id;
+    private String label;
+    private String orgUnitId;
+    private String relationshipType;
+}
+```
+
+## 6. Update `UserService`
+
+```java
+private final PersonPointOfSalesRelationshipRepository relationshipRepository;
+private final PointOfSalesRepository pointOfSalesRepository;
+```
+
+Inside `mapToResponse()`:
+
+```java
+List<SalesPointResponse> salesPoints =
+        relationshipRepository.findByPersonUserId(user.getUserId())
+                .stream()
+                .map(rel -> {
+                    PointOfSalesEntity pos = pointOfSalesRepository
+                            .findByPointOfSalesId(rel.getPointOfSalesId())
+                            .orElseThrow();
+
+                    return new SalesPointResponse(
+                            pos.getPointOfSalesId(),
+                            pos.getLabel(),
+                            rel.getOrgUnitId(),
+                            rel.getRelationshipType()
+                    );
+                })
+                .toList();
+
+response.setSalesPoints(salesPoints);
+```
+
 ---
 
-# Why this happened
+# Arthur Core changes
 
-You currently have BOTH:
+## 1. Update `SalesPointResponse`
 
-```text
-context-path = /arthur-core
+```java
+@Data
+@JsonIgnoreProperties(ignoreUnknown = true)
+public class SalesPointResponse {
+
+    @JsonProperty("id")
+    private String id;
+
+    @JsonProperty("label")
+    private String label;
+
+    @JsonProperty("org_unit_id")
+    private String orgUnitId;
+
+    @JsonProperty("relationship_type")
+    private String relationshipType;
+}
 ```
 
-AND probably hardcoded:
+## 2. Update `UserSession`
+
+```java
+private List<SalesPointResponse> salesPoints;
+private String selectedSalesPointId;
+private String selectedOrgUnitId;
+private String selectedRelationshipType;
+```
+
+## 3. Store selected context
+
+In `completeSalesPointSelection()`:
+
+```java
+SalesPointResponse selectedSalesPoint = session.getSalesPoints().stream()
+        .filter(sp -> sp.getId().equals(salesPointId))
+        .findFirst()
+        .orElseThrow(() -> new IllegalArgumentException("Invalid sales point"));
+
+session.setSelectedSalesPointId(selectedSalesPoint.getId());
+session.setSelectedOrgUnitId(selectedSalesPoint.getOrgUnitId());
+session.setSelectedRelationshipType(selectedSalesPoint.getRelationshipType());
+
+redisSessionService.save(session);
+```
+
+## 4. Update Thymeleaf
 
 ```html
-action="/arthur-core/sales-points/select"
+<span th:text="${sp.label}">Sales Point</span>
 ```
 
-which can create mismatches depending on deployment.
+instead of:
 
-Using Thymeleaf `@{}` is the correct Spring way.
+```html
+<span th:text="${sp.name}">Sales Point</span>
+```
+
+## 5. Update handoff response
+
+```java
+private String selectedSalesPointId;
+private String selectedOrgUnitId;
+private String selectedRelationshipType;
+```
+
+Set them:
+
+```java
+response.setSelectedSalesPointId(session.getSelectedSalesPointId());
+response.setSelectedOrgUnitId(session.getSelectedOrgUnitId());
+response.setSelectedRelationshipType(session.getSelectedRelationshipType());
+```
+
+That’s the correct model. Partner Repository owns the transformation; Arthur Core only receives selectable sales-point context.
