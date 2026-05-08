@@ -1,3 +1,19 @@
+
+Hello [Name],
+
+Thank you for reaching out.
+
+We reviewed the issue regarding the group travel request approval. It appears that the birthdate information may be missing for one of the individuals associated with the request — this could be the requestor, a group member, or the approver.
+
+Could you please verify that the birthdate information is correctly maintained in the profiles of all individuals associated with the request, including the requestor, travelers, and approver?
+
+Once the information is validated, the approval process should proceed successfully.
+
+Please let us know if you need any further assistance.
+
+Kind regards,
+Rahul
+
 Yes — switch from **user → sales points** to:
 
 ```text
