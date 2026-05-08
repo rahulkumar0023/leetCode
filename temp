@@ -1,28 +1,8 @@
+Below is the **final clean version**.
 
-Hello [Name],
+## Partner Repository
 
-Thank you for reaching out.
-
-We reviewed the issue regarding the group travel request approval. It appears that the birthdate information may be missing for one of the individuals associated with the request — this could be the requestor, a group member, or the approver.
-
-Could you please verify that the birthdate information is correctly maintained in the profiles of all individuals associated with the request, including the requestor, travelers, and approver?
-
-Once the information is validated, the approval process should proceed successfully.
-
-Please let us know if you need any further assistance.
-
-Kind regards,
-Rahul
-
-Yes — switch from **user → sales points** to:
-
-```text
-person → relationship → point_of_sales
-```
-
-## Partner Repository changes
-
-### 1. Tables
+### Liquibase tables
 
 ```yaml
 databaseChangeLog:
@@ -39,6 +19,7 @@ databaseChangeLog:
                   autoIncrement: true
                   constraints:
                     primaryKey: true
+                    nullable: false
               - column:
                   name: point_of_sales_id
                   type: VARCHAR(100)
@@ -64,6 +45,7 @@ databaseChangeLog:
                   autoIncrement: true
                   constraints:
                     primaryKey: true
+                    nullable: false
               - column:
                   name: person_user_id
                   type: VARCHAR(100)
@@ -86,7 +68,7 @@ databaseChangeLog:
                     nullable: false
 ```
 
-### 2. Test data
+### Test data
 
 ```yaml
   - changeSet:
@@ -150,7 +132,7 @@ databaseChangeLog:
                   value: ORG002
 ```
 
-## 3. Entities
+### Entities
 
 ```java
 @Entity
@@ -163,10 +145,10 @@ public class PointOfSalesEntity {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(name = "point_of_sales_id")
+    @Column(name = "point_of_sales_id", nullable = false, unique = true)
     private String pointOfSalesId;
 
-    @Column(name = "label")
+    @Column(name = "label", nullable = false)
     private String label;
 }
 ```
@@ -182,21 +164,21 @@ public class PersonPointOfSalesRelationshipEntity {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(name = "person_user_id")
+    @Column(name = "person_user_id", nullable = false)
     private String personUserId;
 
-    @Column(name = "point_of_sales_id")
+    @Column(name = "point_of_sales_id", nullable = false)
     private String pointOfSalesId;
 
-    @Column(name = "relationship_type")
+    @Column(name = "relationship_type", nullable = false)
     private String relationshipType;
 
-    @Column(name = "org_unit_id")
+    @Column(name = "org_unit_id", nullable = false)
     private String orgUnitId;
 }
 ```
 
-## 4. Repositories
+### Repositories
 
 ```java
 public interface PointOfSalesRepository extends JpaRepository<PointOfSalesEntity, Long> {
@@ -212,7 +194,7 @@ public interface PersonPointOfSalesRelationshipRepository
 }
 ```
 
-## 5. DTO
+### DTO
 
 ```java
 @Data
@@ -226,41 +208,77 @@ public class SalesPointResponse {
 }
 ```
 
-## 6. Update `UserService`
+### UserService
 
 ```java
-private final PersonPointOfSalesRelationshipRepository relationshipRepository;
-private final PointOfSalesRepository pointOfSalesRepository;
-```
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class UserService {
 
-Inside `mapToResponse()`:
+    private final UserRepository userRepository;
+    private final PointOfSalesRepository pointOfSalesRepository;
+    private final PersonPointOfSalesRelationshipRepository relationshipRepository;
 
-```java
-List<SalesPointResponse> salesPoints =
-        relationshipRepository.findByPersonUserId(user.getUserId())
-                .stream()
-                .map(rel -> {
-                    PointOfSalesEntity pos = pointOfSalesRepository
-                            .findByPointOfSalesId(rel.getPointOfSalesId())
-                            .orElseThrow();
+    public UserResponse getUserById(String userId) {
+        UserEntity user = userRepository.findByUserId(userId)
+                .orElseThrow(() -> new IllegalArgumentException("User not found: " + userId));
 
-                    return new SalesPointResponse(
-                            pos.getPointOfSalesId(),
-                            pos.getLabel(),
-                            rel.getOrgUnitId(),
-                            rel.getRelationshipType()
-                    );
-                })
-                .toList();
+        return mapToResponse(user);
+    }
 
-response.setSalesPoints(salesPoints);
+    private UserResponse mapToResponse(UserEntity user) {
+        UserResponse response = new UserResponse();
+
+        response.setUserId(user.getUserId());
+        response.setUsername(user.getUsername());
+
+        UserInfoResponse userInfo = new UserInfoResponse();
+        userInfo.setFirstName(user.getFirstName());
+        userInfo.setLastName(user.getLastName());
+        userInfo.setPhoneNumbers(
+                user.getPhoneNumber() == null ? List.of() : List.of(user.getPhoneNumber())
+        );
+        userInfo.setEmails(
+                user.getEmail() == null ? List.of() : List.of(user.getEmail())
+        );
+
+        response.setUserInfo(userInfo);
+
+        List<SalesPointResponse> salesPoints =
+                relationshipRepository.findByPersonUserId(user.getUserId())
+                        .stream()
+                        .map(rel -> {
+                            PointOfSalesEntity pos = pointOfSalesRepository
+                                    .findByPointOfSalesId(rel.getPointOfSalesId())
+                                    .orElseThrow(() -> new IllegalArgumentException(
+                                            "Point of Sales not found: " + rel.getPointOfSalesId()
+                                    ));
+
+                            return new SalesPointResponse(
+                                    pos.getPointOfSalesId(),
+                                    pos.getLabel(),
+                                    rel.getOrgUnitId(),
+                                    rel.getRelationshipType()
+                            );
+                        })
+                        .toList();
+
+        response.setSalesPoints(salesPoints);
+        response.setRoles(List.of("SELLER"));
+
+        return response;
+    }
+}
 ```
 
 ---
 
-# Arthur Core changes
+## Arthur Core
 
-## 1. Update `SalesPointResponse`
+### `SalesPointResponse`
+
+If Partner Repository returns snake case:
 
 ```java
 @Data
@@ -281,58 +299,182 @@ public class SalesPointResponse {
 }
 ```
 
-## 2. Update `UserSession`
+### `UserSession`
 
 ```java
-private List<SalesPointResponse> salesPoints;
-private String selectedSalesPointId;
-private String selectedOrgUnitId;
-private String selectedRelationshipType;
+@Data
+public class UserSession {
+    private String sessionId;
+    private String appId;
+    private String userId;
+    private String username;
+    private List<String> roles;
+    private List<SalesPointResponse> salesPoints;
+
+    private String selectedSalesPointId;
+    private String selectedOrgUnitId;
+    private String selectedRelationshipType;
+
+    private String accessToken;
+    private String refreshToken;
+    private Instant refreshTokenExpiresAt;
+    private Instant createdAt;
+}
 ```
 
-## 3. Store selected context
+### In `handleCallback()`
 
-In `completeSalesPointSelection()`:
+After loading user:
 
 ```java
-SalesPointResponse selectedSalesPoint = session.getSalesPoints().stream()
-        .filter(sp -> sp.getId().equals(salesPointId))
-        .findFirst()
-        .orElseThrow(() -> new IllegalArgumentException("Invalid sales point"));
+UserResponse user = partnerRepositoryClient.getUserById(userId);
 
-session.setSelectedSalesPointId(selectedSalesPoint.getId());
-session.setSelectedOrgUnitId(selectedSalesPoint.getOrgUnitId());
-session.setSelectedRelationshipType(selectedSalesPoint.getRelationshipType());
+UserSession session = new UserSession();
+session.setSessionId(UUID.randomUUID().toString());
+session.setAppId(tx.getAppId());
+session.setUserId(user.getUserId());
+session.setUsername(user.getUsername());
+session.setRoles(user.getRoles());
+session.setSalesPoints(user.getSalesPoints());
+session.setAccessToken(accessToken);
+session.setRefreshToken(refreshToken);
+session.setRefreshTokenExpiresAt(Instant.now());
+session.setCreatedAt(Instant.now());
 
 redisSessionService.save(session);
+redisAuthTransactionService.delete(state);
+
+return new AuthResult(session.getSessionId());
 ```
 
-## 4. Update Thymeleaf
+Do **not** create handoff here.
 
-```html
-<span th:text="${sp.label}">Sales Point</span>
-```
-
-instead of:
-
-```html
-<span th:text="${sp.name}">Sales Point</span>
-```
-
-## 5. Update handoff response
+### Sales point controller
 
 ```java
-private String selectedSalesPointId;
-private String selectedOrgUnitId;
-private String selectedRelationshipType;
+@Controller
+@RequiredArgsConstructor
+@Slf4j
+@RequestMapping("/sales-points")
+public class SalesPointController {
+
+    private final AuthService authService;
+    private final RedisSessionService redisSessionService;
+
+    @GetMapping
+    public ModelAndView salesPoints(
+            @CookieValue("ARTHUR_SESSION") String sessionId
+    ) {
+        UserSession session = redisSessionService.findBySessionId(sessionId);
+
+        ModelAndView mv = new ModelAndView("views/sales-points");
+        mv.addObject("salesPoints", session.getSalesPoints());
+
+        return mv;
+    }
+
+    @PostMapping("/select")
+    public void selectSalesPoint(
+            @CookieValue("ARTHUR_SESSION") String sessionId,
+            @RequestParam String salesPointId,
+            HttpServletResponse response
+    ) throws IOException {
+
+        String redirectUrl = authService.completeSalesPointSelection(sessionId, salesPointId);
+        response.sendRedirect(redirectUrl);
+    }
+}
 ```
 
-Set them:
+### `completeSalesPointSelection`
 
 ```java
+public String completeSalesPointSelection(String sessionId, String salesPointId) {
+    UserSession session = redisSessionService.findBySessionId(sessionId);
+
+    SalesPointResponse selectedSalesPoint = session.getSalesPoints().stream()
+            .filter(sp -> sp.getId().equals(salesPointId))
+            .findFirst()
+            .orElseThrow(() -> new IllegalArgumentException("Invalid sales point"));
+
+    session.setSelectedSalesPointId(selectedSalesPoint.getId());
+    session.setSelectedOrgUnitId(selectedSalesPoint.getOrgUnitId());
+    session.setSelectedRelationshipType(selectedSalesPoint.getRelationshipType());
+
+    redisSessionService.save(session);
+
+    AppConfigResponse appConfig = partnerRepositoryClient.getApp(session.getAppId());
+
+    String handoffCode = UUID.randomUUID().toString();
+
+    LoginHandoff handoff = new LoginHandoff();
+    handoff.setCode(handoffCode);
+    handoff.setSessionId(session.getSessionId());
+    handoff.setAppId(session.getAppId());
+    handoff.setRedirectUrl(appConfig.getPostLoginRedirectUrl());
+    handoff.setCreatedAt(Instant.now());
+    handoff.setExpiresAt(Instant.now().plusSeconds(60));
+    handoff.setUsed(false);
+
+    redisLoginHandoffService.save(handoff);
+
+    String separator = appConfig.getPostLoginRedirectUrl().contains("?") ? "&" : "?";
+    return appConfig.getPostLoginRedirectUrl() + separator + "code=" + handoffCode;
+}
+```
+
+### Handoff exchange response
+
+```java
+@Data
+public class HandoffExchangeResponse {
+    private String userId;
+    private String username;
+    private List<String> roles;
+    private String appId;
+    private String selectedSalesPointId;
+    private String selectedOrgUnitId;
+    private String selectedRelationshipType;
+}
+```
+
+In exchange:
+
+```java
+response.setUserId(session.getUserId());
+response.setUsername(session.getUsername());
+response.setRoles(session.getRoles());
+response.setAppId(session.getAppId());
 response.setSelectedSalesPointId(session.getSelectedSalesPointId());
 response.setSelectedOrgUnitId(session.getSelectedOrgUnitId());
 response.setSelectedRelationshipType(session.getSelectedRelationshipType());
 ```
 
-That’s the correct model. Partner Repository owns the transformation; Arthur Core only receives selectable sales-point context.
+### Thymeleaf
+
+```html
+<form method="post" th:action="@{/sales-points/select}">
+    <div th:each="sp : ${salesPoints}">
+        <label>
+            <input type="radio" name="salesPointId" th:value="${sp.id}" required>
+            <span th:text="${sp.label}">Sales Point</span>
+            <small th:text="${sp.orgUnitId}">ORG</small>
+        </label>
+        <br>
+    </div>
+
+    <button type="submit">Confirm</button>
+</form>
+```
+
+Final flow:
+
+```text
+Partner Repository:
+person → relationship → point_of_sales
+
+Arthur Core:
+callback → session with salesPoints
+sales-point select → selected POS context + handoff
+B2Boost exchange → user + selected POS + orgUnit + relationshipType
+```
