@@ -1,259 +1,157 @@
-Yes — implement these small improvements.
+Yes — and you should.
 
-## 1. `RedisSessionService`
+Otherwise after session expiry Arthur Core won’t know which application login flow to restart.
 
-**Location:** Arthur Core
-**Class:** `RedisSessionService`
+Best approach:
 
-Change log from this:
-
-```java
-log.info("Saved session key={}", key);
+```text
+/sales-points?appId=B2BOOST_BE
 ```
 
-to this:
+and on expiry:
 
-```java
-log.debug(
-        "Arthur session saved for userId={}, appId={}, selectedSalesPoint={}",
-        session.getUserId(),
-        session.getAppId(),
-        session.getSelectedSalesPointId()
-);
-```
-
-Keep save logic same:
-
-```java
-public void save(UserSession session) {
-    String key = "session:" + session.getSessionId();
-
-    redisTemplate.opsForValue().set(
-            key,
-            session,
-            Duration.ofHours(1)
-    );
-
-    log.debug(
-            "Arthur session saved for userId={}, appId={}, selectedSalesPoint={}",
-            session.getUserId(),
-            session.getAppId(),
-            session.getSelectedSalesPointId()
-    );
-}
+```text
+/auth/start?appId=B2BOOST_BE
 ```
 
 ---
 
-## 2. `RedisLoginHandoffService`
+# Recommended implementation
 
-**Location:** Arthur Core
-**Class:** `RedisLoginHandoffService`
+## 1. Add `appId` param to sales-points URL
 
-Avoid logging real handoff code.
+After callback:
 
-Use:
+Instead of:
 
 ```java
-public void save(LoginHandoff handoff) {
-    redisTemplate.opsForValue().set(
-            "handoff:" + handoff.getCode(),
-            handoff,
-            Duration.ofSeconds(60)
-    );
-
-    log.info(
-            "Login handoff saved for appId={}, redirectUrl={}",
-            handoff.getAppId(),
-            handoff.getRedirectUrl()
-    );
-}
+response.sendRedirect("/arthur-core/sales-points");
 ```
 
-If you currently log:
+use:
 
 ```java
-log.info("Saved login handoff code={}", code);
-```
-
-remove it.
-
----
-
-## 3. `AuthService.handleCallback()`
-
-**Location:** Arthur Core
-**Class:** `AuthService`
-
-Keep logs, but avoid token/session details.
-
-Use:
-
-```java
-log.info("Callback received for state");
-log.info("Auth transaction found for appId={}", tx.getAppId());
-log.info("Token exchange completed");
-log.info(
-        "Authenticated user loaded from Partner Repository userId={}, appId={}",
-        user.getUserId(),
-        tx.getAppId()
+response.sendRedirect(
+        "/arthur-core/sales-points?appId=" + URLEncoder.encode(tx.getAppId(), StandardCharsets.UTF_8)
 );
-```
-
-Avoid:
-
-```java
-log.info("sessionId={}", session.getSessionId());
-log.info("accessToken={}", accessToken);
-log.info("refreshToken={}", refreshToken);
-log.info("handoffCode={}", handoffCode);
 ```
 
 ---
 
-## 4. `AuthService.completeSalesPointSelection()`
+# 2. Update controller
 
-**Location:** Arthur Core
-**Class:** `AuthService`
-
-Add safe logs:
-
-```java
-log.info(
-        "Sales point selected for userId={}, appId={}, salesPointId={}",
-        session.getUserId(),
-        session.getAppId(),
-        selectedSalesPoint.getId()
-);
-```
-
-And after handoff save:
-
-```java
-log.info(
-        "Login handoff created for userId={}, appId={}",
-        session.getUserId(),
-        session.getAppId()
-);
-```
-
-Do **not** log the handoff code.
-
----
-
-## 5. `SalesPointController`
-
-**Location:** Arthur Core
-**Class:** `SalesPointController`
-
-Make cookie optional and handle expired session cleanly:
+## GET `/sales-points`
 
 ```java
 @GetMapping
 public ModelAndView salesPoints(
+        @RequestParam String appId,
         @CookieValue(value = "ARTHUR_SESSION", required = false) String sessionId
 ) {
+
     if (sessionId == null || sessionId.isBlank()) {
-        return new ModelAndView("redirect:/auth/login-expired");
+        return new ModelAndView("redirect:/auth/start?appId=" + appId);
     }
 
     UserSession session = redisSessionService.findBySessionId(sessionId);
 
     if (session == null) {
-        return new ModelAndView("redirect:/auth/login-expired");
+        return new ModelAndView("redirect:/auth/start?appId=" + appId);
     }
 
     ModelAndView mv = new ModelAndView("views/sales-points");
     mv.addObject("salesPoints", session.getSalesPoints());
+    mv.addObject("appId", appId);
 
     return mv;
 }
 ```
 
-For POST:
+---
+
+# 3. Update POST `/select`
 
 ```java
 @PostMapping("/select")
 public void selectSalesPoint(
+        @RequestParam String appId,
         @CookieValue(value = "ARTHUR_SESSION", required = false) String sessionId,
         @RequestParam String salesPointId,
         HttpServletResponse response
 ) throws IOException {
 
     if (sessionId == null || sessionId.isBlank()) {
-        response.sendRedirect("/arthur-core/auth/login-expired");
+        response.sendRedirect("/arthur-core/auth/start?appId=" + appId);
         return;
     }
 
-    String redirectUrl = authService.completeSalesPointSelection(sessionId, salesPointId);
+    String redirectUrl =
+            authService.completeSalesPointSelection(sessionId, salesPointId);
+
     response.sendRedirect(redirectUrl);
 }
 ```
 
 ---
 
-## 6. Add simple expired page endpoint
+# 4. Thymeleaf form
 
-**Location:** Arthur Core
-**Class:** `AuthController`
-
-```java
-@GetMapping("/auth/login-expired")
-public ModelAndView loginExpired() {
-    return new ModelAndView("views/login-expired");
-}
-```
-
-Create:
-
-```text
-src/main/resources/templates/views/login-expired.html
-```
+Add hidden appId field:
 
 ```html
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Session expired</title>
-</head>
-<body>
-<h2>Session expired</h2>
-<p>Your login session has expired. Please start login again.</p>
-</body>
-</html>
+<input type="hidden" name="appId" th:value="${appId}">
 ```
 
----
-
-## 7. Thymeleaf sales point page
-
-**Location:** Arthur Core
-**File:**
-
-```text
-src/main/resources/templates/views/sales-points.html
-```
-
-Make sure form uses Thymeleaf path:
+Final form:
 
 ```html
 <form method="post" th:action="@{/sales-points/select}">
-```
 
-And label:
+    <input type="hidden" name="appId" th:value="${appId}">
 
-```html
-<span th:text="${sp.label}">Sales Point</span>
+    <div th:each="sp : ${salesPoints}">
+        <label>
+            <input type="radio"
+                   name="salesPointId"
+                   th:value="${sp.id}"
+                   required>
+
+            <span th:text="${sp.label}">Sales Point</span>
+        </label>
+        <br>
+    </div>
+
+    <button type="submit">Confirm</button>
+</form>
 ```
 
 ---
 
-These are the key improvements:
+# Important improvement
 
-```text
-safe logging
-no secrets in logs
-same Redis session updated safely
-clean expired-session handling
-handoff code not logged
+Your `/auth/start` currently expects POST JSON.
+
+For redirects, easier is to also support GET:
+
+## Add:
+
+```java
+@GetMapping("/auth/start")
+public void startAuthenticationGet(
+        @RequestParam String appId,
+        HttpServletResponse response
+) throws IOException {
+
+    String authorizationUrl = authService.startAuthentication(appId);
+
+    response.sendRedirect(authorizationUrl);
+}
 ```
+
+This is extremely useful for:
+
+* expired session restart
+* bookmarks
+* browser redirects
+
+while keeping your AJAX POST version too.
