@@ -1,345 +1,259 @@
-Yes. Since your existing `sales_points` table already has the old structure, for local/dev easiest is **drop and recreate**.
+Yes — implement these small improvements.
 
-Use this final model:
+## 1. `RedisSessionService`
+
+**Location:** Arthur Core
+**Class:** `RedisSessionService`
+
+Change log from this:
+
+```java
+log.info("Saved session key={}", key);
+```
+
+to this:
+
+```java
+log.debug(
+        "Arthur session saved for userId={}, appId={}, selectedSalesPoint={}",
+        session.getUserId(),
+        session.getAppId(),
+        session.getSelectedSalesPointId()
+);
+```
+
+Keep save logic same:
+
+```java
+public void save(UserSession session) {
+    String key = "session:" + session.getSessionId();
+
+    redisTemplate.opsForValue().set(
+            key,
+            session,
+            Duration.ofHours(1)
+    );
+
+    log.debug(
+            "Arthur session saved for userId={}, appId={}, selectedSalesPoint={}",
+            session.getUserId(),
+            session.getAppId(),
+            session.getSelectedSalesPointId()
+    );
+}
+```
+
+---
+
+## 2. `RedisLoginHandoffService`
+
+**Location:** Arthur Core
+**Class:** `RedisLoginHandoffService`
+
+Avoid logging real handoff code.
+
+Use:
+
+```java
+public void save(LoginHandoff handoff) {
+    redisTemplate.opsForValue().set(
+            "handoff:" + handoff.getCode(),
+            handoff,
+            Duration.ofSeconds(60)
+    );
+
+    log.info(
+            "Login handoff saved for appId={}, redirectUrl={}",
+            handoff.getAppId(),
+            handoff.getRedirectUrl()
+    );
+}
+```
+
+If you currently log:
+
+```java
+log.info("Saved login handoff code={}", code);
+```
+
+remove it.
+
+---
+
+## 3. `AuthService.handleCallback()`
+
+**Location:** Arthur Core
+**Class:** `AuthService`
+
+Keep logs, but avoid token/session details.
+
+Use:
+
+```java
+log.info("Callback received for state");
+log.info("Auth transaction found for appId={}", tx.getAppId());
+log.info("Token exchange completed");
+log.info(
+        "Authenticated user loaded from Partner Repository userId={}, appId={}",
+        user.getUserId(),
+        tx.getAppId()
+);
+```
+
+Avoid:
+
+```java
+log.info("sessionId={}", session.getSessionId());
+log.info("accessToken={}", accessToken);
+log.info("refreshToken={}", refreshToken);
+log.info("handoffCode={}", handoffCode);
+```
+
+---
+
+## 4. `AuthService.completeSalesPointSelection()`
+
+**Location:** Arthur Core
+**Class:** `AuthService`
+
+Add safe logs:
+
+```java
+log.info(
+        "Sales point selected for userId={}, appId={}, salesPointId={}",
+        session.getUserId(),
+        session.getAppId(),
+        selectedSalesPoint.getId()
+);
+```
+
+And after handoff save:
+
+```java
+log.info(
+        "Login handoff created for userId={}, appId={}",
+        session.getUserId(),
+        session.getAppId()
+);
+```
+
+Do **not** log the handoff code.
+
+---
+
+## 5. `SalesPointController`
+
+**Location:** Arthur Core
+**Class:** `SalesPointController`
+
+Make cookie optional and handle expired session cleanly:
+
+```java
+@GetMapping
+public ModelAndView salesPoints(
+        @CookieValue(value = "ARTHUR_SESSION", required = false) String sessionId
+) {
+    if (sessionId == null || sessionId.isBlank()) {
+        return new ModelAndView("redirect:/auth/login-expired");
+    }
+
+    UserSession session = redisSessionService.findBySessionId(sessionId);
+
+    if (session == null) {
+        return new ModelAndView("redirect:/auth/login-expired");
+    }
+
+    ModelAndView mv = new ModelAndView("views/sales-points");
+    mv.addObject("salesPoints", session.getSalesPoints());
+
+    return mv;
+}
+```
+
+For POST:
+
+```java
+@PostMapping("/select")
+public void selectSalesPoint(
+        @CookieValue(value = "ARTHUR_SESSION", required = false) String sessionId,
+        @RequestParam String salesPointId,
+        HttpServletResponse response
+) throws IOException {
+
+    if (sessionId == null || sessionId.isBlank()) {
+        response.sendRedirect("/arthur-core/auth/login-expired");
+        return;
+    }
+
+    String redirectUrl = authService.completeSalesPointSelection(sessionId, salesPointId);
+    response.sendRedirect(redirectUrl);
+}
+```
+
+---
+
+## 6. Add simple expired page endpoint
+
+**Location:** Arthur Core
+**Class:** `AuthController`
+
+```java
+@GetMapping("/auth/login-expired")
+public ModelAndView loginExpired() {
+    return new ModelAndView("views/login-expired");
+}
+```
+
+Create:
 
 ```text
-users/person
-   ↓
-person_sales_point_relationships
-   ↓
-sales_points
+src/main/resources/templates/views/login-expired.html
 ```
 
-## 1. Liquibase: drop old table and recreate
+```html
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Session expired</title>
+</head>
+<body>
+<h2>Session expired</h2>
+<p>Your login session has expired. Please start login again.</p>
+</body>
+</html>
+```
 
-Create a new changelog file, for example:
+---
+
+## 7. Thymeleaf sales point page
+
+**Location:** Arthur Core
+**File:**
 
 ```text
-004-rebuild-sales-points-model.yaml
+src/main/resources/templates/views/sales-points.html
 ```
 
-```yaml
-databaseChangeLog:
-  - changeSet:
-      id: 004-drop-old-sales-points-table
-      author: rahul
-      preConditions:
-        - onFail: MARK_RAN
-        - tableExists:
-            tableName: sales_points
-      changes:
-        - dropTable:
-            tableName: sales_points
-            cascadeConstraints: true
+Make sure form uses Thymeleaf path:
 
-  - changeSet:
-      id: 005-create-sales-points-table
-      author: rahul
-      changes:
-        - createTable:
-            tableName: sales_points
-            columns:
-              - column:
-                  name: id
-                  type: BIGINT
-                  autoIncrement: true
-                  constraints:
-                    primaryKey: true
-                    nullable: false
-
-              - column:
-                  name: sales_point_id
-                  type: VARCHAR(100)
-                  constraints:
-                    nullable: false
-                    unique: true
-
-              - column:
-                  name: label
-                  type: VARCHAR(200)
-                  constraints:
-                    nullable: false
-
-  - changeSet:
-      id: 006-create-person-sales-point-relationships-table
-      author: rahul
-      changes:
-        - createTable:
-            tableName: person_sales_point_relationships
-            columns:
-              - column:
-                  name: id
-                  type: BIGINT
-                  autoIncrement: true
-                  constraints:
-                    primaryKey: true
-                    nullable: false
-
-              - column:
-                  name: person_user_id
-                  type: VARCHAR(100)
-                  constraints:
-                    nullable: false
-
-              - column:
-                  name: sales_point_id
-                  type: VARCHAR(100)
-                  constraints:
-                    nullable: false
-
-              - column:
-                  name: relationship_type
-                  type: VARCHAR(20)
-                  constraints:
-                    nullable: false
-
-              - column:
-                  name: org_unit_id
-                  type: VARCHAR(100)
-                  constraints:
-                    nullable: false
+```html
+<form method="post" th:action="@{/sales-points/select}">
 ```
 
-## 2. Liquibase test data
-
-```yaml
-databaseChangeLog:
-  - changeSet:
-      id: 007-insert-test-sales-points
-      author: rahul
-      changes:
-        - insert:
-            tableName: sales_points
-            columns:
-              - column:
-                  name: sales_point_id
-                  value: SP001
-              - column:
-                  name: label
-                  value: Sales Point 1
-
-        - insert:
-            tableName: sales_points
-            columns:
-              - column:
-                  name: sales_point_id
-                  value: SP002
-              - column:
-                  name: label
-                  value: Sales Point 2
-
-  - changeSet:
-      id: 008-insert-test-person-sales-point-relationships
-      author: rahul
-      changes:
-        - insert:
-            tableName: person_sales_point_relationships
-            columns:
-              - column:
-                  name: person_user_id
-                  value: testuser
-              - column:
-                  name: sales_point_id
-                  value: SP001
-              - column:
-                  name: relationship_type
-                  value: "025"
-              - column:
-                  name: org_unit_id
-                  value: ORG001
-
-        - insert:
-            tableName: person_sales_point_relationships
-            columns:
-              - column:
-                  name: person_user_id
-                  value: testuser
-              - column:
-                  name: sales_point_id
-                  value: SP002
-              - column:
-                  name: relationship_type
-                  value: "025"
-              - column:
-                  name: org_unit_id
-                  value: ORG002
-```
-
-## 3. `SalesPointEntity`
-
-```java
-@Entity
-@Table(name = "sales_points")
-@Getter
-@Setter
-public class SalesPointEntity {
-
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
-
-    @Column(name = "sales_point_id", nullable = false, unique = true)
-    private String salesPointId;
-
-    @Column(name = "label", nullable = false)
-    private String label;
-}
-```
-
-## 4. `PersonSalesPointRelationshipEntity`
-
-```java
-@Entity
-@Table(name = "person_sales_point_relationships")
-@Getter
-@Setter
-public class PersonSalesPointRelationshipEntity {
-
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
-
-    @Column(name = "person_user_id", nullable = false)
-    private String personUserId;
-
-    @Column(name = "sales_point_id", nullable = false)
-    private String salesPointId;
-
-    @Column(name = "relationship_type", nullable = false)
-    private String relationshipType;
-
-    @Column(name = "org_unit_id", nullable = false)
-    private String orgUnitId;
-}
-```
-
-## 5. Repositories
-
-```java
-public interface SalesPointRepository extends JpaRepository<SalesPointEntity, Long> {
-
-    Optional<SalesPointEntity> findBySalesPointId(String salesPointId);
-}
-```
-
-```java
-public interface PersonSalesPointRelationshipRepository
-        extends JpaRepository<PersonSalesPointRelationshipEntity, Long> {
-
-    List<PersonSalesPointRelationshipEntity> findByPersonUserId(String personUserId);
-}
-```
-
-## 6. `SalesPointResponse`
-
-```java
-@Data
-@AllArgsConstructor
-@NoArgsConstructor
-public class SalesPointResponse {
-
-    private String id;
-    private String label;
-    private String orgUnitId;
-    private String relationshipType;
-}
-```
-
-## 7. Update `UserService`
-
-Inject:
-
-```java
-private final SalesPointRepository salesPointRepository;
-private final PersonSalesPointRelationshipRepository relationshipRepository;
-```
-
-Then inside `mapToResponse()`:
-
-```java
-List<SalesPointResponse> salesPoints =
-        relationshipRepository.findByPersonUserId(user.getUserId())
-                .stream()
-                .map(rel -> {
-                    SalesPointEntity salesPoint = salesPointRepository
-                            .findBySalesPointId(rel.getSalesPointId())
-                            .orElseThrow(() -> new IllegalArgumentException(
-                                    "Sales point not found: " + rel.getSalesPointId()
-                            ));
-
-                    return new SalesPointResponse(
-                            salesPoint.getSalesPointId(),
-                            salesPoint.getLabel(),
-                            rel.getOrgUnitId(),
-                            rel.getRelationshipType()
-                    );
-                })
-                .toList();
-
-response.setSalesPoints(salesPoints);
-```
-
-So your full relevant mapping block becomes:
-
-```java
-response.setUserId(user.getUserId());
-response.setUsername(user.getUsername());
-
-UserInfoResponse userInfo = new UserInfoResponse();
-userInfo.setFirstName(user.getFirstName());
-userInfo.setLastName(user.getLastName());
-userInfo.setPhoneNumbers(user.getPhoneNumber() == null ? List.of() : List.of(user.getPhoneNumber()));
-userInfo.setEmails(user.getEmail() == null ? List.of() : List.of(user.getEmail()));
-response.setUserInfo(userInfo);
-
-List<SalesPointResponse> salesPoints =
-        relationshipRepository.findByPersonUserId(user.getUserId())
-                .stream()
-                .map(rel -> {
-                    SalesPointEntity salesPoint = salesPointRepository
-                            .findBySalesPointId(rel.getSalesPointId())
-                            .orElseThrow(() -> new IllegalArgumentException(
-                                    "Sales point not found: " + rel.getSalesPointId()
-                            ));
-
-                    return new SalesPointResponse(
-                            salesPoint.getSalesPointId(),
-                            salesPoint.getLabel(),
-                            rel.getOrgUnitId(),
-                            rel.getRelationshipType()
-                    );
-                })
-                .toList();
-
-response.setSalesPoints(salesPoints);
-response.setRoles(List.of("SELLER"));
-```
-
-## Arthur Core reminder
-
-Arthur DTO should match:
-
-```java
-@Data
-@JsonIgnoreProperties(ignoreUnknown = true)
-public class SalesPointResponse {
-
-    @JsonProperty("id")
-    private String id;
-
-    @JsonProperty("label")
-    private String label;
-
-    @JsonProperty("org_unit_id")
-    private String orgUnitId;
-
-    @JsonProperty("relationship_type")
-    private String relationshipType;
-}
-```
-
-And Thymeleaf should use:
+And label:
 
 ```html
 <span th:text="${sp.label}">Sales Point</span>
+```
+
+---
+
+These are the key improvements:
+
+```text
+safe logging
+no secrets in logs
+same Redis session updated safely
+clean expired-session handling
+handoff code not logged
 ```
