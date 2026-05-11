@@ -1,157 +1,64 @@
-Yes — and you should.
+Yes — exactly.
 
-Otherwise after session expiry Arthur Core won’t know which application login flow to restart.
+The selected sales point should be sent to B2Boost during the **handoff exchange response**, and then B2Boost should store it in its **local security/session context**.
 
-Best approach:
-
-```text
-/sales-points?appId=B2BOOST_BE
-```
-
-and on expiry:
+Flow:
 
 ```text
-/auth/start?appId=B2BOOST_BE
+Arthur sales-point select
+  → stores selectedSalesPointId in Arthur session
+  → creates handoff code
+  → redirects to B2Boost?code=...
+
+B2Boost /post-login
+  → calls Arthur /auth/handoff/exchange
+  → receives selectedSalesPointId
+  → creates B2Boost SecurityContext/session
 ```
 
----
-
-# Recommended implementation
-
-## 1. Add `appId` param to sales-points URL
-
-After callback:
-
-Instead of:
+Your exchange response should include:
 
 ```java
-response.sendRedirect("/arthur-core/sales-points");
+@Data
+public class HandoffExchangeResponse {
+    private String userId;
+    private String username;
+    private List<String> roles;
+    private String appId;
+
+    private String selectedSalesPointId;
+    private String selectedOrgUnitId;
+    private String selectedRelationshipType;
+}
 ```
 
-use:
+Then in B2Boost, after exchange:
 
 ```java
-response.sendRedirect(
-        "/arthur-core/sales-points?appId=" + URLEncoder.encode(tx.getAppId(), StandardCharsets.UTF_8)
+B2BoostUserPrincipal principal = new B2BoostUserPrincipal(
+        response.getUserId(),
+        response.getUsername(),
+        response.getRoles(),
+        response.getSelectedSalesPointId(),
+        response.getSelectedOrgUnitId(),
+        response.getSelectedRelationshipType()
+);
+
+Authentication authentication =
+        new UsernamePasswordAuthenticationToken(
+                principal,
+                null,
+                authorities
+        );
+
+SecurityContextHolder.getContext().setAuthentication(authentication);
+
+request.getSession(true).setAttribute(
+        HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY,
+        SecurityContextHolder.getContext()
 );
 ```
 
----
+So yes: **salesPointId becomes part of B2Boost post-login security context**.
 
-# 2. Update controller
-
-## GET `/sales-points`
-
-```java
-@GetMapping
-public ModelAndView salesPoints(
-        @RequestParam String appId,
-        @CookieValue(value = "ARTHUR_SESSION", required = false) String sessionId
-) {
-
-    if (sessionId == null || sessionId.isBlank()) {
-        return new ModelAndView("redirect:/auth/start?appId=" + appId);
-    }
-
-    UserSession session = redisSessionService.findBySessionId(sessionId);
-
-    if (session == null) {
-        return new ModelAndView("redirect:/auth/start?appId=" + appId);
-    }
-
-    ModelAndView mv = new ModelAndView("views/sales-points");
-    mv.addObject("salesPoints", session.getSalesPoints());
-    mv.addObject("appId", appId);
-
-    return mv;
-}
-```
-
----
-
-# 3. Update POST `/select`
-
-```java
-@PostMapping("/select")
-public void selectSalesPoint(
-        @RequestParam String appId,
-        @CookieValue(value = "ARTHUR_SESSION", required = false) String sessionId,
-        @RequestParam String salesPointId,
-        HttpServletResponse response
-) throws IOException {
-
-    if (sessionId == null || sessionId.isBlank()) {
-        response.sendRedirect("/arthur-core/auth/start?appId=" + appId);
-        return;
-    }
-
-    String redirectUrl =
-            authService.completeSalesPointSelection(sessionId, salesPointId);
-
-    response.sendRedirect(redirectUrl);
-}
-```
-
----
-
-# 4. Thymeleaf form
-
-Add hidden appId field:
-
-```html
-<input type="hidden" name="appId" th:value="${appId}">
-```
-
-Final form:
-
-```html
-<form method="post" th:action="@{/sales-points/select}">
-
-    <input type="hidden" name="appId" th:value="${appId}">
-
-    <div th:each="sp : ${salesPoints}">
-        <label>
-            <input type="radio"
-                   name="salesPointId"
-                   th:value="${sp.id}"
-                   required>
-
-            <span th:text="${sp.label}">Sales Point</span>
-        </label>
-        <br>
-    </div>
-
-    <button type="submit">Confirm</button>
-</form>
-```
-
----
-
-# Important improvement
-
-Your `/auth/start` currently expects POST JSON.
-
-For redirects, easier is to also support GET:
-
-## Add:
-
-```java
-@GetMapping("/auth/start")
-public void startAuthenticationGet(
-        @RequestParam String appId,
-        HttpServletResponse response
-) throws IOException {
-
-    String authorizationUrl = authService.startAuthentication(appId);
-
-    response.sendRedirect(authorizationUrl);
-}
-```
-
-This is extremely useful for:
-
-* expired session restart
-* bookmarks
-* browser redirects
-
-while keeping your AJAX POST version too.
+Do not make B2Boost trust a salesPointId from the browser directly. It should only trust the value returned by Arthur Core during handoff exchange.
