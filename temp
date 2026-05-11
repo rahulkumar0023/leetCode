@@ -1,64 +1,205 @@
-Yes — exactly.
+Yes. Add both in **Arthur Core**.
 
-The selected sales point should be sent to B2Boost during the **handoff exchange response**, and then B2Boost should store it in its **local security/session context**.
+## 1. Redis TTL config in properties
 
-Flow:
+### `application.yml`
 
-```text
-Arthur sales-point select
-  → stores selectedSalesPointId in Arthur session
-  → creates handoff code
-  → redirects to B2Boost?code=...
-
-B2Boost /post-login
-  → calls Arthur /auth/handoff/exchange
-  → receives selectedSalesPointId
-  → creates B2Boost SecurityContext/session
+```yaml
+arthur:
+  session:
+    ttl-minutes: 60
+  handoff:
+    ttl-seconds: 60
+  auth-transaction:
+    ttl-minutes: 5
 ```
 
-Your exchange response should include:
+## 2. Create properties class
+
+**Location:** `config/ArthurSecurityProperties.java`
 
 ```java
 @Data
-public class HandoffExchangeResponse {
-    private String userId;
-    private String username;
-    private List<String> roles;
-    private String appId;
+@Configuration
+@ConfigurationProperties(prefix = "arthur")
+public class ArthurSecurityProperties {
 
-    private String selectedSalesPointId;
-    private String selectedOrgUnitId;
-    private String selectedRelationshipType;
+    private Session session = new Session();
+    private Handoff handoff = new Handoff();
+    private AuthTransaction authTransaction = new AuthTransaction();
+
+    @Data
+    public static class Session {
+        private long ttlMinutes = 60;
+    }
+
+    @Data
+    public static class Handoff {
+        private long ttlSeconds = 60;
+    }
+
+    @Data
+    public static class AuthTransaction {
+        private long ttlMinutes = 5;
+    }
 }
 ```
 
-Then in B2Boost, after exchange:
+Make sure configuration properties scan is enabled. In main app:
 
 ```java
-B2BoostUserPrincipal principal = new B2BoostUserPrincipal(
-        response.getUserId(),
-        response.getUsername(),
-        response.getRoles(),
-        response.getSelectedSalesPointId(),
-        response.getSelectedOrgUnitId(),
-        response.getSelectedRelationshipType()
-);
-
-Authentication authentication =
-        new UsernamePasswordAuthenticationToken(
-                principal,
-                null,
-                authorities
-        );
-
-SecurityContextHolder.getContext().setAuthentication(authentication);
-
-request.getSession(true).setAttribute(
-        HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY,
-        SecurityContextHolder.getContext()
-);
+@ConfigurationPropertiesScan
+@SpringBootApplication
+public class ArthurCoreApplication {
+}
 ```
 
-So yes: **salesPointId becomes part of B2Boost post-login security context**.
+## 3. Update `RedisSessionService`
 
-Do not make B2Boost trust a salesPointId from the browser directly. It should only trust the value returned by Arthur Core during handoff exchange.
+```java
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class RedisSessionService {
+
+    private static final String PREFIX = "session:";
+
+    private final RedisTemplate<String, Object> redisTemplate;
+    private final ObjectMapper objectMapper;
+    private final ArthurSecurityProperties properties;
+
+    public void save(UserSession session) {
+        redisTemplate.opsForValue().set(
+                PREFIX + session.getSessionId(),
+                session,
+                Duration.ofMinutes(properties.getSession().getTtlMinutes())
+        );
+
+        log.debug(
+                "Arthur session saved for userId={}, appId={}, selectedSalesPoint={}",
+                session.getUserId(),
+                session.getAppId(),
+                session.getSelectedSalesPointId()
+        );
+    }
+
+    public UserSession findBySessionId(String sessionId) {
+        Object value = redisTemplate.opsForValue().get(PREFIX + sessionId);
+
+        if (value == null) {
+            return null;
+        }
+
+        if (value instanceof UserSession session) {
+            return session;
+        }
+
+        return objectMapper.convertValue(value, UserSession.class);
+    }
+}
+```
+
+## 4. Update `RedisLoginHandoffService`
+
+```java
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class RedisLoginHandoffService {
+
+    private static final String PREFIX = "handoff:";
+
+    private final RedisTemplate<String, Object> redisTemplate;
+    private final ObjectMapper objectMapper;
+    private final ArthurSecurityProperties properties;
+
+    public void save(LoginHandoff handoff) {
+        redisTemplate.opsForValue().set(
+                PREFIX + handoff.getCode(),
+                handoff,
+                Duration.ofSeconds(properties.getHandoff().getTtlSeconds())
+        );
+
+        log.info("Login handoff saved for appId={}", handoff.getAppId());
+    }
+}
+```
+
+Also update auth transaction TTL similarly wherever you save state/PKCE.
+
+---
+
+# CSRF protection
+
+## 5. Add/Update `SecurityConfig`
+
+**Location:** `config/SecurityConfig.java`
+
+```java
+@Configuration
+@EnableWebSecurity
+public class SecurityConfig {
+
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        http
+                .csrf(csrf -> csrf
+                        .ignoringRequestMatchers(
+                                "/auth/start",
+                                "/auth/handoff/exchange"
+                        )
+                )
+                .authorizeHttpRequests(auth -> auth
+                        .requestMatchers("/auth/**").permitAll()
+                        .requestMatchers("/sales-points/**").permitAll()
+                        .anyRequest().permitAll()
+                );
+
+        return http.build();
+    }
+}
+```
+
+Why ignore those:
+
+* `/auth/start` may be AJAX from login page
+* `/auth/handoff/exchange` is server-to-server from B2Boost
+* `/sales-points/select` should keep CSRF enabled because it is browser form POST
+
+## 6. Add CSRF token to Thymeleaf form
+
+**Location:** `templates/views/sales-points.html`
+
+Inside the form:
+
+```html
+<form method="post" th:action="@{/sales-points/select}">
+    <input type="hidden"
+           th:name="${_csrf.parameterName}"
+           th:value="${_csrf.token}" />
+
+    <input type="hidden" name="appId" th:value="${appId}">
+
+    <div th:each="sp : ${salesPoints}">
+        <label>
+            <input type="radio" name="salesPointId" th:value="${sp.id}" required>
+            <span th:text="${sp.label}">Sales Point</span>
+        </label>
+        <br>
+    </div>
+
+    <button type="submit">Confirm</button>
+</form>
+```
+
+That’s it.
+
+Result:
+
+```text
+Redis TTLs configurable ✅
+Handoff TTL configurable ✅
+Auth transaction TTL configurable ✅
+Sales point form protected by CSRF ✅
+Server-to-server handoff exchange excluded from CSRF ✅
+```
