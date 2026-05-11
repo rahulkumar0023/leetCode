@@ -1,17 +1,43 @@
-Below is the **final clean version**.
+Yes. Since your existing `sales_points` table already has the old structure, for local/dev easiest is **drop and recreate**.
 
-## Partner Repository
+Use this final model:
 
-### Liquibase tables
+```text
+users/person
+   ↓
+person_sales_point_relationships
+   ↓
+sales_points
+```
+
+## 1. Liquibase: drop old table and recreate
+
+Create a new changelog file, for example:
+
+```text
+004-rebuild-sales-points-model.yaml
+```
 
 ```yaml
 databaseChangeLog:
   - changeSet:
-      id: 003-create-point-of-sales
+      id: 004-drop-old-sales-points-table
+      author: rahul
+      preConditions:
+        - onFail: MARK_RAN
+        - tableExists:
+            tableName: sales_points
+      changes:
+        - dropTable:
+            tableName: sales_points
+            cascadeConstraints: true
+
+  - changeSet:
+      id: 005-create-sales-points-table
       author: rahul
       changes:
         - createTable:
-            tableName: point_of_sales
+            tableName: sales_points
             columns:
               - column:
                   name: id
@@ -20,12 +46,14 @@ databaseChangeLog:
                   constraints:
                     primaryKey: true
                     nullable: false
+
               - column:
-                  name: point_of_sales_id
+                  name: sales_point_id
                   type: VARCHAR(100)
                   constraints:
                     nullable: false
                     unique: true
+
               - column:
                   name: label
                   type: VARCHAR(200)
@@ -33,11 +61,11 @@ databaseChangeLog:
                     nullable: false
 
   - changeSet:
-      id: 004-create-person-pos-relationships
+      id: 006-create-person-sales-point-relationships-table
       author: rahul
       changes:
         - createTable:
-            tableName: person_point_of_sales_relationships
+            tableName: person_sales_point_relationships
             columns:
               - column:
                   name: id
@@ -46,21 +74,25 @@ databaseChangeLog:
                   constraints:
                     primaryKey: true
                     nullable: false
+
               - column:
                   name: person_user_id
                   type: VARCHAR(100)
                   constraints:
                     nullable: false
+
               - column:
-                  name: point_of_sales_id
+                  name: sales_point_id
                   type: VARCHAR(100)
                   constraints:
                     nullable: false
+
               - column:
                   name: relationship_type
                   type: VARCHAR(20)
                   constraints:
                     nullable: false
+
               - column:
                   name: org_unit_id
                   type: VARCHAR(100)
@@ -68,46 +100,47 @@ databaseChangeLog:
                     nullable: false
 ```
 
-### Test data
+## 2. Liquibase test data
 
 ```yaml
+databaseChangeLog:
   - changeSet:
-      id: 005-insert-test-point-of-sales
+      id: 007-insert-test-sales-points
       author: rahul
       changes:
         - insert:
-            tableName: point_of_sales
+            tableName: sales_points
             columns:
               - column:
-                  name: point_of_sales_id
-                  value: POS001
+                  name: sales_point_id
+                  value: SP001
               - column:
                   name: label
                   value: Sales Point 1
 
         - insert:
-            tableName: point_of_sales
+            tableName: sales_points
             columns:
               - column:
-                  name: point_of_sales_id
-                  value: POS002
+                  name: sales_point_id
+                  value: SP002
               - column:
                   name: label
                   value: Sales Point 2
 
   - changeSet:
-      id: 006-insert-test-person-pos-relationships
+      id: 008-insert-test-person-sales-point-relationships
       author: rahul
       changes:
         - insert:
-            tableName: person_point_of_sales_relationships
+            tableName: person_sales_point_relationships
             columns:
               - column:
                   name: person_user_id
                   value: testuser
               - column:
-                  name: point_of_sales_id
-                  value: POS001
+                  name: sales_point_id
+                  value: SP001
               - column:
                   name: relationship_type
                   value: "025"
@@ -116,14 +149,14 @@ databaseChangeLog:
                   value: ORG001
 
         - insert:
-            tableName: person_point_of_sales_relationships
+            tableName: person_sales_point_relationships
             columns:
               - column:
                   name: person_user_id
                   value: testuser
               - column:
-                  name: point_of_sales_id
-                  value: POS002
+                  name: sales_point_id
+                  value: SP002
               - column:
                   name: relationship_type
                   value: "025"
@@ -132,33 +165,35 @@ databaseChangeLog:
                   value: ORG002
 ```
 
-### Entities
+## 3. `SalesPointEntity`
 
 ```java
 @Entity
-@Table(name = "point_of_sales")
+@Table(name = "sales_points")
 @Getter
 @Setter
-public class PointOfSalesEntity {
+public class SalesPointEntity {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(name = "point_of_sales_id", nullable = false, unique = true)
-    private String pointOfSalesId;
+    @Column(name = "sales_point_id", nullable = false, unique = true)
+    private String salesPointId;
 
     @Column(name = "label", nullable = false)
     private String label;
 }
 ```
 
+## 4. `PersonSalesPointRelationshipEntity`
+
 ```java
 @Entity
-@Table(name = "person_point_of_sales_relationships")
+@Table(name = "person_sales_point_relationships")
 @Getter
 @Setter
-public class PersonPointOfSalesRelationshipEntity {
+public class PersonSalesPointRelationshipEntity {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -167,8 +202,8 @@ public class PersonPointOfSalesRelationshipEntity {
     @Column(name = "person_user_id", nullable = false)
     private String personUserId;
 
-    @Column(name = "point_of_sales_id", nullable = false)
-    private String pointOfSalesId;
+    @Column(name = "sales_point_id", nullable = false)
+    private String salesPointId;
 
     @Column(name = "relationship_type", nullable = false)
     private String relationshipType;
@@ -178,29 +213,31 @@ public class PersonPointOfSalesRelationshipEntity {
 }
 ```
 
-### Repositories
+## 5. Repositories
 
 ```java
-public interface PointOfSalesRepository extends JpaRepository<PointOfSalesEntity, Long> {
-    Optional<PointOfSalesEntity> findByPointOfSalesId(String pointOfSalesId);
+public interface SalesPointRepository extends JpaRepository<SalesPointEntity, Long> {
+
+    Optional<SalesPointEntity> findBySalesPointId(String salesPointId);
 }
 ```
 
 ```java
-public interface PersonPointOfSalesRelationshipRepository
-        extends JpaRepository<PersonPointOfSalesRelationshipEntity, Long> {
+public interface PersonSalesPointRelationshipRepository
+        extends JpaRepository<PersonSalesPointRelationshipEntity, Long> {
 
-    List<PersonPointOfSalesRelationshipEntity> findByPersonUserId(String personUserId);
+    List<PersonSalesPointRelationshipEntity> findByPersonUserId(String personUserId);
 }
 ```
 
-### DTO
+## 6. `SalesPointResponse`
 
 ```java
 @Data
 @AllArgsConstructor
 @NoArgsConstructor
 public class SalesPointResponse {
+
     private String id;
     private String label;
     private String orgUnitId;
@@ -208,77 +245,79 @@ public class SalesPointResponse {
 }
 ```
 
-### UserService
+## 7. Update `UserService`
+
+Inject:
 
 ```java
-@Service
-@RequiredArgsConstructor
-@Slf4j
-public class UserService {
-
-    private final UserRepository userRepository;
-    private final PointOfSalesRepository pointOfSalesRepository;
-    private final PersonPointOfSalesRelationshipRepository relationshipRepository;
-
-    public UserResponse getUserById(String userId) {
-        UserEntity user = userRepository.findByUserId(userId)
-                .orElseThrow(() -> new IllegalArgumentException("User not found: " + userId));
-
-        return mapToResponse(user);
-    }
-
-    private UserResponse mapToResponse(UserEntity user) {
-        UserResponse response = new UserResponse();
-
-        response.setUserId(user.getUserId());
-        response.setUsername(user.getUsername());
-
-        UserInfoResponse userInfo = new UserInfoResponse();
-        userInfo.setFirstName(user.getFirstName());
-        userInfo.setLastName(user.getLastName());
-        userInfo.setPhoneNumbers(
-                user.getPhoneNumber() == null ? List.of() : List.of(user.getPhoneNumber())
-        );
-        userInfo.setEmails(
-                user.getEmail() == null ? List.of() : List.of(user.getEmail())
-        );
-
-        response.setUserInfo(userInfo);
-
-        List<SalesPointResponse> salesPoints =
-                relationshipRepository.findByPersonUserId(user.getUserId())
-                        .stream()
-                        .map(rel -> {
-                            PointOfSalesEntity pos = pointOfSalesRepository
-                                    .findByPointOfSalesId(rel.getPointOfSalesId())
-                                    .orElseThrow(() -> new IllegalArgumentException(
-                                            "Point of Sales not found: " + rel.getPointOfSalesId()
-                                    ));
-
-                            return new SalesPointResponse(
-                                    pos.getPointOfSalesId(),
-                                    pos.getLabel(),
-                                    rel.getOrgUnitId(),
-                                    rel.getRelationshipType()
-                            );
-                        })
-                        .toList();
-
-        response.setSalesPoints(salesPoints);
-        response.setRoles(List.of("SELLER"));
-
-        return response;
-    }
-}
+private final SalesPointRepository salesPointRepository;
+private final PersonSalesPointRelationshipRepository relationshipRepository;
 ```
 
----
+Then inside `mapToResponse()`:
 
-## Arthur Core
+```java
+List<SalesPointResponse> salesPoints =
+        relationshipRepository.findByPersonUserId(user.getUserId())
+                .stream()
+                .map(rel -> {
+                    SalesPointEntity salesPoint = salesPointRepository
+                            .findBySalesPointId(rel.getSalesPointId())
+                            .orElseThrow(() -> new IllegalArgumentException(
+                                    "Sales point not found: " + rel.getSalesPointId()
+                            ));
 
-### `SalesPointResponse`
+                    return new SalesPointResponse(
+                            salesPoint.getSalesPointId(),
+                            salesPoint.getLabel(),
+                            rel.getOrgUnitId(),
+                            rel.getRelationshipType()
+                    );
+                })
+                .toList();
 
-If Partner Repository returns snake case:
+response.setSalesPoints(salesPoints);
+```
+
+So your full relevant mapping block becomes:
+
+```java
+response.setUserId(user.getUserId());
+response.setUsername(user.getUsername());
+
+UserInfoResponse userInfo = new UserInfoResponse();
+userInfo.setFirstName(user.getFirstName());
+userInfo.setLastName(user.getLastName());
+userInfo.setPhoneNumbers(user.getPhoneNumber() == null ? List.of() : List.of(user.getPhoneNumber()));
+userInfo.setEmails(user.getEmail() == null ? List.of() : List.of(user.getEmail()));
+response.setUserInfo(userInfo);
+
+List<SalesPointResponse> salesPoints =
+        relationshipRepository.findByPersonUserId(user.getUserId())
+                .stream()
+                .map(rel -> {
+                    SalesPointEntity salesPoint = salesPointRepository
+                            .findBySalesPointId(rel.getSalesPointId())
+                            .orElseThrow(() -> new IllegalArgumentException(
+                                    "Sales point not found: " + rel.getSalesPointId()
+                            ));
+
+                    return new SalesPointResponse(
+                            salesPoint.getSalesPointId(),
+                            salesPoint.getLabel(),
+                            rel.getOrgUnitId(),
+                            rel.getRelationshipType()
+                    );
+                })
+                .toList();
+
+response.setSalesPoints(salesPoints);
+response.setRoles(List.of("SELLER"));
+```
+
+## Arthur Core reminder
+
+Arthur DTO should match:
 
 ```java
 @Data
@@ -299,182 +338,8 @@ public class SalesPointResponse {
 }
 ```
 
-### `UserSession`
-
-```java
-@Data
-public class UserSession {
-    private String sessionId;
-    private String appId;
-    private String userId;
-    private String username;
-    private List<String> roles;
-    private List<SalesPointResponse> salesPoints;
-
-    private String selectedSalesPointId;
-    private String selectedOrgUnitId;
-    private String selectedRelationshipType;
-
-    private String accessToken;
-    private String refreshToken;
-    private Instant refreshTokenExpiresAt;
-    private Instant createdAt;
-}
-```
-
-### In `handleCallback()`
-
-After loading user:
-
-```java
-UserResponse user = partnerRepositoryClient.getUserById(userId);
-
-UserSession session = new UserSession();
-session.setSessionId(UUID.randomUUID().toString());
-session.setAppId(tx.getAppId());
-session.setUserId(user.getUserId());
-session.setUsername(user.getUsername());
-session.setRoles(user.getRoles());
-session.setSalesPoints(user.getSalesPoints());
-session.setAccessToken(accessToken);
-session.setRefreshToken(refreshToken);
-session.setRefreshTokenExpiresAt(Instant.now());
-session.setCreatedAt(Instant.now());
-
-redisSessionService.save(session);
-redisAuthTransactionService.delete(state);
-
-return new AuthResult(session.getSessionId());
-```
-
-Do **not** create handoff here.
-
-### Sales point controller
-
-```java
-@Controller
-@RequiredArgsConstructor
-@Slf4j
-@RequestMapping("/sales-points")
-public class SalesPointController {
-
-    private final AuthService authService;
-    private final RedisSessionService redisSessionService;
-
-    @GetMapping
-    public ModelAndView salesPoints(
-            @CookieValue("ARTHUR_SESSION") String sessionId
-    ) {
-        UserSession session = redisSessionService.findBySessionId(sessionId);
-
-        ModelAndView mv = new ModelAndView("views/sales-points");
-        mv.addObject("salesPoints", session.getSalesPoints());
-
-        return mv;
-    }
-
-    @PostMapping("/select")
-    public void selectSalesPoint(
-            @CookieValue("ARTHUR_SESSION") String sessionId,
-            @RequestParam String salesPointId,
-            HttpServletResponse response
-    ) throws IOException {
-
-        String redirectUrl = authService.completeSalesPointSelection(sessionId, salesPointId);
-        response.sendRedirect(redirectUrl);
-    }
-}
-```
-
-### `completeSalesPointSelection`
-
-```java
-public String completeSalesPointSelection(String sessionId, String salesPointId) {
-    UserSession session = redisSessionService.findBySessionId(sessionId);
-
-    SalesPointResponse selectedSalesPoint = session.getSalesPoints().stream()
-            .filter(sp -> sp.getId().equals(salesPointId))
-            .findFirst()
-            .orElseThrow(() -> new IllegalArgumentException("Invalid sales point"));
-
-    session.setSelectedSalesPointId(selectedSalesPoint.getId());
-    session.setSelectedOrgUnitId(selectedSalesPoint.getOrgUnitId());
-    session.setSelectedRelationshipType(selectedSalesPoint.getRelationshipType());
-
-    redisSessionService.save(session);
-
-    AppConfigResponse appConfig = partnerRepositoryClient.getApp(session.getAppId());
-
-    String handoffCode = UUID.randomUUID().toString();
-
-    LoginHandoff handoff = new LoginHandoff();
-    handoff.setCode(handoffCode);
-    handoff.setSessionId(session.getSessionId());
-    handoff.setAppId(session.getAppId());
-    handoff.setRedirectUrl(appConfig.getPostLoginRedirectUrl());
-    handoff.setCreatedAt(Instant.now());
-    handoff.setExpiresAt(Instant.now().plusSeconds(60));
-    handoff.setUsed(false);
-
-    redisLoginHandoffService.save(handoff);
-
-    String separator = appConfig.getPostLoginRedirectUrl().contains("?") ? "&" : "?";
-    return appConfig.getPostLoginRedirectUrl() + separator + "code=" + handoffCode;
-}
-```
-
-### Handoff exchange response
-
-```java
-@Data
-public class HandoffExchangeResponse {
-    private String userId;
-    private String username;
-    private List<String> roles;
-    private String appId;
-    private String selectedSalesPointId;
-    private String selectedOrgUnitId;
-    private String selectedRelationshipType;
-}
-```
-
-In exchange:
-
-```java
-response.setUserId(session.getUserId());
-response.setUsername(session.getUsername());
-response.setRoles(session.getRoles());
-response.setAppId(session.getAppId());
-response.setSelectedSalesPointId(session.getSelectedSalesPointId());
-response.setSelectedOrgUnitId(session.getSelectedOrgUnitId());
-response.setSelectedRelationshipType(session.getSelectedRelationshipType());
-```
-
-### Thymeleaf
+And Thymeleaf should use:
 
 ```html
-<form method="post" th:action="@{/sales-points/select}">
-    <div th:each="sp : ${salesPoints}">
-        <label>
-            <input type="radio" name="salesPointId" th:value="${sp.id}" required>
-            <span th:text="${sp.label}">Sales Point</span>
-            <small th:text="${sp.orgUnitId}">ORG</small>
-        </label>
-        <br>
-    </div>
-
-    <button type="submit">Confirm</button>
-</form>
-```
-
-Final flow:
-
-```text
-Partner Repository:
-person → relationship → point_of_sales
-
-Arthur Core:
-callback → session with salesPoints
-sales-point select → selected POS context + handoff
-B2Boost exchange → user + selected POS + orgUnit + relationshipType
+<span th:text="${sp.label}">Sales Point</span>
 ```
