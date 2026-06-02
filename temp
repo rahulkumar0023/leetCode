@@ -1,129 +1,33 @@
-Yes — with Thymeleaf you’ll build it as normal **HTML + CSS**, then keep only the sales point list dynamic.
-
-Use this structure:
-
-```text
-src/main/resources/templates/views/sales-points.html
-src/main/resources/static/css/sales-points.css
-src/main/resources/static/images/cetelem-logo.svg
-src/main/resources/static/images/sales-point-hero.png
-```
+Update only the **header HTML + CSS** like this.
 
 ## `sales-points.html`
 
+Replace your header with:
+
 ```html
-<!DOCTYPE html>
-<html lang="fr" xmlns:th="http://www.thymeleaf.org">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Choix point de vente</title>
+<header class="page-header">
+    <img class="logo" th:src="@{/images/cetelem-logo.svg}" alt="Cetelem">
 
-    <link rel="stylesheet" th:href="@{/css/sales-points.css}">
-</head>
-<body>
-
-<main class="page">
-
-    <section class="card">
-
-        <div class="left-panel">
-            <header class="header">
-                <img class="logo" th:src="@{/images/cetelem-logo.svg}" alt="Cetelem">
-
-                <div class="language-switch">
-                    <span class="active">FR</span>
-                    <span>NL</span>
-                </div>
-            </header>
-
-            <div class="content">
-                <h1>Connexion à<br>votre espace partenaire</h1>
-                <h2>Votre point de vente</h2>
-
-                <p class="description">
-                    Vous devez choisir le point de vente dans lequel vous vous trouvez actuellement.
-                </p>
-
-                <form method="post" th:action="@{/sales-points/select}" class="sales-form">
-                    <input type="hidden"
-                           th:name="${_csrf.parameterName}"
-                           th:value="${_csrf.token}">
-
-                    <input type="hidden" name="appId" th:value="${appId}">
-
-                    <div class="sales-list">
-                        <label class="sales-option" th:each="sp, iter : ${salesPoints}">
-                            <input type="radio"
-                                   name="salesPointId"
-                                   th:value="${sp.id}"
-                                   th:checked="${iter.index == 0}"
-                                   required>
-                            <span th:text="${sp.label}">Orange Shop Bruxelles Rue Neuve</span>
-                        </label>
-                    </div>
-
-                    <button type="submit" class="confirm-btn">
-                        Confirmer
-                        <span>→</span>
-                    </button>
-                </form>
-            </div>
-        </div>
-
-        <div class="right-panel">
-            <img th:src="@{/images/sales-point-hero.png}" alt="" class="hero-image">
-        </div>
-
-    </section>
-
-</main>
-
-</body>
-</html>
+    <div class="language-selector" aria-label="Language selector">
+        <button type="button" class="language-btn active">FR</button>
+        <button type="button" class="language-btn">NL</button>
+    </div>
+</header>
 ```
 
 ## `sales-points.css`
 
+Replace/add header CSS:
+
 ```css
-* {
-    box-sizing: border-box;
-}
-
-body {
-    margin: 0;
-    font-family: Arial, Helvetica, sans-serif;
-    background: #f4f4f4;
-    color: #071414;
-}
-
-.page {
-    min-height: 100vh;
-    padding: 48px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-
-.card {
-    width: min(1180px, 100%);
-    min-height: 720px;
-    background: #ffffff;
-    display: grid;
-    grid-template-columns: 58% 42%;
-    overflow: hidden;
-}
-
-.left-panel {
-    padding: 42px 72px;
-    display: flex;
-    flex-direction: column;
-}
-
-.header {
+.page-header {
+    height: 96px;
+    padding: 16px 112px;
     display: flex;
     align-items: center;
     justify-content: space-between;
+    border-bottom: 2px solid #ffffff;
+    background: #ffffff;
 }
 
 .logo {
@@ -131,203 +35,52 @@ body {
     height: auto;
 }
 
-.language-switch {
+.language-selector {
     display: flex;
     align-items: center;
-    gap: 12px;
-    font-size: 14px;
-    font-weight: 600;
+    gap: 4px;
 }
 
-.language-switch span {
-    color: #071414;
-}
-
-.language-switch .active {
-    width: 36px;
-    height: 36px;
-    border-radius: 50%;
-    background: #042f2e;
-    color: white;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-}
-
-.content {
-    margin-top: 92px;
-    max-width: 560px;
-}
-
-h1 {
-    margin: 0;
-    font-size: 44px;
-    line-height: 1.15;
-    font-weight: 800;
-    letter-spacing: -0.03em;
-}
-
-h2 {
-    margin: 16px 0 0;
-    font-size: 34px;
-    line-height: 1.2;
-    font-weight: 300;
-}
-
-.description {
-    margin: 48px 0 32px;
-    max-width: 420px;
-    font-size: 16px;
-    line-height: 1.45;
-    color: #333;
-}
-
-.sales-list {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-}
-
-.sales-option {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    font-size: 17px;
-    color: #333;
-    cursor: pointer;
-}
-
-.sales-option input {
-    width: 18px;
-    height: 18px;
-    accent-color: #087a2f;
-}
-
-.confirm-btn {
-    margin-top: 36px;
+.language-btn {
+    width: 40px;
+    height: 40px;
     border: 0;
     border-radius: 999px;
-    background: #052f2f;
-    color: white;
-    padding: 14px 24px;
-    min-width: 140px;
+    background: transparent;
+    color: #154734;
+    font-family: "Open Sans", Arial, sans-serif;
     font-size: 16px;
-    font-weight: 700;
+    font-weight: 500;
     cursor: pointer;
 }
 
-.confirm-btn span {
-    margin-left: 8px;
+.language-btn.active {
+    background: #154734;
+    color: #ffffff;
 }
+```
 
-.right-panel {
-    display: flex;
-    align-items: stretch;
-    justify-content: center;
-    padding: 80px 40px 40px 0;
-}
+## Mobile CSS
 
-.hero-image {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    border-top-left-radius: 28px;
-}
+Add inside your mobile media query:
 
-/* Tablet */
-@media (max-width: 900px) {
-    .page {
-        padding: 24px;
-    }
-
-    .card {
-        grid-template-columns: 1fr;
-        min-height: auto;
-    }
-
-    .left-panel {
-        padding: 32px;
-    }
-
-    .content {
-        margin-top: 64px;
-    }
-
-    .right-panel {
-        display: none;
-    }
-
-    h1 {
-        font-size: 38px;
-    }
-
-    h2 {
-        font-size: 30px;
-    }
-}
-
-/* Mobile */
+```css
 @media (max-width: 520px) {
-    .page {
-        padding: 0;
-        align-items: stretch;
-    }
-
-    .card {
-        width: 100%;
-        min-height: 100vh;
-    }
-
-    .left-panel {
-        padding: 24px;
+    .page-header {
+        height: 72px;
+        padding: 16px 24px;
     }
 
     .logo {
         width: 120px;
     }
 
-    .content {
-        margin-top: 56px;
-    }
-
-    h1 {
-        font-size: 32px;
-    }
-
-    h2 {
-        font-size: 26px;
-    }
-
-    .description {
-        margin: 36px 0 28px;
-        font-size: 15px;
-    }
-
-    .sales-option {
-        font-size: 15px;
-        align-items: flex-start;
-    }
-
-    .confirm-btn {
-        width: 100%;
-        margin-top: 32px;
+    .language-btn {
+        width: 40px;
+        height: 40px;
+        font-size: 16px;
     }
 }
 ```
 
-For the right-side mascot image, export it from Figma as PNG/SVG and save it as:
-
-```text
-src/main/resources/static/images/sales-point-hero.png
-```
-
-The dynamic part is only this:
-
-```html
-<label class="sales-option" th:each="sp, iter : ${salesPoints}">
-    <input type="radio" name="salesPointId" th:value="${sp.id}">
-    <span th:text="${sp.label}">Sales Point</span>
-</label>
-```
-
-That keeps the design static and the data dynamic.
+This matches the Figma header: logo left, FR/NL right, active FR round dark green button.
