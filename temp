@@ -1,38 +1,106 @@
-Update only the **header HTML + CSS** like this.
+Your layout is breaking because the header and the main content are being treated as separate full-width blocks, while the Figma screen is one fixed desktop container:
+
+```text
+screen container
+  header: 1440 x 96
+  content: 1440 x remaining height
+    left content
+    right illustration: 600 x 804
+```
+
+Use this structure instead.
 
 ## `sales-points.html`
 
-Replace your header with:
-
 ```html
-<header class="page-header">
-    <img class="logo" th:src="@{/images/cetelem-logo.svg}" alt="Cetelem">
+<main class="screen">
 
-    <div class="language-selector" aria-label="Language selector">
-        <button type="button" class="language-btn active">FR</button>
-        <button type="button" class="language-btn">NL</button>
-    </div>
-</header>
+    <header class="page-header">
+        <img class="logo" th:src="@{/images/cetelem-logo.svg}" alt="Cetelem">
+
+        <div class="language-selector">
+            <button type="button" class="language-btn active">FR</button>
+            <button type="button" class="language-btn">NL</button>
+        </div>
+    </header>
+
+    <section class="content-container">
+
+        <section class="left-content">
+            <h1>Connexion à<br>votre espace partenaire</h1>
+            <h2>Votre point de vente</h2>
+
+            <p>
+                Vous devez choisir le point de vente dans lequel vous vous trouvez actuellement.
+            </p>
+
+            <form method="post" th:action="@{/sales-points/select}">
+                <input type="hidden" th:name="${_csrf.parameterName}" th:value="${_csrf.token}">
+                <input type="hidden" name="appId" th:value="${appId}">
+
+                <div class="sales-list">
+                    <label class="sales-option" th:each="sp, iter : ${salesPoints}">
+                        <input type="radio"
+                               name="salesPointId"
+                               th:value="${sp.id}"
+                               th:checked="${iter.index == 0}"
+                               required>
+                        <span th:text="${sp.label}">Sales Point</span>
+                    </label>
+                </div>
+
+                <button class="confirm-btn" type="submit">
+                    Confirmer <span>→</span>
+                </button>
+            </form>
+        </section>
+
+        <section class="right-illustration">
+            <img th:src="@{/images/sales-point-hero.png}" alt="">
+        </section>
+
+    </section>
+
+</main>
 ```
 
-## `sales-points.css`
-
-Replace/add header CSS:
+## Replace your CSS with this
 
 ```css
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    margin: 0;
+    min-height: 100%;
+    font-family: "Open Sans", Arial, sans-serif;
+    background: #f3f0fa;
+    color: #071414;
+}
+
+.screen {
+    width: min(1440px, 100%);
+    min-height: 100vh;
+    margin: 0 auto;
+    background: #ffffff;
+}
+
 .page-header {
     height: 96px;
     padding: 16px 112px;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    border-bottom: 2px solid #ffffff;
     background: #ffffff;
+    border-bottom: 2px solid #ffffff;
 }
 
 .logo {
     width: 140px;
     height: auto;
+    display: block;
 }
 
 .language-selector {
@@ -48,7 +116,6 @@ Replace/add header CSS:
     border-radius: 999px;
     background: transparent;
     color: #154734;
-    font-family: "Open Sans", Arial, sans-serif;
     font-size: 16px;
     font-weight: 500;
     cursor: pointer;
@@ -58,17 +125,122 @@ Replace/add header CSS:
     background: #154734;
     color: #ffffff;
 }
-```
 
-## Mobile CSS
+.content-container {
+    min-height: calc(100vh - 96px);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 600px;
+}
 
-Add inside your mobile media query:
+.left-content {
+    padding-left: 112px;
+    padding-top: 112px;
+    padding-right: 64px;
+}
 
-```css
-@media (max-width: 520px) {
+.left-content h1 {
+    margin: 0;
+    font-size: 44px;
+    line-height: 1.12;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+}
+
+.left-content h2 {
+    margin: 18px 0 0;
+    font-size: 34px;
+    line-height: 1.2;
+    font-weight: 300;
+}
+
+.left-content p {
+    margin: 52px 0 32px;
+    max-width: 520px;
+    font-size: 16px;
+    line-height: 1.45;
+}
+
+.sales-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.sales-option {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 16px;
+    cursor: pointer;
+}
+
+.sales-option input {
+    width: 18px;
+    height: 18px;
+    accent-color: #154734;
+}
+
+.confirm-btn {
+    margin-top: 36px;
+    min-width: 132px;
+    height: 48px;
+    padding: 0 20px;
+    border: 0;
+    border-radius: 999px;
+    background: #073331;
+    color: #ffffff;
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.right-illustration {
+    width: 600px;
+    min-height: calc(100vh - 96px);
+    overflow: hidden;
+    border-top-left-radius: 40px;
+}
+
+.right-illustration img {
+    width: 100%;
+    height: 100%;
+    min-height: calc(100vh - 96px);
+    display: block;
+    object-fit: cover;
+}
+
+/* Tablet/mobile */
+@media (max-width: 900px) {
     .page-header {
-        height: 72px;
+        height: 80px;
         padding: 16px 24px;
+    }
+
+    .content-container {
+        min-height: calc(100vh - 80px);
+        grid-template-columns: 1fr;
+    }
+
+    .right-illustration {
+        display: none;
+    }
+
+    .left-content {
+        padding: 64px 24px 40px;
+    }
+
+    .left-content h1 {
+        font-size: 36px;
+    }
+
+    .left-content h2 {
+        font-size: 28px;
+    }
+}
+
+@media (max-width: 520px) {
+    .screen {
+        min-height: 100vh;
     }
 
     .logo {
@@ -80,7 +252,28 @@ Add inside your mobile media query:
         height: 40px;
         font-size: 16px;
     }
+
+    .left-content {
+        padding-top: 48px;
+    }
+
+    .left-content h1 {
+        font-size: 32px;
+    }
+
+    .left-content h2 {
+        font-size: 26px;
+    }
+
+    .left-content p {
+        margin: 36px 0 28px;
+        font-size: 15px;
+    }
+
+    .confirm-btn {
+        width: 100%;
+    }
 }
 ```
 
-This matches the Figma header: logo left, FR/NL right, active FR round dark green button.
+Important: remove old `.card`, `.left-panel`, `.right-panel`, `.header` CSS if still present. Those are probably conflicting.
