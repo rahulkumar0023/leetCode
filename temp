@@ -1,486 +1,323 @@
-Based on the Figma design you shared , here's a complete **Spring Boot + Thymeleaf** page that gets very close to the design and is fully responsive.
+Use this final version.
 
----
-
-# Folder Structure
-
-```text
-src/main/resources/
-
-templates/
-└── sales-point.html
-
-static/
-├── css/
-│   └── sales-point.css
-└── images/
-    ├── cetelem-logo.png
-    ├── pattern-green.png
-    └── mascot.png
-```
-
----
-
-# sales-point.html
+## `templates/views/sales-points.html`
 
 ```html
 <!DOCTYPE html>
-<html xmlns:th="http://www.thymeleaf.org">
+<html lang="fr" xmlns:th="http://www.thymeleaf.org">
 <head>
-    <title>Sales Point Selection</title>
-
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
-    <link rel="stylesheet"
-          th:href="@{/css/sales-point.css}">
+    <title>Choix point de vente</title>
+    <link rel="stylesheet" th:href="@{/css/sales-points.css}">
 </head>
 <body>
 
-<div class="page-wrapper">
+<main class="screen">
 
-    <!-- HEADER -->
-    <header class="header">
+    <header class="page-header">
+        <img class="logo" th:src="@{/images/cetelem-logo.svg}" alt="Cetelem">
 
-        <div class="logo-section">
-            <img th:src="@{/images/cetelem-logo.png}"
-                 alt="Cetelem Logo"
-                 class="logo">
+        <div class="language-selector">
+            <button type="button" class="language-btn active">FR</button>
+            <button type="button" class="language-btn">NL</button>
         </div>
-
-        <div class="language-switcher">
-            <button class="lang active">FR</button>
-            <button class="lang">NL</button>
-        </div>
-
     </header>
 
-    <!-- MAIN CONTENT -->
-    <main class="content-container">
+    <section class="content-container">
 
-        <!-- LEFT SIDE -->
-        <section class="left-panel">
-
-            <h1>
-                Connexion à<br>
-                votre espace partenaire
-            </h1>
+        <section class="left-content">
+            <h1>Connexion à<br>votre espace partenaire</h1>
 
             <h2>Votre point de vente</h2>
 
-            <p class="description">
-                Vous devez choisir le point de vente dans lequel
-                vous vous trouvez actuellement.
+            <p>
+                Vous devez choisir le point de vente dans lequel vous vous trouvez actuellement.
             </p>
 
-            <form>
+            <form method="post" th:action="@{/sales-points/select}">
+                <input type="hidden" th:name="${_csrf.parameterName}" th:value="${_csrf.token}">
+                <input type="hidden" name="appId" th:value="${appId}">
 
-                <div class="radio-group">
-
-                    <label>
+                <div class="sales-list">
+                    <label class="sales-option" th:each="sp, iter : ${salesPoints}">
                         <input type="radio"
-                               name="salesPoint"
-                               value="1"
-                               checked>
-                        Orange Shop Bruxelles Rue Neuve
+                               name="salesPointId"
+                               th:value="${sp.id}"
+                               th:checked="${iter.index == 0}"
+                               required>
+                        <span th:text="${sp.label}">Sales Point</span>
                     </label>
-
-                    <label>
-                        <input type="radio"
-                               name="salesPoint"
-                               value="2">
-                        Orange Shop Ixelles Porte de Namur
-                    </label>
-
-                    <label>
-                        <input type="radio"
-                               name="salesPoint"
-                               value="3">
-                        Orange Shop Place Louise
-                    </label>
-
                 </div>
 
-                <button type="submit" class="confirm-btn">
-                    Confirmer →
+                <button class="confirm-btn" type="submit">
+                    Confirmer <span>→</span>
                 </button>
-
             </form>
-
         </section>
 
-        <!-- RIGHT SIDE -->
-        <section class="right-panel">
-
-            <img class="pattern-image"
-                 th:src="@{/images/pattern-green.png}"
-                 alt="">
-
-            <img class="mascot-image"
-                 th:src="@{/images/mascot.png}"
-                 alt="Mascot">
-
+        <section class="right-illustration">
+            <img class="background-pattern" th:src="@{/images/pattern-green.png}" alt="">
+            <img class="mascot" th:src="@{/images/mascot.png}" alt="Mascot">
         </section>
 
-    </main>
+    </section>
 
-</div>
+</main>
 
 </body>
 </html>
 ```
 
----
-
-# sales-point.css
+## `static/css/sales-points.css`
 
 ```css
-/* RESET */
-
 * {
-    margin: 0;
-    padding: 0;
     box-sizing: border-box;
 }
 
+html,
 body {
-    font-family: "Open Sans", sans-serif;
+    margin: 0;
+    min-height: 100%;
+    font-family: "Open Sans", Arial, sans-serif;
     background: #ffffff;
-    color: #1d252c;
+    color: #071414;
 }
 
-/* PAGE */
-
-.page-wrapper {
+.screen {
     width: 100%;
     min-height: 100vh;
+    background: #ffffff;
 }
 
-/* HEADER */
-
-.header {
-
+.page-header {
     height: 96px;
-
+    padding: 16px 112px;
     display: flex;
-    justify-content: space-between;
     align-items: center;
-
-    padding-left: 112px;
-    padding-right: 112px;
-
-    border-bottom: 2px solid #e5e7eb;
+    justify-content: space-between;
+    background: #ffffff;
 }
 
 .logo {
-    height: 52px;
+    width: 140px;
+    height: auto;
+    display: block;
 }
 
-.language-switcher {
+.language-selector {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 8px;
 }
 
-.lang {
-    border: none;
-    background: transparent;
-    cursor: pointer;
-
-    font-size: 16px;
-    font-weight: 500;
-}
-
-.lang.active {
+.language-btn {
     width: 40px;
     height: 40px;
-
-    border-radius: 50%;
-
-    background: #154734;
-    color: white;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: #154734;
+    font-size: 16px;
+    font-weight: 500;
+    cursor: pointer;
 }
 
-/* MAIN LAYOUT */
+.language-btn.active {
+    background: #154734;
+    color: #ffffff;
+}
 
 .content-container {
-
-    display: flex;
-
+    display: grid;
+    grid-template-columns: 1fr 600px;
     min-height: calc(100vh - 96px);
-
-    width: 100%;
 }
 
-/* LEFT SIDE */
-
-.left-panel {
-
-    flex: 1;
-
-    padding-top: 72px;
+.left-content {
     padding-left: 112px;
+    padding-top: 72px;
     padding-right: 104px;
+    width: 100%;
+    max-width: 720px;
 }
 
-.left-panel h1 {
-
-    font-size: 64px;
-    font-weight: 700;
-
-    line-height: 1.1;
-
-    max-width: 520px;
+.left-content h1 {
+    margin: 0;
+    font-size: 48px;
+    line-height: 1.15;
+    font-weight: 800;
+    letter-spacing: -0.03em;
 }
 
-.left-panel h2 {
-
-    margin-top: 16px;
-
-    font-size: 52px;
+.left-content h2 {
+    margin: 12px 0 0;
+    font-size: 40px;
+    line-height: 1.2;
     font-weight: 300;
-
-    color: #4b5563;
 }
 
-.description {
-
-    margin-top: 40px;
-
-    max-width: 520px;
-
-    font-size: 24px;
-    line-height: 1.6;
-
-    color: #5b6470;
+.left-content p {
+    margin: 40px 0 40px;
+    max-width: 560px;
+    font-size: 16px;
+    line-height: 1.45;
+    color: #3a3f45;
 }
 
-/* RADIOS */
-
-.radio-group {
-
+.sales-list {
     display: flex;
     flex-direction: column;
-
-    gap: 18px;
-
-    margin-top: 40px;
+    gap: 12px;
 }
 
-.radio-group label {
-
+.sales-option {
     display: flex;
     align-items: center;
-
     gap: 12px;
-
-    font-size: 24px;
-    color: #444;
+    font-size: 16px;
+    color: #333333;
+    cursor: pointer;
 }
 
-input[type="radio"] {
-
-    width: 22px;
-    height: 22px;
-
-    accent-color: #2f7d32;
+.sales-option input {
+    width: 18px;
+    height: 18px;
+    accent-color: #154734;
 }
-
-/* BUTTON */
 
 .confirm-btn {
-
     margin-top: 40px;
-
-    border: none;
-
-    background: #032d24;
-    color: white;
-
-    padding: 16px 36px;
-
+    height: 48px;
+    padding: 0 22px;
+    border: 0;
     border-radius: 999px;
-
-    font-size: 20px;
-    font-weight: 600;
-
+    background: #073331;
+    color: #ffffff;
+    font-size: 16px;
+    font-weight: 700;
     cursor: pointer;
-
-    transition: all .2s ease;
 }
 
-.confirm-btn:hover {
-    background: #154734;
+.confirm-btn span {
+    margin-left: 8px;
 }
 
-/* RIGHT SIDE */
-
-.right-panel {
-
+.right-illustration {
     position: relative;
-
     width: 600px;
     height: 804px;
-
-    margin: 40px 112px 40px 0;
-
     overflow: hidden;
-
     border-top-left-radius: 40px;
-
     background: #154734;
 }
 
-/* GREEN PATTERN */
-
-.pattern-image {
-
+.background-pattern {
     position: absolute;
-
     inset: 0;
-
     width: 100%;
     height: 100%;
-
     object-fit: cover;
+    z-index: 1;
 }
 
-/* MASCOT */
-
-.mascot-image {
-
+.mascot {
     position: absolute;
-
-    right: -120px;
-    bottom: -140px;
-
-    width: 620px;
+    width: 700px;
     height: auto;
-
-    transform: scaleX(-1);
-
+    right: -140px;
+    bottom: -150px;
     z-index: 2;
+
+    /* Use this only if mascot faces wrong direction */
+    /* transform: scaleX(-1); */
 }
 
-/* TABLET */
+/* Tablet */
+@media (max-width: 1024px) {
+    .page-header {
+        padding: 16px 40px;
+    }
 
-@media (max-width: 1200px) {
+    .content-container {
+        grid-template-columns: 1fr 460px;
+    }
 
-    .header {
+    .left-content {
         padding-left: 40px;
         padding-right: 40px;
     }
 
-    .left-panel {
-        padding-left: 40px;
-        padding-right: 40px;
+    .right-illustration {
+        width: 460px;
+        height: 680px;
     }
 
-    .left-panel h1 {
-        font-size: 48px;
-    }
-
-    .left-panel h2 {
-        font-size: 38px;
-    }
-
-    .right-panel {
-        width: 450px;
-        height: 650px;
-        margin-right: 40px;
+    .mascot {
+        width: 560px;
+        right: -110px;
+        bottom: -110px;
     }
 }
 
-/* MOBILE */
-
+/* Mobile */
 @media (max-width: 768px) {
-
-    .header {
+    .page-header {
+        height: 80px;
         padding: 16px 24px;
     }
 
     .logo {
-        height: 40px;
+        width: 120px;
     }
 
     .content-container {
-
-        flex-direction: column;
+        grid-template-columns: 1fr;
+        min-height: calc(100vh - 80px);
     }
 
-    .left-panel {
-
-        padding: 32px 24px;
-        order: 2;
-    }
-
-    .right-panel {
-
-        order: 1;
-
+    .right-illustration {
+        order: -1;
         width: 100%;
-        height: 420px;
-
-        margin: 0;
-
+        height: 360px;
         border-radius: 0;
     }
 
-    .left-panel h1 {
-        font-size: 40px;
+    .left-content {
+        padding: 40px 24px;
+        max-width: none;
     }
 
-    .left-panel h2 {
-        font-size: 32px;
+    .left-content h1 {
+        font-size: 34px;
     }
 
-    .description {
-        font-size: 18px;
+    .left-content h2 {
+        font-size: 28px;
     }
 
-    .radio-group label {
-        font-size: 18px;
+    .left-content p {
+        margin: 32px 0;
+        font-size: 15px;
     }
 
-    .mascot-image {
+    .confirm-btn {
+        width: 100%;
+    }
 
-        width: 420px;
-
+    .mascot {
+        width: 430px;
         right: -80px;
-        bottom: -60px;
+        bottom: -90px;
     }
 }
 ```
 
-### Spring Controller
+Assets needed:
 
-```java
-@Controller
-@RequestMapping("/sales-point")
-public class SalesPointController {
-
-    @GetMapping
-    public String salesPointPage(Model model) {
-
-        return "sales-point";
-    }
-
-    @PostMapping
-    public String submitSalesPoint(
-            @RequestParam String salesPoint) {
-
-        System.out.println("Selected: " + salesPoint);
-
-        return "redirect:/next-page";
-    }
-}
+```text
+static/images/cetelem-logo.svg
+static/images/pattern-green.png
+static/images/mascot.png
 ```
-
-This version is:
-
-* ✅ Thymeleaf compatible
-* ✅ Mobile responsive
-* ✅ Uses the exact two-panel layout from Figma
-* ✅ Separate background pattern and mascot images
-* ✅ Mascot mirrored (`scaleX(-1)`)
-* ✅ Easy to connect to your Arthur Core sales point flow later.
