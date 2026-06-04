@@ -1,16 +1,148 @@
-Your layout is breaking because the header and the main content are being treated as separate full-width blocks, while the Figma screen is one fixed desktop container:
+You’re overcomplicating it because Figma is showing **nested padding measurements**, not page CSS directly.
+
+Use this exact simplified layout:
 
 ```text
-screen container
-  header: 1440 x 96
-  content: 1440 x remaining height
-    left content
-    right illustration: 600 x 804
+page = 1440 wide
+header = 96 high
+main = 2 columns
+left = flexible
+right = 600px
+right image block = 600 x 804
 ```
 
-Use this structure instead.
+Replace your current CSS with this smaller version first.
 
-## `sales-points.html`
+```css
+html,
+body {
+    margin: 0;
+    min-height: 100%;
+    font-family: "Open Sans", Arial, sans-serif;
+    background: #ffffff;
+    color: #071414;
+}
+
+.screen {
+    width: 100%;
+    min-height: 100vh;
+    background: #ffffff;
+}
+
+.page-header {
+    height: 96px;
+    padding: 16px 112px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.logo {
+    width: 140px;
+}
+
+.language-selector {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.language-btn {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    border: 0;
+    background: transparent;
+    color: #154734;
+    font-size: 16px;
+    font-weight: 500;
+}
+
+.language-btn.active {
+    background: #154734;
+    color: white;
+}
+
+.content-container {
+    display: grid;
+    grid-template-columns: 1fr 600px;
+    min-height: calc(100vh - 96px);
+}
+
+.left-content {
+    padding-left: 112px;
+    padding-top: 72px;
+    max-width: 720px;
+}
+
+.left-content h1 {
+    margin: 0;
+    font-size: 48px;
+    line-height: 1.15;
+    font-weight: 800;
+}
+
+.left-content h2 {
+    margin: 12px 0 0;
+    font-size: 40px;
+    line-height: 1.2;
+    font-weight: 300;
+}
+
+.left-content p {
+    margin: 40px 0 40px;
+    max-width: 560px;
+    font-size: 16px;
+    line-height: 1.45;
+}
+
+.sales-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.sales-option {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    font-size: 16px;
+}
+
+.sales-option input {
+    width: 18px;
+    height: 18px;
+    accent-color: #154734;
+}
+
+.confirm-btn {
+    margin-top: 40px;
+    height: 48px;
+    padding: 0 22px;
+    border: 0;
+    border-radius: 999px;
+    background: #073331;
+    color: #ffffff;
+    font-size: 16px;
+    font-weight: 700;
+}
+
+.right-illustration {
+    width: 600px;
+    height: 804px;
+    padding: 112px;
+    border-top-left-radius: 40px;
+    overflow: hidden;
+}
+
+.right-illustration img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+```
+
+And HTML must be exactly this structure:
 
 ```html
 <main class="screen">
@@ -30,9 +162,7 @@ Use this structure instead.
             <h1>Connexion à<br>votre espace partenaire</h1>
             <h2>Votre point de vente</h2>
 
-            <p>
-                Vous devez choisir le point de vente dans lequel vous vous trouvez actuellement.
-            </p>
+            <p>Vous devez choisir le point de vente dans lequel vous vous trouvez actuellement.</p>
 
             <form method="post" th:action="@{/sales-points/select}">
                 <input type="hidden" th:name="${_csrf.parameterName}" th:value="${_csrf.token}">
@@ -49,9 +179,7 @@ Use this structure instead.
                     </label>
                 </div>
 
-                <button class="confirm-btn" type="submit">
-                    Confirmer <span>→</span>
-                </button>
+                <button class="confirm-btn" type="submit">Confirmer →</button>
             </form>
         </section>
 
@@ -64,216 +192,100 @@ Use this structure instead.
 </main>
 ```
 
-## Replace your CSS with this
+Important: delete/disable old CSS classes like:
 
 ```css
-* {
-    box-sizing: border-box;
-}
+.card
+.left-panel
+.right-panel
+.header
+.hero-image
+```
 
-html,
-body {
-    margin: 0;
-    min-height: 100%;
-    font-family: "Open Sans", Arial, sans-serif;
-    background: #f3f0fa;
-    color: #071414;
-}
+They are probably still conflicting.
 
-.screen {
-    width: min(1440px, 100%);
-    min-height: 100vh;
-    margin: 0 auto;
-    background: #ffffff;
-}
 
-.page-header {
-    height: 96px;
-    padding: 16px 112px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    background: #ffffff;
-    border-bottom: 2px solid #ffffff;
-}
 
-.logo {
-    width: 140px;
-    height: auto;
-    display: block;
-}
+------------------------------------
 
-.language-selector {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-}
 
-.language-btn {
-    width: 40px;
-    height: 40px;
-    border: 0;
-    border-radius: 999px;
-    background: transparent;
-    color: #154734;
-    font-size: 16px;
-    font-weight: 500;
-    cursor: pointer;
-}
+That means your exported image already contains both:
 
-.language-btn.active {
-    background: #154734;
-    color: #ffffff;
-}
+```text
+background pattern + mascot
+```
 
-.content-container {
-    min-height: calc(100vh - 96px);
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 600px;
-}
+but your CSS is also treating it like a background/cover image and cropping it.
 
-.left-content {
-    padding-left: 112px;
-    padding-top: 112px;
-    padding-right: 64px;
-}
+Fix it by using the exported full illustration as a normal image, not background cover.
 
-.left-content h1 {
-    margin: 0;
-    font-size: 44px;
-    line-height: 1.12;
-    font-weight: 800;
-    letter-spacing: -0.03em;
-}
+## Update CSS
 
-.left-content h2 {
-    margin: 18px 0 0;
-    font-size: 34px;
-    line-height: 1.2;
-    font-weight: 300;
-}
+Replace this:
 
-.left-content p {
-    margin: 52px 0 32px;
-    max-width: 520px;
-    font-size: 16px;
-    line-height: 1.45;
-}
-
-.sales-list {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-}
-
-.sales-option {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    font-size: 16px;
-    cursor: pointer;
-}
-
-.sales-option input {
-    width: 18px;
-    height: 18px;
-    accent-color: #154734;
-}
-
-.confirm-btn {
-    margin-top: 36px;
-    min-width: 132px;
-    height: 48px;
-    padding: 0 20px;
-    border: 0;
-    border-radius: 999px;
-    background: #073331;
-    color: #ffffff;
-    font-size: 15px;
-    font-weight: 700;
-    cursor: pointer;
-}
-
+```css
 .right-illustration {
     width: 600px;
-    min-height: calc(100vh - 96px);
-    overflow: hidden;
+    height: 804px;
+    padding: 112px;
     border-top-left-radius: 40px;
+    overflow: hidden;
 }
 
 .right-illustration img {
     width: 100%;
     height: 100%;
-    min-height: calc(100vh - 96px);
-    display: block;
     object-fit: cover;
-}
-
-/* Tablet/mobile */
-@media (max-width: 900px) {
-    .page-header {
-        height: 80px;
-        padding: 16px 24px;
-    }
-
-    .content-container {
-        min-height: calc(100vh - 80px);
-        grid-template-columns: 1fr;
-    }
-
-    .right-illustration {
-        display: none;
-    }
-
-    .left-content {
-        padding: 64px 24px 40px;
-    }
-
-    .left-content h1 {
-        font-size: 36px;
-    }
-
-    .left-content h2 {
-        font-size: 28px;
-    }
-}
-
-@media (max-width: 520px) {
-    .screen {
-        min-height: 100vh;
-    }
-
-    .logo {
-        width: 120px;
-    }
-
-    .language-btn {
-        width: 40px;
-        height: 40px;
-        font-size: 16px;
-    }
-
-    .left-content {
-        padding-top: 48px;
-    }
-
-    .left-content h1 {
-        font-size: 32px;
-    }
-
-    .left-content h2 {
-        font-size: 26px;
-    }
-
-    .left-content p {
-        margin: 36px 0 28px;
-        font-size: 15px;
-    }
-
-    .confirm-btn {
-        width: 100%;
-    }
 }
 ```
 
-Important: remove old `.card`, `.left-panel`, `.right-panel`, `.header` CSS if still present. Those are probably conflicting.
+with this:
+
+```css
+.right-illustration {
+    width: 600px;
+    height: 804px;
+    border-top-left-radius: 40px;
+    overflow: hidden;
+    background: #154734;
+}
+
+.right-illustration img {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: contain;
+    object-position: center center;
+}
+```
+
+If the image still looks duplicated, then you exported the wrong layer from Figma.
+
+Export only the full parent:
+
+```text
+Illustration_right
+```
+
+not:
+
+```text
+Mascot
+Finger Like
+Pattern round
+Background
+```
+
+You need **one PNG** that already looks correct in Figma:
+
+```text
+600 x 804
+```
+
+Save as:
+
+```text
+src/main/resources/static/images/sales-point-hero.png
+```
+
+Do not add any separate green background CSS/image behind it.
