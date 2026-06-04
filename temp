@@ -1,213 +1,43 @@
-Use this final version.
+You’re close. The main issue is the **right image is too high/too zoomed vertically**, and the **left content is too high/small compared to Figma**.
 
-## `templates/views/sales-points.html`
+Make these changes only.
 
-```html
-<!DOCTYPE html>
-<html lang="fr" xmlns:th="http://www.thymeleaf.org">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Choix point de vente</title>
-    <link rel="stylesheet" th:href="@{/css/sales-points.css}">
-</head>
-<body>
-
-<main class="screen">
-
-    <header class="page-header">
-        <img class="logo" th:src="@{/images/cetelem-logo.svg}" alt="Cetelem">
-
-        <div class="language-selector">
-            <button type="button" class="language-btn active">FR</button>
-            <button type="button" class="language-btn">NL</button>
-        </div>
-    </header>
-
-    <section class="content-container">
-
-        <section class="left-content">
-            <h1>Connexion à<br>votre espace partenaire</h1>
-
-            <h2>Votre point de vente</h2>
-
-            <p>
-                Vous devez choisir le point de vente dans lequel vous vous trouvez actuellement.
-            </p>
-
-            <form method="post" th:action="@{/sales-points/select}">
-                <input type="hidden" th:name="${_csrf.parameterName}" th:value="${_csrf.token}">
-                <input type="hidden" name="appId" th:value="${appId}">
-
-                <div class="sales-list">
-                    <label class="sales-option" th:each="sp, iter : ${salesPoints}">
-                        <input type="radio"
-                               name="salesPointId"
-                               th:value="${sp.id}"
-                               th:checked="${iter.index == 0}"
-                               required>
-                        <span th:text="${sp.label}">Sales Point</span>
-                    </label>
-                </div>
-
-                <button class="confirm-btn" type="submit">
-                    Confirmer <span>→</span>
-                </button>
-            </form>
-        </section>
-
-        <section class="right-illustration">
-            <img class="background-pattern" th:src="@{/images/pattern-green.png}" alt="">
-            <img class="mascot" th:src="@{/images/mascot.png}" alt="Mascot">
-        </section>
-
-    </section>
-
-</main>
-
-</body>
-</html>
-```
-
-## `static/css/sales-points.css`
+## CSS fixes
 
 ```css
-* {
-    box-sizing: border-box;
-}
-
-html,
-body {
-    margin: 0;
-    min-height: 100%;
-    font-family: "Open Sans", Arial, sans-serif;
-    background: #ffffff;
-    color: #071414;
-}
-
-.screen {
-    width: 100%;
-    min-height: 100vh;
-    background: #ffffff;
-}
-
 .page-header {
     height: 96px;
     padding: 16px 112px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    background: #ffffff;
-}
-
-.logo {
-    width: 140px;
-    height: auto;
-    display: block;
-}
-
-.language-selector {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.language-btn {
-    width: 40px;
-    height: 40px;
-    border: 0;
-    border-radius: 999px;
-    background: transparent;
-    color: #154734;
-    font-size: 16px;
-    font-weight: 500;
-    cursor: pointer;
-}
-
-.language-btn.active {
-    background: #154734;
-    color: #ffffff;
 }
 
 .content-container {
     display: grid;
     grid-template-columns: 1fr 600px;
     min-height: calc(100vh - 96px);
+    align-items: start;
 }
 
 .left-content {
     padding-left: 112px;
-    padding-top: 72px;
-    padding-right: 104px;
-    width: 100%;
+    padding-top: 96px;
+    padding-right: 80px;
     max-width: 720px;
 }
 
 .left-content h1 {
-    margin: 0;
     font-size: 48px;
     line-height: 1.15;
-    font-weight: 800;
-    letter-spacing: -0.03em;
 }
 
 .left-content h2 {
-    margin: 12px 0 0;
     font-size: 40px;
-    line-height: 1.2;
-    font-weight: 300;
-}
-
-.left-content p {
-    margin: 40px 0 40px;
-    max-width: 560px;
-    font-size: 16px;
-    line-height: 1.45;
-    color: #3a3f45;
-}
-
-.sales-list {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-}
-
-.sales-option {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    font-size: 16px;
-    color: #333333;
-    cursor: pointer;
-}
-
-.sales-option input {
-    width: 18px;
-    height: 18px;
-    accent-color: #154734;
-}
-
-.confirm-btn {
-    margin-top: 40px;
-    height: 48px;
-    padding: 0 22px;
-    border: 0;
-    border-radius: 999px;
-    background: #073331;
-    color: #ffffff;
-    font-size: 16px;
-    font-weight: 700;
-    cursor: pointer;
-}
-
-.confirm-btn span {
-    margin-left: 8px;
 }
 
 .right-illustration {
     position: relative;
     width: 600px;
     height: 804px;
+    margin-top: 0;
     overflow: hidden;
     border-top-left-radius: 40px;
     background: #154734;
@@ -224,100 +54,33 @@ body {
 
 .mascot {
     position: absolute;
-    width: 700px;
-    height: auto;
-    right: -140px;
-    bottom: -150px;
+    width: 610px;
+    right: -120px;
+    bottom: -70px;
     z-index: 2;
-
-    /* Use this only if mascot faces wrong direction */
-    /* transform: scaleX(-1); */
-}
-
-/* Tablet */
-@media (max-width: 1024px) {
-    .page-header {
-        padding: 16px 40px;
-    }
-
-    .content-container {
-        grid-template-columns: 1fr 460px;
-    }
-
-    .left-content {
-        padding-left: 40px;
-        padding-right: 40px;
-    }
-
-    .right-illustration {
-        width: 460px;
-        height: 680px;
-    }
-
-    .mascot {
-        width: 560px;
-        right: -110px;
-        bottom: -110px;
-    }
-}
-
-/* Mobile */
-@media (max-width: 768px) {
-    .page-header {
-        height: 80px;
-        padding: 16px 24px;
-    }
-
-    .logo {
-        width: 120px;
-    }
-
-    .content-container {
-        grid-template-columns: 1fr;
-        min-height: calc(100vh - 80px);
-    }
-
-    .right-illustration {
-        order: -1;
-        width: 100%;
-        height: 360px;
-        border-radius: 0;
-    }
-
-    .left-content {
-        padding: 40px 24px;
-        max-width: none;
-    }
-
-    .left-content h1 {
-        font-size: 34px;
-    }
-
-    .left-content h2 {
-        font-size: 28px;
-    }
-
-    .left-content p {
-        margin: 32px 0;
-        font-size: 15px;
-    }
-
-    .confirm-btn {
-        width: 100%;
-    }
-
-    .mascot {
-        width: 430px;
-        right: -80px;
-        bottom: -90px;
-    }
 }
 ```
 
-Assets needed:
+Your current mascot is cut at the head because `bottom` is too low/negative and width is too large. This version brings it down to roughly “head to knees” like Figma.
+
+If it still shows too much leg, use:
+
+```css
+.mascot {
+    width: 660px;
+    right: -140px;
+    bottom: -120px;
+}
+```
+
+Also your logo looks broken/small. Check this path:
+
+```html
+<img class="logo" th:src="@{/images/cetelem-logo.svg}" alt="Cetelem">
+```
+
+Make sure the actual file exists here:
 
 ```text
-static/images/cetelem-logo.svg
-static/images/pattern-green.png
-static/images/mascot.png
+src/main/resources/static/images/cetelem-logo.svg
 ```
