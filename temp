@@ -84,3 +84,101 @@ Make sure the actual file exists here:
 ```text
 src/main/resources/static/images/cetelem-logo.svg
 ```
+
+
+
+That's because the mascot image is being positioned too high inside the container.
+
+Looking at your screenshot, the mascot's **head is clipped by the top edge** of the green container. You need to move the image **down**, not up.
+
+Try this:
+
+```css
+.right-illustration {
+    position: relative;
+    width: 600px;
+    height: 804px;
+    overflow: hidden;
+    border-top-left-radius: 40px;
+}
+
+.mascot {
+    position: absolute;
+    width: 700px;
+
+    right: -130px;
+
+    /* move DOWN */
+    top: 80px;
+
+    z-index: 2;
+}
+```
+
+Or if you're currently using `bottom`:
+
+```css
+.mascot {
+    position: absolute;
+    width: 700px;
+    right: -130px;
+
+    /* less negative = lower image */
+    bottom: -20px;
+}
+```
+
+### Debug trick
+
+Temporarily add:
+
+```css
+.mascot {
+    border: 2px solid red;
+}
+```
+
+Then you'll see the actual image boundaries.
+
+### What Figma actually shows
+
+The mascot should look approximately like:
+
+```text
+ -------------------------
+|                         |
+|        HEAD             |
+|                         |
+|       TORSO             |
+|                         |
+|      HANDS              |
+|                         |
+|       KNEES             |
+ -------------------------
+```
+
+Not:
+
+```text
+ -------------------------
+|       HEAD CUT          |
+|                         |
+|       TORSO             |
+|                         |
+|                         |
+|       FEET              |
+ -------------------------
+```
+
+If you want the exact Figma proportions from your screenshot, use:
+
+```css
+.mascot {
+    position: absolute;
+    width: 760px;
+    right: -170px;
+    top: 35px;
+}
+```
+
+This typically shows the full head and cuts around the knees, which is very close to the design you've been showing.
