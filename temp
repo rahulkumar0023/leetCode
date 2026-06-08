@@ -1,43 +1,160 @@
-You’re close. The main issue is the **right image is too high/too zoomed vertically**, and the **left content is too high/small compared to Figma**.
-
-Make these changes only.
-
-## CSS fixes
+Replace your full `sales-points.css` with this:
 
 ```css
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    margin: 0;
+    min-height: 100%;
+    font-family: "Open Sans", Arial, sans-serif;
+    background: #ffffff;
+    color: #071414;
+}
+
+.screen {
+    width: 100%;
+    min-height: 100vh;
+    background: #ffffff;
+    overflow-x: hidden;
+}
+
 .page-header {
     height: 96px;
-    padding: 16px 112px;
+    padding: 16px clamp(24px, 7vw, 140px);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.logo {
+    width: clamp(120px, 12vw, 160px);
+    height: auto;
+    display: block;
+}
+
+.language-selector {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.language-btn {
+    width: 40px;
+    height: 40px;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: #154734;
+    font-size: 16px;
+    font-weight: 500;
+    cursor: pointer;
+}
+
+.language-btn.active {
+    background: #154734;
+    color: #ffffff;
 }
 
 .content-container {
     display: grid;
-    grid-template-columns: 1fr 600px;
+    grid-template-columns: minmax(0, 1fr) minmax(360px, 42vw);
     min-height: calc(100vh - 96px);
-    align-items: start;
+    align-items: stretch;
 }
 
 .left-content {
-    padding-left: 112px;
-    padding-top: 96px;
-    padding-right: 80px;
-    max-width: 720px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 40px;
+    width: 100%;
+    padding: clamp(40px, 7vh, 72px) clamp(24px, 7vw, 140px);
 }
 
 .left-content h1 {
-    font-size: 48px;
+    margin: 0;
+    font-size: clamp(34px, 4vw, 48px);
     line-height: 1.15;
+    font-weight: 800;
+    letter-spacing: -0.03em;
 }
 
 .left-content h2 {
-    font-size: 40px;
+    margin: 12px 0 0;
+    font-size: clamp(28px, 3.2vw, 40px);
+    line-height: 1.2;
+    font-weight: 300;
+}
+
+.left-content p {
+    margin: 0;
+    max-width: 560px;
+    font-size: 16px;
+    line-height: 1.45;
+}
+
+form {
+    width: 100%;
+    max-width: 560px;
+}
+
+.sales-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.sales-option {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    color: #333333;
+    font-size: 16px;
+    cursor: pointer;
+}
+
+.sales-option input[type="radio"] {
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+    accent-color: #154734;
+}
+
+.sales-option span {
+    flex: 1 1 auto;
+    color: #000000;
+    font-family: "Open Sans", Arial, sans-serif;
+    font-size: 18px;
+    font-style: normal;
+    font-weight: 300;
+    line-height: normal;
+}
+
+.confirm-btn {
+    margin-top: 40px;
+    height: 48px;
+    padding: 0 22px;
+    border: 0;
+    border-radius: 999px;
+    background: #073331;
+    color: #ffffff;
+    font-size: 16px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.confirm-btn span {
+    margin-left: 8px;
 }
 
 .right-illustration {
     position: relative;
-    width: 600px;
-    height: 804px;
-    margin-top: 0;
+    width: 100%;
+    min-height: calc(100vh - 96px);
     overflow: hidden;
     border-top-left-radius: 40px;
     background: #154734;
@@ -54,131 +171,75 @@ Make these changes only.
 
 .mascot {
     position: absolute;
-    width: 610px;
-    right: -120px;
-    bottom: -70px;
+    width: clamp(420px, 46vw, 590px);
+    max-width: none;
+    right: clamp(-40px, 4vw, 60px);
+    bottom: clamp(-180px, -12vw, -80px);
     z-index: 2;
-}
-```
-
-Your current mascot is cut at the head because `bottom` is too low/negative and width is too large. This version brings it down to roughly “head to knees” like Figma.
-
-If it still shows too much leg, use:
-
-```css
-.mascot {
-    width: 660px;
-    right: -140px;
-    bottom: -120px;
-}
-```
-
-Also your logo looks broken/small. Check this path:
-
-```html
-<img class="logo" th:src="@{/images/cetelem-logo.svg}" alt="Cetelem">
-```
-
-Make sure the actual file exists here:
-
-```text
-src/main/resources/static/images/cetelem-logo.svg
-```
-
-
-
-That's because the mascot image is being positioned too high inside the container.
-
-Looking at your screenshot, the mascot's **head is clipped by the top edge** of the green container. You need to move the image **down**, not up.
-
-Try this:
-
-```css
-.right-illustration {
-    position: relative;
-    width: 600px;
-    height: 804px;
-    overflow: hidden;
-    border-top-left-radius: 40px;
+    transform: scaleX(-1);
 }
 
-.mascot {
-    position: absolute;
-    width: 700px;
+/* Tablet */
+@media (max-width: 1024px) {
+    .content-container {
+        grid-template-columns: minmax(0, 1fr) minmax(320px, 40vw);
+    }
 
-    right: -130px;
+    .left-content {
+        padding: 48px 40px;
+    }
 
-    /* move DOWN */
-    top: 80px;
+    .mascot {
+        width: clamp(360px, 48vw, 520px);
+        right: -40px;
+        bottom: -120px;
+    }
+}
 
-    z-index: 2;
+/* Mobile */
+@media (max-width: 768px) {
+    .page-header {
+        height: 80px;
+        padding: 16px 24px;
+    }
+
+    .content-container {
+        display: flex;
+        flex-direction: column;
+        min-height: auto;
+    }
+
+    .left-content {
+        order: 1;
+        padding: 32px 24px;
+        gap: 28px;
+    }
+
+    .left-content h1 {
+        font-size: 34px;
+    }
+
+    .left-content h2 {
+        font-size: 28px;
+    }
+
+    form {
+        max-width: 100%;
+    }
+
+    .right-illustration {
+        order: 2;
+        width: 100%;
+        min-height: 360px;
+        border-top-left-radius: 32px;
+        border-top-right-radius: 32px;
+    }
+
+    .mascot {
+        width: 360px;
+        right: 50%;
+        bottom: -90px;
+        transform: translateX(50%) scaleX(-1);
+    }
 }
 ```
-
-Or if you're currently using `bottom`:
-
-```css
-.mascot {
-    position: absolute;
-    width: 700px;
-    right: -130px;
-
-    /* less negative = lower image */
-    bottom: -20px;
-}
-```
-
-### Debug trick
-
-Temporarily add:
-
-```css
-.mascot {
-    border: 2px solid red;
-}
-```
-
-Then you'll see the actual image boundaries.
-
-### What Figma actually shows
-
-The mascot should look approximately like:
-
-```text
- -------------------------
-|                         |
-|        HEAD             |
-|                         |
-|       TORSO             |
-|                         |
-|      HANDS              |
-|                         |
-|       KNEES             |
- -------------------------
-```
-
-Not:
-
-```text
- -------------------------
-|       HEAD CUT          |
-|                         |
-|       TORSO             |
-|                         |
-|                         |
-|       FEET              |
- -------------------------
-```
-
-If you want the exact Figma proportions from your screenshot, use:
-
-```css
-.mascot {
-    position: absolute;
-    width: 760px;
-    right: -170px;
-    top: 35px;
-}
-```
-
-This typically shows the full head and cuts around the knees, which is very close to the design you've been showing.
