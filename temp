@@ -427,3 +427,386 @@ src/main/resources/templates/status-page.html
 src/main/resources/static/css/status-page.css
 ```
 ------------------
+------------------
+
+
+
+Below is the final clean setup.
+
+## 1. Controller
+
+```java
+@Controller
+@RequestMapping("/sales-points")
+@RequiredArgsConstructor
+public class SalesPointController {
+
+    private final RedisSessionService redisSessionService;
+    private final AuthService authService;
+
+    @GetMapping
+    public ModelAndView salesPoints(
+            @RequestParam String appId,
+            @CookieValue(value = "ARTHUR_SESSION", required = false) String sessionId
+    ) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return new ModelAndView("redirect:/auth/start?appId=" + appId);
+        }
+
+        UserSession session = redisSessionService.findBySessionId(sessionId);
+
+        if (session == null) {
+            return new ModelAndView("redirect:/auth/start?appId=" + appId);
+        }
+
+        if (session.getSalesPoints() == null || session.getSalesPoints().isEmpty()) {
+            return noSalesPointsView(appId);
+        }
+
+        ModelAndView mv = new ModelAndView("views/sales-points");
+        mv.addObject("salesPoints", session.getSalesPoints());
+        mv.addObject("appId", appId);
+
+        return mv;
+    }
+
+    @PostMapping("/select")
+    public ModelAndView selectSalesPoint(
+            @RequestParam String appId,
+            @CookieValue(value = "ARTHUR_SESSION", required = false) String sessionId,
+            @RequestParam String salesPointId
+    ) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return new ModelAndView("redirect:/auth/start?appId=" + appId);
+        }
+
+        try {
+            String redirectUrl =
+                    authService.completeSalesPointSelection(sessionId, salesPointId);
+
+            return new ModelAndView("redirect:" + redirectUrl);
+
+        } catch (Exception e) {
+            return technicalErrorView(appId);
+        }
+    }
+
+    private ModelAndView noSalesPointsView(String appId) {
+        ModelAndView mv = new ModelAndView("views/sales-points-failure");
+
+        mv.addObject("pageTitle", "Point de vente non défini");
+        mv.addObject("iconPath", "/images/icons/warning.svg");
+        mv.addObject("title", "Oups, votre point de vente<br>n’est pas encore défini");
+        mv.addObject("message",
+                "Votre compte n’est pas associé à un point de vente. Vous ne pouvez donc pas accéder à la plateforme partenaire Cetelem.");
+        mv.addObject("strongMessage",
+                "Veuillez contacter votre Zone Manager pour recevoir de l’aide.");
+        mv.addObject("appId", appId);
+
+        return mv;
+    }
+
+    private ModelAndView technicalErrorView(String appId) {
+        ModelAndView mv = new ModelAndView("views/sales-points-failure");
+
+        mv.addObject("pageTitle", "Erreur technique");
+        mv.addObject("iconPath", "/images/icons/tools.svg");
+        mv.addObject("title", "Oups, un problème<br>technique est survenu.");
+        mv.addObject("message",
+                "Nous n’avons pas pu charger les données nécessaires pour le moment.");
+        mv.addObject("strongMessage",
+                "Réessayez dans quelques minutes. Si le problème persiste, contactez votre Zone Manager pour obtenir de l’aide.");
+        mv.addObject("appId", appId);
+
+        return mv;
+    }
+}
+```
+
+## 2. Failure page
+
+Path:
+
+```text
+src/main/resources/templates/views/sales-points-failure.html
+```
+
+```html
+<!DOCTYPE html>
+<html lang="fr" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title th:text="${pageTitle}">Erreur</title>
+    <link rel="stylesheet" th:href="@{/css/sales-points-failure.css}">
+</head>
+
+<body>
+<main class="failure-screen">
+
+    <header class="page-header">
+        <img class="logo" th:src="@{/images/cetelem-logo.svg}" alt="Cetelem">
+
+        <div class="language-selector">
+            <button type="button" class="language-btn active">FR</button>
+            <button type="button" class="language-btn">NL</button>
+        </div>
+    </header>
+
+    <section class="failure-container">
+
+        <section class="failure-content">
+            <img class="failure-icon" th:src="@{${iconPath}}" alt="">
+
+            <h1 th:utext="${title}">
+                Oups, un problème<br>technique est survenu.
+            </h1>
+
+            <p class="message" th:text="${message}">
+                Nous n’avons pas pu charger les données nécessaires pour le moment.
+            </p>
+
+            <p class="strong-message"
+               th:if="${strongMessage != null and !#strings.isEmpty(strongMessage)}"
+               th:text="${strongMessage}">
+                Réessayez dans quelques minutes.
+            </p>
+        </section>
+
+        <section class="right-illustration">
+            <img class="background-pattern"
+                 th:src="@{/images/green-background.png}"
+                 alt="">
+
+            <img class="mascot"
+                 th:src="@{/images/mascot.png}"
+                 alt="">
+        </section>
+
+    </section>
+
+</main>
+</body>
+</html>
+```
+
+## 3. Failure CSS
+
+Path:
+
+```text
+src/main/resources/static/css/sales-points-failure.css
+```
+
+```css
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    margin: 0;
+    min-height: 100%;
+    font-family: "Open Sans", Arial, sans-serif;
+    background: #ffffff;
+    color: #071414;
+}
+
+.failure-screen {
+    width: 100%;
+    min-height: 100vh;
+    overflow-x: hidden;
+    background: #ffffff;
+}
+
+.page-header {
+    height: 96px;
+    padding: 16px clamp(24px, 7vw, 140px);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.logo {
+    width: clamp(120px, 12vw, 160px);
+    height: auto;
+    display: block;
+}
+
+.language-selector {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.language-btn {
+    width: 40px;
+    height: 40px;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: #154734;
+    font-size: 16px;
+    font-weight: 500;
+    cursor: pointer;
+}
+
+.language-btn.active {
+    background: #073331;
+    color: #ffffff;
+}
+
+.failure-container {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(360px, 42vw);
+    min-height: calc(100vh - 96px);
+}
+
+.failure-content {
+    padding: clamp(48px, 8vh, 96px) clamp(24px, 7vw, 140px);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+}
+
+.failure-icon {
+    width: clamp(72px, 8vw, 104px);
+    height: clamp(72px, 8vw, 104px);
+    margin-bottom: 32px;
+}
+
+.failure-content h1 {
+    margin: 0;
+    max-width: 720px;
+    color: #000000;
+    font-size: clamp(36px, 4.2vw, 56px);
+    line-height: 1.08;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+}
+
+.message {
+    margin: 36px 0 0;
+    max-width: 680px;
+    color: #555555;
+    font-size: clamp(16px, 1.4vw, 20px);
+    line-height: 1.45;
+    font-weight: 300;
+}
+
+.strong-message {
+    margin: 12px 0 0;
+    max-width: 680px;
+    color: #111111;
+    font-size: clamp(16px, 1.4vw, 20px);
+    line-height: 1.45;
+    font-weight: 700;
+}
+
+.right-illustration {
+    position: relative;
+    width: 100%;
+    min-height: calc(100vh - 96px);
+    overflow: hidden;
+    border-top-left-radius: 40px;
+    background: #154734;
+}
+
+.background-pattern {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    z-index: 1;
+}
+
+.mascot {
+    position: absolute;
+    z-index: 2;
+    width: clamp(420px, 46vw, 620px);
+    max-width: none;
+    right: clamp(-40px, 4vw, 60px);
+    bottom: clamp(-160px, -10vw, -70px);
+}
+
+/* Tablet */
+@media (max-width: 1024px) {
+    .failure-container {
+        grid-template-columns: minmax(0, 1fr) minmax(320px, 40vw);
+    }
+
+    .failure-content {
+        padding: 48px 40px;
+    }
+
+    .mascot {
+        width: clamp(360px, 48vw, 540px);
+        right: -48px;
+        bottom: -120px;
+    }
+}
+
+/* Mobile */
+@media (max-width: 768px) {
+    .page-header {
+        height: 80px;
+        padding: 16px 24px;
+    }
+
+    .failure-container {
+        display: flex;
+        flex-direction: column;
+    }
+
+    .failure-content {
+        order: 1;
+        padding: 40px 24px;
+        justify-content: flex-start;
+    }
+
+    .failure-content h1 {
+        font-size: 34px;
+        line-height: 1.12;
+    }
+
+    .message,
+    .strong-message {
+        font-size: 16px;
+    }
+
+    .right-illustration {
+        order: 2;
+        width: 100%;
+        min-height: 360px;
+        border-top-left-radius: 32px;
+        border-top-right-radius: 32px;
+    }
+
+    .mascot {
+        width: 360px;
+        right: 50%;
+        bottom: -90px;
+        transform: translateX(50%);
+    }
+}
+```
+
+## Final files
+
+```text
+src/main/resources/templates/views/sales-points.html
+src/main/resources/templates/views/sales-points-failure.html
+
+src/main/resources/static/css/sales-points.css
+src/main/resources/static/css/sales-points-failure.css
+
+src/main/resources/static/images/cetelem-logo.svg
+src/main/resources/static/images/green-background.png
+src/main/resources/static/images/mascot.png
+
+src/main/resources/static/images/icons/warning.svg
+src/main/resources/static/images/icons/tools.svg
+```
+
