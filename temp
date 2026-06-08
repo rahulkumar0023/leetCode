@@ -1,47 +1,12 @@
-Correct — this fails **before `/sales-points`**.
+Yes, exactly. Since `technicalErrorView(String appId)` is currently inside `SalesPointController`, the global handler cannot call it directly.
 
-From your log, the failure is in:
-
-```text
-AuthService.handleCallback(...)
-AuthController.callback(...)
-```
-
-So the flow is:
-
-```text
-/auth/callback
-  ↓
-AuthService.handleCallback()
-  ↓
-partner-repository /users/another-test-user
-  ↓
-500 or user not found
-  ↓
-exception thrown
-```
-
-Because of that, the browser never reaches:
-
-```text
-GET /sales-points
-```
-
-So your `SalesPointController` failure page cannot handle this case.
-
-You need a **global UI error handler** for auth/callback errors.
-
-Add this:
+Create a separate helper class, for example:
 
 ```java
-@ControllerAdvice
-@Slf4j
-public class UiExceptionHandler {
+@Component
+public class UiErrorViewFactory {
 
-    @ExceptionHandler(Exception.class)
-    public ModelAndView handleGenericUiException(Exception ex) {
-        log.error("Unhandled UI error", ex);
-
+    public ModelAndView technicalErrorView(String appId) {
         ModelAndView mv = new ModelAndView("views/ui-error");
 
         mv.addObject("pageTitle", "Erreur technique");
@@ -51,49 +16,50 @@ public class UiExceptionHandler {
                 "Nous n’avons pas pu charger les données nécessaires pour le moment.");
         mv.addObject("strongMessage",
                 "Réessayez dans quelques minutes. Si le problème persiste, contactez votre Zone Manager pour obtenir de l’aide.");
+        mv.addObject("appId", appId);
+
+        return mv;
+    }
+
+    public ModelAndView noSalesPointsView(String appId) {
+        ModelAndView mv = new ModelAndView("views/ui-error");
+
+        mv.addObject("pageTitle", "Point de vente non défini");
+        mv.addObject("iconPath", "/images/icons/warning.svg");
+        mv.addObject("title", "Oups, votre point de vente<br>n’est pas encore défini");
+        mv.addObject("message",
+                "Votre compte n’est pas associé à un point de vente. Vous ne pouvez donc pas accéder à la plateforme partenaire Cetelem.");
+        mv.addObject("strongMessage",
+                "Veuillez contacter votre Zone Manager pour recevoir de l’aide.");
+        mv.addObject("appId", appId);
 
         return mv;
     }
 }
 ```
 
-Then rename your reusable page to:
-
-```text
-templates/views/ui-error.html
-```
-
-and CSS:
-
-```text
-static/css/ui-error.css
-```
-
-Then it can be used by:
-
-```text
-AuthController
-SalesPointController
-any UI controller exception
-```
-
-For this exact case, also handle missing user inside `AuthService.handleCallback()`:
+Then inject it in `SalesPointController`:
 
 ```java
-try {
-    User user = partnerRepositoryClient.getUserById(username);
-} catch (Exception e) {
-    throw new UiTechnicalException("Unable to load user from partner repository", e);
-}
+private final UiErrorViewFactory uiErrorViewFactory;
 ```
 
-Then in the global handler:
+Use:
 
 ```java
-@ExceptionHandler(UiTechnicalException.class)
-public ModelAndView handleUiTechnicalException(UiTechnicalException ex) {
-    return technicalErrorView();
-}
+return uiErrorViewFactory.noSalesPointsView(appId);
 ```
 
-So yes: for errors before sales-point screen, use **global `@ControllerAdvice`**, not `SalesPointController`.
+and:
+
+```java
+return uiErrorViewFactory.technicalErrorView(appId);
+```
+
+For global errors where you may not have `appId`, use:
+
+```java
+return uiErrorViewFactory.technicalErrorView(null);
+```
+
+That way both `SalesPointController` and `@ControllerAdvice` can reuse the same error page.
