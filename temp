@@ -1,17 +1,116 @@
-I would **not create it inside `SalesPointController`** because this error page is no longer sales-point specific.
+This log shows a **different failure** than the partner-repository one.
 
-Create a dedicated controller:
+The important lines are:
+
+```text
+Required request parameter 'code' is not present
+```
+
+and
+
+```text
+java.lang.IllegalStateException: Invalid or expired state
+```
+
+and
+
+```text
+AuthService.handleCallback(...)
+AuthController.callback(...)
+```
+
+### What is happening?
+
+Your callback endpoint is probably something like:
 
 ```java
-package com.bnpp.pf.arthur.core.controller;
-
-import org.springframework.stereotype.Controller;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.servlet.ModelAndView;
-
-@Controller
-public class ErrorController {
+@GetMapping("/callback")
+public ...
 ```
+
+expecting:
+
+```text
+/auth/callback?code=xxxx&state=yyyy
+```
+
+But the request arriving is:
+
+```text
+/auth/callback?state=...
+```
+
+Notice:
+
+```text
+Required request parameter 'code' is not present
+```
+
+So Keycloak/OIDC did not send the authorization code, or the callback URL was manually refreshed/reused.
+
+Then Arthur Core tries to validate:
+
+```java
+state
+```
+
+against Redis:
+
+```text
+lookup auth transaction key=...
+found=null
+```
+
+and throws:
+
+```text
+Invalid or expired state
+```
+
+---
+
+## Should this show your generic error page?
+
+Yes.
+
+This is a perfect candidate for:
+
+```text
+/arthur-core/error/technical
+```
+
+because the user cannot recover themselves.
+
+---
+
+## Better architecture
+
+I would create:
+
+```java
+@ControllerAdvice
+@Slf4j
+public class UiExceptionHandler {
+
+    @ExceptionHandler(IllegalStateException.class)
+    public ModelAndView handleIllegalState(
+            IllegalStateException ex) {
+
+        return new ModelAndView(
+                "redirect:/error/technical");
+    }
+
+    @ExceptionHandler(Exception.class)
+    public ModelAndView handleGeneric(
+            Exception ex) {
+
+        return new ModelAndView(
+                "redirect:/error/technical");
+    }
+}
+```
+
+Then:
 
 ```java
 @Controller
@@ -19,83 +118,68 @@ public class ErrorController {
 
     @GetMapping("/error/technical")
     public ModelAndView technicalError() {
-
-        ModelAndView mv =
-                new ModelAndView("views/ui-error");
-
-        mv.addObject("pageTitle", "Erreur technique");
-        mv.addObject("iconPath", "/images/icons/tools.svg");
-        mv.addObject("title",
-                "Oups, un problème<br>technique est survenu.");
-        mv.addObject("message",
-                "Nous n’avons pas pu charger les données nécessaires pour le moment.");
-        mv.addObject("strongMessage",
-                "Réessayez dans quelques minutes. Si le problème persiste, contactez votre Zone Manager pour obtenir de l’aide.");
-
-        return mv;
+        ...
     }
 
     @GetMapping("/error/no-sales-point")
     public ModelAndView noSalesPoint() {
-
-        ModelAndView mv =
-                new ModelAndView("views/ui-error");
-
-        mv.addObject("pageTitle", "Point de vente non défini");
-        mv.addObject("iconPath", "/images/icons/warning.svg");
-        mv.addObject("title",
-                "Oups, votre point de vente<br>n’est pas encore défini");
-        mv.addObject("message",
-                "Votre compte n’est pas associé à un point de vente. Vous ne pouvez donc pas accéder à la plateforme partenaire Cetelem.");
-        mv.addObject("strongMessage",
-                "Veuillez contacter votre Zone Manager pour recevoir de l’aide.");
-
-        return mv;
+        ...
     }
 }
 ```
 
-Then from your `@ControllerAdvice`:
+---
+
+## One thing I would improve
+
+Instead of throwing:
 
 ```java
-@ExceptionHandler(Exception.class)
-public ModelAndView handleException(Exception ex) {
+throw new IllegalStateException(
+        "Invalid or expired state");
+```
 
-    return new ModelAndView("redirect:/error/technical");
+create:
+
+```java
+public class InvalidStateException
+        extends RuntimeException {
+
+    public InvalidStateException(String message) {
+        super(message);
+    }
 }
 ```
 
-And from `SalesPointController`:
-
-Instead of:
+Then:
 
 ```java
-return noSalesPointsView(appId);
+throw new InvalidStateException(
+        "Invalid or expired state");
 ```
 
-use:
+And handle it specifically:
 
 ```java
-return new ModelAndView("redirect:/error/no-sales-point");
+@ExceptionHandler(InvalidStateException.class)
+public ModelAndView handleInvalidState(
+        InvalidStateException ex) {
+
+    return new ModelAndView(
+            "redirect:/error/technical");
+}
 ```
 
-### Suggested structure
+This makes the code much easier to understand than using generic `IllegalStateException`.
 
-```text
-controller/
-├── AuthController.java
-├── SalesPointController.java
-├── ErrorController.java
+### So for your current Arthur Core flow
 
-exception/
-├── UiExceptionHandler.java
-```
+You now have three error categories:
 
-This keeps:
+| Error                                   | Location                   | Page            |
+| --------------------------------------- | -------------------------- | --------------- |
+| Invalid/expired callback state          | AuthController/AuthService | Technical Error |
+| Partner Repository 500 / user not found | AuthService                | Technical Error |
+| No sales points returned                | SalesPointController       | No Sales Point  |
 
-* `AuthController` → authentication flow
-* `SalesPointController` → sales point selection flow
-* `ErrorController` → all UI error pages
-* `UiExceptionHandler` → maps exceptions to error pages
-
-That's the structure I'd use for Arthur Core going forward.
+Everything else can fall back to the generic technical error page.
