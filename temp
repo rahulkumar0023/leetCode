@@ -1,31 +1,315 @@
+Yes, and that's actually the approach I'd recommend.
 
-That's a **Material Symbol "arrow_forward"** icon.
-
-Since you're already using Thymeleaf and static resources, I would **not load Google Fonts just for one icon**. It's cleaner to download the SVG and keep it in your project.
-
-### Option 1 (Recommended) - SVG Image
-
-Download the SVG and put it in:
+Instead of:
 
 ```text
-src/main/resources/static/images/icons/arrow-forward.svg
+success.html
+technical-error.html
+sales-point-missing.html
 ```
 
-Then update your button:
+Create a single generic page:
+
+```text
+status-page.html
+```
+
+and drive it with a status type.
+
+For example:
+
+```java
+public enum PageStatus {
+    SUCCESS,
+    TECHNICAL_ERROR,
+    SALES_POINT_NOT_DEFINED
+}
+```
+
+Controller:
+
+```java
+@GetMapping("/status")
+public String status(@RequestParam String type, Model model) {
+
+    switch (type) {
+
+        case "SUCCESS":
+            model.addAttribute("iconPath", "/images/icons/success.svg");
+            model.addAttribute("title",
+                "Votre point de vente<br>a bien été enregistré");
+            model.addAttribute("message",
+                "Vous allez être redirigé vers la plateforme partenaire.");
+            model.addAttribute("strongMessage", "");
+            model.addAttribute("buttonText", "Continuer");
+            model.addAttribute("showButton", true);
+            break;
+
+        case "SALES_POINT_NOT_DEFINED":
+            model.addAttribute("iconPath", "/images/icons/warning.svg");
+            model.addAttribute("title",
+                "Oups, votre point de vente<br>n’est pas encore défini");
+            model.addAttribute("message",
+                "Votre compte n’est pas associé à un point de vente.");
+            model.addAttribute("strongMessage",
+                "Veuillez contacter votre Zone Manager pour recevoir de l’aide.");
+            model.addAttribute("showButton", false);
+            break;
+
+        default:
+            model.addAttribute("iconPath", "/images/icons/tools.svg");
+            model.addAttribute("title",
+                "Oups, un problème<br>technique est survenu.");
+            model.addAttribute("message",
+                "Nous n’avons pas pu charger les données nécessaires.");
+            model.addAttribute("strongMessage",
+                "Réessayez dans quelques minutes.");
+            model.addAttribute("showButton", false);
+    }
+
+    return "status-page";
+}
+```
+
+Template:
 
 ```html
-<button type="submit" class="confirm-btn">
-    Continue
-    <img th:src="@{/images/icons/arrow-forward.svg}"
-         alt=""
-         class="btn-icon">
+<img class="status-icon" th:src="@{${iconPath}}" alt="">
+
+<h1 th:utext="${title}"></h1>
+
+<p th:text="${message}"></p>
+
+<p class="strong-message"
+   th:if="${strongMessage != null}"
+   th:text="${strongMessage}">
+</p>
+
+<button
+    th:if="${showButton}"
+    class="confirm-btn">
+    <span th:text="${buttonText}"></span>
 </button>
 ```
 
-CSS:
+### For your Arthur Core flow
+
+I would have:
+
+| Scenario                               | Page                         |
+| -------------------------------------- | ---------------------------- |
+| Sales point selected successfully      | Success status               |
+| No sales points returned from Lancelot | Sales Point Not Defined      |
+| Lancelot timeout                       | Technical Error              |
+| Redis unavailable                      | Technical Error              |
+| Ping unavailable                       | Technical Error              |
+| Invalid AppId                          | Technical Error              |
+| Unauthorized user                      | Dedicated Access Denied page |
+
+The only page I'd keep separate is:
+
+```text
+access-denied.html
+```
+
+because that's a different business scenario than an application failure.
+
+So your final structure becomes:
+
+```text
+sales-point-selection.html
+status-page.html
+access-denied.html
+```
+
+instead of maintaining 5–6 separate Thymeleaf pages. This will be much easier to maintain as Arthur Core grows and more applications (B2BOOST_BE, B2BOOST_NL, etc.) are onboarded.
+
+
+-------------------------
+Use this as one reusable page: **success + technical error + sales point not defined**.
+
+### `status-page.html`
+
+```html
+<!DOCTYPE html>
+<html lang="fr" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title th:text="${pageTitle}">Status</title>
+    <link rel="stylesheet" th:href="@{/css/status-page.css}">
+</head>
+
+<body>
+<main class="status-screen">
+    <header class="page-header">
+        <img class="logo" th:src="@{/images/cetelem-logo.svg}" alt="Cetelem">
+
+        <div class="language-selector">
+            <button type="button" class="language-btn active">FR</button>
+            <button type="button" class="language-btn">NL</button>
+        </div>
+    </header>
+
+    <section class="status-container">
+        <section class="status-content">
+            <img class="status-icon" th:src="@{${iconPath}}" alt="">
+
+            <h1 th:utext="${title}">
+                Oups, un problème<br>technique est survenu.
+            </h1>
+
+            <p class="message" th:text="${message}">
+                Nous n’avons pas pu charger les données nécessaires pour le moment.
+            </p>
+
+            <p class="strong-message"
+               th:if="${strongMessage != null and !#strings.isEmpty(strongMessage)}"
+               th:text="${strongMessage}">
+                Réessayez dans quelques minutes.
+            </p>
+
+            <form th:if="${showButton}" method="post" th:action="@{/sales-points/continue}">
+                <input type="hidden" th:name="${_csrf.parameterName}" th:value="${_csrf.token}">
+                <input type="hidden" name="appId" th:value="${appId}">
+
+                <button type="submit" class="continue-btn">
+                    <span th:text="${buttonText}">Continuer</span>
+
+                    <svg class="btn-icon"
+                         xmlns="http://www.w3.org/2000/svg"
+                         viewBox="0 -960 960 960"
+                         fill="currentColor">
+                        <path d="M647-440H160v-80h487L423-744l57-56 320 320-320 320-57-56 224-224Z"/>
+                    </svg>
+                </button>
+            </form>
+        </section>
+
+        <section class="right-illustration">
+            <img class="background-pattern"
+                 th:src="@{/images/green-background.png}"
+                 alt="">
+
+            <img class="mascot"
+                 th:src="@{/images/mascot.png}"
+                 alt="">
+        </section>
+    </section>
+</main>
+</body>
+</html>
+```
+
+### `status-page.css`
 
 ```css
-.confirm-btn {
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    margin: 0;
+    min-height: 100%;
+    font-family: "Open Sans", Arial, sans-serif;
+    background: #ffffff;
+    color: #071414;
+}
+
+.status-screen {
+    width: 100%;
+    min-height: 100vh;
+    overflow-x: hidden;
+    background: #ffffff;
+}
+
+.page-header {
+    height: 96px;
+    padding: 16px clamp(24px, 7vw, 140px);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.logo {
+    width: clamp(120px, 12vw, 160px);
+    height: auto;
+    display: block;
+}
+
+.language-selector {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.language-btn {
+    width: 40px;
+    height: 40px;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: #154734;
+    font-size: 16px;
+    font-weight: 500;
+    cursor: pointer;
+}
+
+.language-btn.active {
+    background: #073331;
+    color: #ffffff;
+}
+
+.status-container {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(360px, 42vw);
+    min-height: calc(100vh - 96px);
+}
+
+.status-content {
+    padding: clamp(48px, 8vh, 96px) clamp(24px, 7vw, 140px);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+}
+
+.status-icon {
+    width: clamp(72px, 8vw, 104px);
+    height: clamp(72px, 8vw, 104px);
+    margin-bottom: 32px;
+}
+
+.status-content h1 {
+    margin: 0;
+    max-width: 720px;
+    color: #000000;
+    font-size: clamp(36px, 4.2vw, 56px);
+    line-height: 1.08;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+}
+
+.message {
+    margin: 36px 0 0;
+    max-width: 680px;
+    color: #555555;
+    font-size: clamp(16px, 1.4vw, 20px);
+    line-height: 1.45;
+    font-weight: 300;
+}
+
+.strong-message {
+    margin: 12px 0 0;
+    max-width: 680px;
+    color: #111111;
+    font-size: clamp(16px, 1.4vw, 20px);
+    line-height: 1.45;
+    font-weight: 700;
+}
+
+.continue-btn {
     margin-top: 40px;
     height: 48px;
     padding: 0 24px;
@@ -35,48 +319,10 @@ CSS:
     color: #ffffff;
     font-size: 16px;
     font-weight: 700;
-
     display: inline-flex;
     align-items: center;
     gap: 8px;
-
     cursor: pointer;
-}
-
-.btn-icon {
-    width: 20px;
-    height: 20px;
-    filter: brightness(0) invert(1);
-}
-```
-
----
-
-### Option 2 - Inline SVG (Best Performance)
-
-No extra file required.
-
-```html
-<button type="submit" class="confirm-btn">
-    Continue
-
-    <svg class="btn-icon"
-         xmlns="http://www.w3.org/2000/svg"
-         viewBox="0 -960 960 960"
-         fill="currentColor">
-
-        <path d="M647-440H160v-80h487L423-744l57-56 320 320-320 320-57-56 224-224Z"/>
-    </svg>
-</button>
-```
-
-CSS:
-
-```css
-.confirm-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
 }
 
 .btn-icon {
@@ -84,37 +330,100 @@ CSS:
     height: 20px;
     fill: currentColor;
 }
+
+.right-illustration {
+    position: relative;
+    width: 100%;
+    min-height: calc(100vh - 96px);
+    overflow: hidden;
+    border-top-left-radius: 40px;
+    background: #154734;
+}
+
+.background-pattern {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    z-index: 1;
+}
+
+.mascot {
+    position: absolute;
+    z-index: 2;
+    width: clamp(420px, 46vw, 620px);
+    max-width: none;
+    right: clamp(-40px, 4vw, 60px);
+    bottom: clamp(-160px, -10vw, -70px);
+}
+
+/* Tablet */
+@media (max-width: 1024px) {
+    .status-container {
+        grid-template-columns: minmax(0, 1fr) minmax(320px, 40vw);
+    }
+
+    .status-content {
+        padding: 48px 40px;
+    }
+
+    .mascot {
+        width: clamp(360px, 48vw, 540px);
+        right: -48px;
+        bottom: -120px;
+    }
+}
+
+/* Mobile */
+@media (max-width: 768px) {
+    .page-header {
+        height: 80px;
+        padding: 16px 24px;
+    }
+
+    .status-container {
+        display: flex;
+        flex-direction: column;
+    }
+
+    .status-content {
+        order: 1;
+        padding: 40px 24px;
+        justify-content: flex-start;
+    }
+
+    .status-content h1 {
+        font-size: 34px;
+        line-height: 1.12;
+    }
+
+    .message,
+    .strong-message {
+        font-size: 16px;
+    }
+
+    .right-illustration {
+        order: 2;
+        width: 100%;
+        min-height: 360px;
+        border-top-left-radius: 32px;
+        border-top-right-radius: 32px;
+    }
+
+    .mascot {
+        width: 360px;
+        right: 50%;
+        bottom: -90px;
+        transform: translateX(50%);
+    }
+}
 ```
 
-This is actually what I'd use in Arthur Core because:
+Put it here:
 
-* No Google dependency
-* No extra HTTP request
-* Works offline
-* Works in Kubernetes
-* Works in Thymeleaf
-* Easy to recolor with CSS
-
----
-
-### Option 3 - Material Symbols (if your architects want Google's icon set)
-
-Add in `<head>`:
-
-```html
-<link rel="stylesheet"
-      href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined" />
+```text
+src/main/resources/templates/status-page.html
+src/main/resources/static/css/status-page.css
 ```
-
-Button:
-
-```html
-<button type="submit" class="confirm-btn">
-    Continue
-    <span class="material-symbols-outlined">
-        arrow_forward
-    </span>
-</button>
-```
-
-But for an enterprise app deployed through Arthur Core, I'd choose **Option 2 (inline SVG)**. It's the most robust and easiest to maintain.
+------------------
