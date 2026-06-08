@@ -1,65 +1,101 @@
-Yes, exactly. Since `technicalErrorView(String appId)` is currently inside `SalesPointController`, the global handler cannot call it directly.
+I would **not create it inside `SalesPointController`** because this error page is no longer sales-point specific.
 
-Create a separate helper class, for example:
+Create a dedicated controller:
 
 ```java
-@Component
-public class UiErrorViewFactory {
+package com.bnpp.pf.arthur.core.controller;
 
-    public ModelAndView technicalErrorView(String appId) {
-        ModelAndView mv = new ModelAndView("views/ui-error");
+import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.servlet.ModelAndView;
+
+@Controller
+public class ErrorController {
+```
+
+```java
+@Controller
+public class ErrorController {
+
+    @GetMapping("/error/technical")
+    public ModelAndView technicalError() {
+
+        ModelAndView mv =
+                new ModelAndView("views/ui-error");
 
         mv.addObject("pageTitle", "Erreur technique");
         mv.addObject("iconPath", "/images/icons/tools.svg");
-        mv.addObject("title", "Oups, un problème<br>technique est survenu.");
+        mv.addObject("title",
+                "Oups, un problème<br>technique est survenu.");
         mv.addObject("message",
                 "Nous n’avons pas pu charger les données nécessaires pour le moment.");
         mv.addObject("strongMessage",
                 "Réessayez dans quelques minutes. Si le problème persiste, contactez votre Zone Manager pour obtenir de l’aide.");
-        mv.addObject("appId", appId);
 
         return mv;
     }
 
-    public ModelAndView noSalesPointsView(String appId) {
-        ModelAndView mv = new ModelAndView("views/ui-error");
+    @GetMapping("/error/no-sales-point")
+    public ModelAndView noSalesPoint() {
+
+        ModelAndView mv =
+                new ModelAndView("views/ui-error");
 
         mv.addObject("pageTitle", "Point de vente non défini");
         mv.addObject("iconPath", "/images/icons/warning.svg");
-        mv.addObject("title", "Oups, votre point de vente<br>n’est pas encore défini");
+        mv.addObject("title",
+                "Oups, votre point de vente<br>n’est pas encore défini");
         mv.addObject("message",
                 "Votre compte n’est pas associé à un point de vente. Vous ne pouvez donc pas accéder à la plateforme partenaire Cetelem.");
         mv.addObject("strongMessage",
                 "Veuillez contacter votre Zone Manager pour recevoir de l’aide.");
-        mv.addObject("appId", appId);
 
         return mv;
     }
 }
 ```
 
-Then inject it in `SalesPointController`:
+Then from your `@ControllerAdvice`:
 
 ```java
-private final UiErrorViewFactory uiErrorViewFactory;
+@ExceptionHandler(Exception.class)
+public ModelAndView handleException(Exception ex) {
+
+    return new ModelAndView("redirect:/error/technical");
+}
 ```
 
-Use:
+And from `SalesPointController`:
+
+Instead of:
 
 ```java
-return uiErrorViewFactory.noSalesPointsView(appId);
+return noSalesPointsView(appId);
 ```
 
-and:
+use:
 
 ```java
-return uiErrorViewFactory.technicalErrorView(appId);
+return new ModelAndView("redirect:/error/no-sales-point");
 ```
 
-For global errors where you may not have `appId`, use:
+### Suggested structure
 
-```java
-return uiErrorViewFactory.technicalErrorView(null);
+```text
+controller/
+├── AuthController.java
+├── SalesPointController.java
+├── ErrorController.java
+
+exception/
+├── UiExceptionHandler.java
 ```
 
-That way both `SalesPointController` and `@ControllerAdvice` can reuse the same error page.
+This keeps:
+
+* `AuthController` → authentication flow
+* `SalesPointController` → sales point selection flow
+* `ErrorController` → all UI error pages
+* `UiExceptionHandler` → maps exceptions to error pages
+
+That's the structure I'd use for Arthur Core going forward.
