@@ -1,14 +1,1 @@
-Hi Team,
-
-I will be working on the development of the User Creation API integration on our side and wanted to clarify a few points before we proceed.
-
-As I understand it, we will be consuming the REST API for user creation. Could you please confirm that this approach works from your side and let us know if there are any prerequisites, configurations, or dependencies that you require from us?
-
-Additionally, since our application will be deployed in the cloud, we would like to understand the messaging integration options. If we decide to proceed with the MQ-based approach, could you please confirm whether the MQ infrastructure is already available and supported in the cloud environment?
-
-Regarding the bulk import functionality, we have received two different CSV templates. Could you please confirm which CSV format should be used for batch user import? If there is a preferred template or any specific requirements for the file structure, kindly share the details so we can align our implementation accordingly.
-
-Thank you for your help. Looking forward to your guidance.
-
-Best regards,
-Rahul
+Hi Maria, thank you for your message and your kind words. I'm doing well, and I hope you're doing great too. Yes, I've decided to move on from Alphacredit and explore a new opportunity that aligns with my goals and interests. I'm grateful for the experience and for having had the chance to work with such wonderful colleagues. Thanks again for reaching out—I really appreciate it 😊
