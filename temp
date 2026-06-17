@@ -1,53 +1,194 @@
-The test is failing because your API response is **snake_case**, but your JUnit expects **camelCase**.
+Add coverage for **GlobalExceptionHandler** and the exception classes indirectly through it.
 
-Your response has:
+## 1. Create test controller for exceptions
 
-```json
-"user_id": "testuser",
-"user_info": {...},
-"sales_points": [...]
+Location:
+
+```text
+src/test/java/com/bnpp/pf/partner/repository/controller/GlobalExceptionHandlerTest.java
 ```
-
-But your test is checking:
 
 ```java
-jsonPath("$.userId")
-jsonPath("$.userInfo.firstName")
-jsonPath("$.salesPoints[0].id")
+package com.bnpp.pf.partner.repository.controller;
+
+import com.bnpp.pf.partner.repository.exception.AppNotFoundException;
+import com.bnpp.pf.partner.repository.exception.SalesPointNotFoundException;
+import com.bnpp.pf.partner.repository.exception.UserNotFoundException;
+import org.junit.jupiter.api.Test;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
+
+class GlobalExceptionHandlerTest {
+
+    private final MockMvc mockMvc = MockMvcBuilders
+            .standaloneSetup(new TestController())
+            .setControllerAdvice(new GlobalExceptionHandler())
+            .build();
+
+    @Test
+    void shouldHandleIllegalArgumentException() throws Exception {
+        mockMvc.perform(get("/test/bad-request"))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.message").value("Invalid request"));
+    }
+
+    @Test
+    void shouldHandleAppNotFoundException() throws Exception {
+        mockMvc.perform(get("/test/app-not-found"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.error").value("APP_NOT_FOUND"))
+                .andExpect(jsonPath("$.message").value("App not found: B2BOOST_BE"));
+    }
+
+    @Test
+    void shouldHandleUserNotFoundException() throws Exception {
+        mockMvc.perform(get("/test/user-not-found"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.error").value("USER_NOT_FOUND"))
+                .andExpect(jsonPath("$.message").value("User not found: testuser"));
+    }
+
+    @Test
+    void shouldHandleSalesPointNotFoundException() throws Exception {
+        mockMvc.perform(get("/test/sales-point-not-found"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.error").value("SALES_POINT_NOT_FOUND"))
+                .andExpect(jsonPath("$.message").value("Sales point not found: SP001"));
+    }
+
+    @RestController
+    static class TestController {
+
+        @GetMapping("/test/bad-request")
+        void badRequest() {
+            throw new IllegalArgumentException("Invalid request");
+        }
+
+        @GetMapping("/test/app-not-found")
+        void appNotFound() {
+            throw new AppNotFoundException("B2BOOST_BE");
+        }
+
+        @GetMapping("/test/user-not-found")
+        void userNotFound() {
+            throw new UserNotFoundException("testuser");
+        }
+
+        @GetMapping("/test/sales-point-not-found")
+        void salesPointNotFound() {
+            throw new SalesPointNotFoundException("SP001");
+        }
+    }
+}
 ```
 
-Update the test to:
+## 2. Small improvement to your handler
+
+Your `IllegalArgumentException` currently returns only:
+
+```json
+{
+  "message": "..."
+}
+```
+
+That is okay, but for consistency I’d change it to:
 
 ```java
-mockMvc.perform(get("/users/testuser"))
-        .andExpect(status().isOk())
-        .andExpect(jsonPath("$.user_id").value("testuser"))
-        .andExpect(jsonPath("$.username").value("testuser"))
-        .andExpect(jsonPath("$.user_info.first_name").value("Test"))
-        .andExpect(jsonPath("$.user_info.emails[0]").value("test@test.com"))
-        .andExpect(jsonPath("$.sales_points[0].id").value("SP001"))
-        .andExpect(jsonPath("$.sales_points[0].name").value("Sales Point 1"))
-        .andExpect(jsonPath("$.sales_points[0].org_unit_id").value("ZM001"))
-        .andExpect(jsonPath("$.roles[0]").value("SELLER"));
+@ExceptionHandler(IllegalArgumentException.class)
+@ResponseStatus(HttpStatus.BAD_REQUEST)
+public Map<String, Object> handleIllegalArgumentException(IllegalArgumentException exception) {
+    return Map.of(
+            STATUS, 400,
+            ERROR, "BAD_REQUEST",
+            MESSAGE, exception.getMessage()
+    );
+}
 ```
 
-Also your actual response shows:
+Then update the first test to also check:
 
-```json
-"sales_points": [
-  {
-    "id": "SP001",
-    "name": "Sales Point 1"
-  }
-]
+```java
+.andExpect(jsonPath("$.status").value(400))
+.andExpect(jsonPath("$.error").value("BAD_REQUEST"))
 ```
 
-So if your DTO uses `name`, test `name`.
+This gives coverage for:
 
-If your DTO now uses `label`, then the response should be:
+```text
+AppNotFoundException
+UserNotFoundException
+SalesPointNotFoundException
+IllegalArgumentException
+GlobalExceptionHandler
+```
+---------------------------------------
 
-```json
-"label": "Sales Point 1"
+For simple exception classes like these, you usually **don’t need separate tests** if they are already covered through:
+
+```text
+GlobalExceptionHandlerTest
+UserServiceTest
+AppConfigServiceTest
 ```
 
-So either update test to `$.sales_points[0].name`, or update DTO/JSON mapping to return `label`.
+But if your coverage tool is asking for them explicitly, add a small unit test.
+
+## Exception class test
+
+Location:
+
+```text
+src/test/java/com/bnpp/pf/partner/repository/exception/ExceptionTest.java
+```
+
+```java
+package com.bnpp.pf.partner.repository.exception;
+
+import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class ExceptionTest {
+
+    @Test
+    void userNotFoundException_shouldContainExpectedMessage() {
+        UserNotFoundException exception = new UserNotFoundException("testuser");
+
+        assertThat(exception.getMessage())
+                .isEqualTo("User not found: testuser");
+    }
+
+    @Test
+    void salesPointNotFoundException_shouldContainExpectedMessage() {
+        SalesPointNotFoundException exception =
+                new SalesPointNotFoundException("SP001");
+
+        assertThat(exception.getMessage())
+                .isEqualTo("Sales point not found: SP001");
+    }
+
+    @Test
+    void appNotFoundException_shouldContainExpectedMessage() {
+        AppNotFoundException exception =
+                new AppNotFoundException("B2BOOST_BE");
+
+        assertThat(exception.getMessage())
+                .isEqualTo("App not found: B2BOOST_BE");
+    }
+}
+```
+
+That is enough.
+
+No need to over-test these classes; they only wrap a message.
