@@ -1,211 +1,156 @@
-Next add coverage for **UserService**.
+Yes — add controller coverage using `@WebMvcTest`.
 
-## 1. Add custom exceptions
+## 1. `AppControllerTest`
+
+Location:
 
 ```text
-exception/UserNotFoundException.java
-exception/SalesPointNotFoundException.java
+src/test/java/com/bnpp/pf/partner/repository/controller/AppControllerTest.java
 ```
 
 ```java
-public class UserNotFoundException extends RuntimeException {
-    public UserNotFoundException(String userId) {
-        super("User not found: " + userId);
+package com.bnpp.pf.partner.repository.controller;
+
+import com.bnpp.pf.partner.repository.dto.AppConfigResponse;
+import com.bnpp.pf.partner.repository.service.AppConfigService;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.web.servlet.MockMvc;
+
+import java.util.List;
+
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
+
+@WebMvcTest(AppController.class)
+class AppControllerTest {
+
+    @Autowired
+    private MockMvc mockMvc;
+
+    @MockitoBean
+    private AppConfigService appConfigService;
+
+    @Test
+    void getApp_shouldReturnAppConfig() throws Exception {
+        AppConfigResponse response = new AppConfigResponse();
+        response.setAppId("B2BOOST_BE");
+        response.setEnabled(true);
+        response.setClientId("client-id");
+        response.setClientSecret("secret");
+        response.setIssuerUri("issuer-uri");
+        response.setRedirectUri("redirect-uri");
+        response.setScopes(List.of("openid", "profile", "email"));
+        response.setPostLoginRedirectUrl("post-login-url");
+        response.setCookieName("ARTHUR_SESSION");
+        response.setSessionTtlSeconds(3600);
+
+        when(appConfigService.getApp("B2BOOST_BE")).thenReturn(response);
+
+        mockMvc.perform(get("/apps/B2BOOST_BE"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.appId").value("B2BOOST_BE"))
+                .andExpect(jsonPath("$.enabled").value(true))
+                .andExpect(jsonPath("$.clientId").value("client-id"))
+                .andExpect(jsonPath("$.scopes[0]").value("openid"))
+                .andExpect(jsonPath("$.scopes[1]").value("profile"))
+                .andExpect(jsonPath("$.scopes[2]").value("email"))
+                .andExpect(jsonPath("$.sessionTtlSeconds").value(3600));
     }
 }
 ```
 
-```java
-public class SalesPointNotFoundException extends RuntimeException {
-    public SalesPointNotFoundException(String salesPointId) {
-        super("Sales point not found: " + salesPointId);
-    }
-}
+---
+
+## 2. `UserControllerTest`
+
+Location:
+
+```text
+src/test/java/com/bnpp/pf/partner/repository/controller/UserControllerTest.java
 ```
 
-## 2. Update `UserService`
-
-Replace:
-
 ```java
-.orElseThrow(() -> new IllegalArgumentException("User not found: " + userId));
-```
+package com.bnpp.pf.partner.repository.controller;
 
-with:
+import com.bnpp.pf.partner.repository.dto.user.RelatedPartyResponse;
+import com.bnpp.pf.partner.repository.dto.user.SalesPointResponse;
+import com.bnpp.pf.partner.repository.dto.user.UserInfoResponse;
+import com.bnpp.pf.partner.repository.dto.user.UserResponse;
+import com.bnpp.pf.partner.repository.service.UserService;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.web.servlet.MockMvc;
 
-```java
-.orElseThrow(() -> new UserNotFoundException(userId));
-```
+import java.util.List;
 
-Replace:
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
-```java
-.orElseThrow(() -> new IllegalArgumentException(
-        "Sales point not found: " + rel.getSalesPointId()));
-```
+@WebMvcTest(UserController.class)
+class UserControllerTest {
 
-with:
+    @Autowired
+    private MockMvc mockMvc;
 
-```java
-.orElseThrow(() -> new SalesPointNotFoundException(rel.getSalesPointId()));
-```
-
-Also add validation at the start:
-
-```java
-if (userId == null || userId.isBlank()) {
-    throw new IllegalArgumentException("userId must not be blank");
-}
-```
-
-## 3. Add to `GlobalExceptionHandler`
-
-```java
-@ExceptionHandler(UserNotFoundException.class)
-public ResponseEntity<Map<String, Object>> handleUserNotFound(UserNotFoundException ex) {
-    return ResponseEntity.status(HttpStatus.NOT_FOUND)
-            .body(Map.of(
-                    "status", 404,
-                    "error", "USER_NOT_FOUND",
-                    "message", ex.getMessage()
-            ));
-}
-
-@ExceptionHandler(SalesPointNotFoundException.class)
-public ResponseEntity<Map<String, Object>> handleSalesPointNotFound(SalesPointNotFoundException ex) {
-    return ResponseEntity.status(HttpStatus.NOT_FOUND)
-            .body(Map.of(
-                    "status", 404,
-                    "error", "SALES_POINT_NOT_FOUND",
-                    "message", ex.getMessage()
-            ));
-}
-```
-
-## 4. Add `UserServiceTest`
-
-```java
-@ExtendWith(MockitoExtension.class)
-class UserServiceTest {
-
-    @Mock
-    private UserRepository userRepository;
-
-    @Mock
-    private SalesPointRepository salesPointRepository;
-
-    @Mock
-    private PersonSalesPointRelationshipRepository relationshipRepository;
-
-    @InjectMocks
+    @MockitoBean
     private UserService userService;
 
     @Test
-    void getUserById_shouldReturnUserWithSalesPoints_whenUserExists() {
-        UserEntity user = new UserEntity();
-        user.setUserId("testuser");
-        user.setUsername("testuser");
-        user.setFirstName("Test");
-        user.setLastName("User");
-        user.setEmail("test@test.com");
-        user.setPhoneNumber("+32123456789");
+    void getUserById_shouldReturnUser() throws Exception {
+        UserInfoResponse userInfo = new UserInfoResponse();
+        userInfo.setFirstName("Test");
+        userInfo.setLastName("User");
+        userInfo.setEmails(List.of("test@test.com"));
+        userInfo.setPhoneNumbers(List.of("+32123456789"));
 
-        PersonSalesPointRelationshipEntity rel = new PersonSalesPointRelationshipEntity();
-        rel.setPersonUserId("testuser");
-        rel.setSalesPointId("SP001");
-        rel.setOrgUnitId("ORG001");
+        SalesPointResponse salesPoint =
+                new SalesPointResponse("SP001", "Sales Point 1", "ORG001");
 
-        SalesPointEntity salesPoint = new SalesPointEntity();
-        salesPoint.setSalesPointId("SP001");
-        salesPoint.setLabel("Sales Point 1");
+        UserResponse response = new UserResponse();
+        response.setUserId("testuser");
+        response.setUsername("testuser");
+        response.setUserInfo(userInfo);
+        response.setSalesPoints(List.of(salesPoint));
+        response.setRelatedDealer(new RelatedPartyResponse("DLR001", "Dealer 1"));
+        response.setRelatedZoneManager(new RelatedPartyResponse("ZM001", "Zone Manager 1"));
+        response.setRoles(List.of("SELLER"));
 
-        when(userRepository.findByUserId("testuser")).thenReturn(Optional.of(user));
-        when(relationshipRepository.findByPersonUserId("testuser")).thenReturn(List.of(rel));
-        when(salesPointRepository.findBySalesPointId("SP001")).thenReturn(Optional.of(salesPoint));
+        when(userService.getUserById("testuser")).thenReturn(response);
 
-        UserResponse response = userService.getUserById("testuser");
-
-        assertThat(response.getUserId()).isEqualTo("testuser");
-        assertThat(response.getUsername()).isEqualTo("testuser");
-        assertThat(response.getUserInfo().getFirstName()).isEqualTo("Test");
-        assertThat(response.getUserInfo().getEmails()).containsExactly("test@test.com");
-        assertThat(response.getSalesPoints()).hasSize(1);
-        assertThat(response.getSalesPoints().get(0).getId()).isEqualTo("SP001");
-        assertThat(response.getSalesPoints().get(0).getLabel()).isEqualTo("Sales Point 1");
-        assertThat(response.getSalesPoints().get(0).getOrgUnitId()).isEqualTo("ORG001");
-        assertThat(response.getRoles()).containsExactly("SELLER");
-    }
-
-    @Test
-    void getUserById_shouldThrowUserNotFoundException_whenUserDoesNotExist() {
-        when(userRepository.findByUserId("missing")).thenReturn(Optional.empty());
-
-        assertThatThrownBy(() -> userService.getUserById("missing"))
-                .isInstanceOf(UserNotFoundException.class)
-                .hasMessage("User not found: missing");
-    }
-
-    @Test
-    void getUserById_shouldThrowIllegalArgumentException_whenUserIdIsBlank() {
-        assertThatThrownBy(() -> userService.getUserById(" "))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("userId must not be blank");
-
-        verifyNoInteractions(userRepository);
-    }
-
-    @Test
-    void getUserById_shouldReturnEmptySalesPoints_whenUserHasNoRelationships() {
-        UserEntity user = new UserEntity();
-        user.setUserId("testuser");
-        user.setUsername("testuser");
-
-        when(userRepository.findByUserId("testuser")).thenReturn(Optional.of(user));
-        when(relationshipRepository.findByPersonUserId("testuser")).thenReturn(List.of());
-
-        UserResponse response = userService.getUserById("testuser");
-
-        assertThat(response.getSalesPoints()).isEmpty();
-    }
-
-    @Test
-    void getUserById_shouldThrowSalesPointNotFoundException_whenRelationshipSalesPointIsMissing() {
-        UserEntity user = new UserEntity();
-        user.setUserId("testuser");
-        user.setUsername("testuser");
-
-        PersonSalesPointRelationshipEntity rel = new PersonSalesPointRelationshipEntity();
-        rel.setPersonUserId("testuser");
-        rel.setSalesPointId("SP999");
-        rel.setOrgUnitId("ORG999");
-
-        when(userRepository.findByUserId("testuser")).thenReturn(Optional.of(user));
-        when(relationshipRepository.findByPersonUserId("testuser")).thenReturn(List.of(rel));
-        when(salesPointRepository.findBySalesPointId("SP999")).thenReturn(Optional.empty());
-
-        assertThatThrownBy(() -> userService.getUserById("testuser"))
-                .isInstanceOf(SalesPointNotFoundException.class)
-                .hasMessage("Sales point not found: SP999");
+        mockMvc.perform(get("/users/testuser"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.userId").value("testuser"))
+                .andExpect(jsonPath("$.username").value("testuser"))
+                .andExpect(jsonPath("$.userInfo.firstName").value("Test"))
+                .andExpect(jsonPath("$.userInfo.emails[0]").value("test@test.com"))
+                .andExpect(jsonPath("$.salesPoints[0].id").value("SP001"))
+                .andExpect(jsonPath("$.salesPoints[0].label").value("Sales Point 1"))
+                .andExpect(jsonPath("$.salesPoints[0].orgUnitId").value("ORG001"))
+                .andExpect(jsonPath("$.roles[0]").value("SELLER"));
     }
 }
 ```
 
-Imports you’ll likely need:
+If your `SalesPointResponse` constructor has 4 fields including `relationshipType`, use:
 
 ```java
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
-
-import java.util.List;
-import java.util.Optional;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.when;
+new SalesPointResponse("SP001", "Sales Point 1", "ORG001", "025");
 ```
 
-This covers the main business logic in `UserService`: user lookup, sales point mapping, empty relationships, and failure cases.
+## Next
+
+After this, add controller exception tests for:
+
+```text
+/apps/UNKNOWN → 404 APP_NOT_FOUND
+/users/UNKNOWN → 404 USER_NOT_FOUND
+```
+
+Those will verify your `GlobalExceptionHandler` properly.
