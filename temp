@@ -1,192 +1,205 @@
-Yes. Start with **AppConfigService**.
+Next add coverage for **UserService**.
 
-## 1. Add custom exception
-
-Location:
+## 1. Add custom exceptions
 
 ```text
-exception/AppNotFoundException.java
+exception/UserNotFoundException.java
+exception/SalesPointNotFoundException.java
 ```
 
 ```java
-package com.bnpp.pf.partner.repository.exception;
-
-public class AppNotFoundException extends RuntimeException {
-
-    public AppNotFoundException(String appId) {
-        super("App not found: " + appId);
+public class UserNotFoundException extends RuntimeException {
+    public UserNotFoundException(String userId) {
+        super("User not found: " + userId);
     }
 }
 ```
 
----
+```java
+public class SalesPointNotFoundException extends RuntimeException {
+    public SalesPointNotFoundException(String salesPointId) {
+        super("Sales point not found: " + salesPointId);
+    }
+}
+```
 
-## 2. Update `AppConfigService`
+## 2. Update `UserService`
 
 Replace:
 
 ```java
-.orElseThrow(() -> new IllegalArgumentException("App not found: " + appId));
+.orElseThrow(() -> new IllegalArgumentException("User not found: " + userId));
 ```
 
 with:
 
 ```java
-.orElseThrow(() -> new AppNotFoundException(appId));
+.orElseThrow(() -> new UserNotFoundException(userId));
 ```
 
-Also for blank appId, better create:
+Replace:
 
 ```java
-throw new IllegalArgumentException("appId must not be blank");
+.orElseThrow(() -> new IllegalArgumentException(
+        "Sales point not found: " + rel.getSalesPointId()));
 ```
 
-That part is okay.
-
----
-
-## 3. Update `GlobalExceptionHandler`
-
-Location:
-
-```text
-controller/GlobalExceptionHandler.java
-```
+with:
 
 ```java
-@RestControllerAdvice
-public class GlobalExceptionHandler {
+.orElseThrow(() -> new SalesPointNotFoundException(rel.getSalesPointId()));
+```
 
-    @ExceptionHandler(AppNotFoundException.class)
-    public ResponseEntity<Map<String, Object>> handleAppNotFound(AppNotFoundException ex) {
-        return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                .body(Map.of(
-                        "status", 404,
-                        "error", "APP_NOT_FOUND",
-                        "message", ex.getMessage()
-                ));
-    }
+Also add validation at the start:
 
-    @ExceptionHandler(IllegalArgumentException.class)
-    public ResponseEntity<Map<String, Object>> handleBadRequest(IllegalArgumentException ex) {
-        return ResponseEntity.badRequest()
-                .body(Map.of(
-                        "status", 400,
-                        "error", "BAD_REQUEST",
-                        "message", ex.getMessage()
-                ));
-    }
+```java
+if (userId == null || userId.isBlank()) {
+    throw new IllegalArgumentException("userId must not be blank");
 }
 ```
 
----
+## 3. Add to `GlobalExceptionHandler`
 
-## 4. Add JUnit for `AppConfigService`
+```java
+@ExceptionHandler(UserNotFoundException.class)
+public ResponseEntity<Map<String, Object>> handleUserNotFound(UserNotFoundException ex) {
+    return ResponseEntity.status(HttpStatus.NOT_FOUND)
+            .body(Map.of(
+                    "status", 404,
+                    "error", "USER_NOT_FOUND",
+                    "message", ex.getMessage()
+            ));
+}
 
-Location:
-
-```text
-src/test/java/com/bnpp/pf/partner/repository/service/AppConfigServiceTest.java
+@ExceptionHandler(SalesPointNotFoundException.class)
+public ResponseEntity<Map<String, Object>> handleSalesPointNotFound(SalesPointNotFoundException ex) {
+    return ResponseEntity.status(HttpStatus.NOT_FOUND)
+            .body(Map.of(
+                    "status", 404,
+                    "error", "SALES_POINT_NOT_FOUND",
+                    "message", ex.getMessage()
+            ));
+}
 ```
+
+## 4. Add `UserServiceTest`
 
 ```java
 @ExtendWith(MockitoExtension.class)
-class AppConfigServiceTest {
+class UserServiceTest {
 
     @Mock
-    private AppConfigRepository appConfigRepository;
+    private UserRepository userRepository;
+
+    @Mock
+    private SalesPointRepository salesPointRepository;
+
+    @Mock
+    private PersonSalesPointRelationshipRepository relationshipRepository;
 
     @InjectMocks
-    private AppConfigService appConfigService;
+    private UserService userService;
 
     @Test
-    void getApp_shouldReturnAppConfig_whenAppExists() {
-        AppConfigEntity entity = new AppConfigEntity();
-        entity.setAppId("B2BOOST_BE");
-        entity.setEnabled(true);
-        entity.setClientId("client-id");
-        entity.setClientSecret("secret");
-        entity.setIssuerUri("issuer");
-        entity.setRedirectUri("http://localhost/callback");
-        entity.setScopes("openid,profile,email");
-        entity.setPostLoginRedirectUrl("http://localhost/post-login");
-        entity.setCookieName("ARTHUR_SESSION");
-        entity.setSessionTtlSeconds(3600);
+    void getUserById_shouldReturnUserWithSalesPoints_whenUserExists() {
+        UserEntity user = new UserEntity();
+        user.setUserId("testuser");
+        user.setUsername("testuser");
+        user.setFirstName("Test");
+        user.setLastName("User");
+        user.setEmail("test@test.com");
+        user.setPhoneNumber("+32123456789");
 
-        when(appConfigRepository.findByAppId("B2BOOST_BE"))
-                .thenReturn(Optional.of(entity));
+        PersonSalesPointRelationshipEntity rel = new PersonSalesPointRelationshipEntity();
+        rel.setPersonUserId("testuser");
+        rel.setSalesPointId("SP001");
+        rel.setOrgUnitId("ORG001");
 
-        AppConfigResponse response = appConfigService.getApp("B2BOOST_BE");
+        SalesPointEntity salesPoint = new SalesPointEntity();
+        salesPoint.setSalesPointId("SP001");
+        salesPoint.setLabel("Sales Point 1");
 
-        assertThat(response.getAppId()).isEqualTo("B2BOOST_BE");
-        assertThat(response.isEnabled()).isTrue();
-        assertThat(response.getClientId()).isEqualTo("client-id");
-        assertThat(response.getScopes()).containsExactly("openid", "profile", "email");
-        assertThat(response.getSessionTtlSeconds()).isEqualTo(3600);
+        when(userRepository.findByUserId("testuser")).thenReturn(Optional.of(user));
+        when(relationshipRepository.findByPersonUserId("testuser")).thenReturn(List.of(rel));
+        when(salesPointRepository.findBySalesPointId("SP001")).thenReturn(Optional.of(salesPoint));
+
+        UserResponse response = userService.getUserById("testuser");
+
+        assertThat(response.getUserId()).isEqualTo("testuser");
+        assertThat(response.getUsername()).isEqualTo("testuser");
+        assertThat(response.getUserInfo().getFirstName()).isEqualTo("Test");
+        assertThat(response.getUserInfo().getEmails()).containsExactly("test@test.com");
+        assertThat(response.getSalesPoints()).hasSize(1);
+        assertThat(response.getSalesPoints().get(0).getId()).isEqualTo("SP001");
+        assertThat(response.getSalesPoints().get(0).getLabel()).isEqualTo("Sales Point 1");
+        assertThat(response.getSalesPoints().get(0).getOrgUnitId()).isEqualTo("ORG001");
+        assertThat(response.getRoles()).containsExactly("SELLER");
     }
 
     @Test
-    void getApp_shouldThrowAppNotFoundException_whenAppDoesNotExist() {
-        when(appConfigRepository.findByAppId("UNKNOWN"))
-                .thenReturn(Optional.empty());
+    void getUserById_shouldThrowUserNotFoundException_whenUserDoesNotExist() {
+        when(userRepository.findByUserId("missing")).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> appConfigService.getApp("UNKNOWN"))
-                .isInstanceOf(AppNotFoundException.class)
-                .hasMessage("App not found: UNKNOWN");
+        assertThatThrownBy(() -> userService.getUserById("missing"))
+                .isInstanceOf(UserNotFoundException.class)
+                .hasMessage("User not found: missing");
     }
 
     @Test
-    void getApp_shouldThrowIllegalArgumentException_whenAppIdIsBlank() {
-        assertThatThrownBy(() -> appConfigService.getApp(" "))
+    void getUserById_shouldThrowIllegalArgumentException_whenUserIdIsBlank() {
+        assertThatThrownBy(() -> userService.getUserById(" "))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("appId must not be blank");
+                .hasMessage("userId must not be blank");
 
-        verifyNoInteractions(appConfigRepository);
+        verifyNoInteractions(userRepository);
     }
 
     @Test
-    void getApp_shouldReturnEmptyScopes_whenScopesIsNull() {
-        AppConfigEntity entity = new AppConfigEntity();
-        entity.setAppId("B2BOOST_BE");
-        entity.setScopes(null);
+    void getUserById_shouldReturnEmptySalesPoints_whenUserHasNoRelationships() {
+        UserEntity user = new UserEntity();
+        user.setUserId("testuser");
+        user.setUsername("testuser");
 
-        when(appConfigRepository.findByAppId("B2BOOST_BE"))
-                .thenReturn(Optional.of(entity));
+        when(userRepository.findByUserId("testuser")).thenReturn(Optional.of(user));
+        when(relationshipRepository.findByPersonUserId("testuser")).thenReturn(List.of());
 
-        AppConfigResponse response = appConfigService.getApp("B2BOOST_BE");
+        UserResponse response = userService.getUserById("testuser");
 
-        assertThat(response.getScopes()).isEmpty();
+        assertThat(response.getSalesPoints()).isEmpty();
     }
 
     @Test
-    void getApp_shouldTrimAndRemoveBlankScopes() {
-        AppConfigEntity entity = new AppConfigEntity();
-        entity.setAppId("B2BOOST_BE");
-        entity.setScopes("openid, profile, , email ");
+    void getUserById_shouldThrowSalesPointNotFoundException_whenRelationshipSalesPointIsMissing() {
+        UserEntity user = new UserEntity();
+        user.setUserId("testuser");
+        user.setUsername("testuser");
 
-        when(appConfigRepository.findByAppId("B2BOOST_BE"))
-                .thenReturn(Optional.of(entity));
+        PersonSalesPointRelationshipEntity rel = new PersonSalesPointRelationshipEntity();
+        rel.setPersonUserId("testuser");
+        rel.setSalesPointId("SP999");
+        rel.setOrgUnitId("ORG999");
 
-        AppConfigResponse response = appConfigService.getApp("B2BOOST_BE");
+        when(userRepository.findByUserId("testuser")).thenReturn(Optional.of(user));
+        when(relationshipRepository.findByPersonUserId("testuser")).thenReturn(List.of(rel));
+        when(salesPointRepository.findBySalesPointId("SP999")).thenReturn(Optional.empty());
 
-        assertThat(response.getScopes()).containsExactly("openid", "profile", "email");
+        assertThatThrownBy(() -> userService.getUserById("testuser"))
+                .isInstanceOf(SalesPointNotFoundException.class)
+                .hasMessage("Sales point not found: SP999");
     }
 }
 ```
 
-Imports:
+Imports you’ll likely need:
 
 ```java
-import com.bnpp.pf.partner.repository.dto.AppConfigResponse;
-import com.bnpp.pf.partner.repository.entity.AppConfigEntity;
-import com.bnpp.pf.partner.repository.exception.AppNotFoundException;
-import com.bnpp.pf.partner.repository.repository.AppConfigRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -195,14 +208,4 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 ```
 
-This gives good coverage for:
-
-```text
-getApp success
-app not found
-blank appId
-null scopes
-scope parsing
-```
-
-Next class should be **UserService**, because that contains the sales point relationship logic.
+This covers the main business logic in `UserService`: user lookup, sales point mapping, empty relationships, and failure cases.
