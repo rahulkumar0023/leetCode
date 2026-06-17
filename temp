@@ -1,15 +1,208 @@
-Hi Maria, thank you for your message and your kind words. I'm doing well, and I hope you're doing great too. Yes, I've decided to move on from Alphacredit and explore a new opportunity that aligns with my goals and interests. I'm grateful for the experience and for having had the chance to work with such wonderful colleagues. Thanks again for reaching out—I really appreciate it 😊
+Yes. Start with **AppConfigService**.
 
+## 1. Add custom exception
 
-Hi Denis,
+Location:
 
-Thank you very much for your message and your kind words. I truly appreciate them.
+```text
+exception/AppNotFoundException.java
+```
 
-It has been a pleasure working with you, and I have learned a lot from our collaboration throughout this journey. I am grateful for the trust and support you have given me.
+```java
+package com.bnpp.pf.partner.repository.exception;
 
-And yes, absolutely—please rest assured that I will do my very best to take care of all possible developments from my side and support the team as much as I can before I leave.
+public class AppNotFoundException extends RuntimeException {
 
-Thank you again for your thoughtful message. I wish you and the team continued success.
+    public AppNotFoundException(String appId) {
+        super("App not found: " + appId);
+    }
+}
+```
 
-Best regards,
-Rahul
+---
+
+## 2. Update `AppConfigService`
+
+Replace:
+
+```java
+.orElseThrow(() -> new IllegalArgumentException("App not found: " + appId));
+```
+
+with:
+
+```java
+.orElseThrow(() -> new AppNotFoundException(appId));
+```
+
+Also for blank appId, better create:
+
+```java
+throw new IllegalArgumentException("appId must not be blank");
+```
+
+That part is okay.
+
+---
+
+## 3. Update `GlobalExceptionHandler`
+
+Location:
+
+```text
+controller/GlobalExceptionHandler.java
+```
+
+```java
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+    @ExceptionHandler(AppNotFoundException.class)
+    public ResponseEntity<Map<String, Object>> handleAppNotFound(AppNotFoundException ex) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(Map.of(
+                        "status", 404,
+                        "error", "APP_NOT_FOUND",
+                        "message", ex.getMessage()
+                ));
+    }
+
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<Map<String, Object>> handleBadRequest(IllegalArgumentException ex) {
+        return ResponseEntity.badRequest()
+                .body(Map.of(
+                        "status", 400,
+                        "error", "BAD_REQUEST",
+                        "message", ex.getMessage()
+                ));
+    }
+}
+```
+
+---
+
+## 4. Add JUnit for `AppConfigService`
+
+Location:
+
+```text
+src/test/java/com/bnpp/pf/partner/repository/service/AppConfigServiceTest.java
+```
+
+```java
+@ExtendWith(MockitoExtension.class)
+class AppConfigServiceTest {
+
+    @Mock
+    private AppConfigRepository appConfigRepository;
+
+    @InjectMocks
+    private AppConfigService appConfigService;
+
+    @Test
+    void getApp_shouldReturnAppConfig_whenAppExists() {
+        AppConfigEntity entity = new AppConfigEntity();
+        entity.setAppId("B2BOOST_BE");
+        entity.setEnabled(true);
+        entity.setClientId("client-id");
+        entity.setClientSecret("secret");
+        entity.setIssuerUri("issuer");
+        entity.setRedirectUri("http://localhost/callback");
+        entity.setScopes("openid,profile,email");
+        entity.setPostLoginRedirectUrl("http://localhost/post-login");
+        entity.setCookieName("ARTHUR_SESSION");
+        entity.setSessionTtlSeconds(3600);
+
+        when(appConfigRepository.findByAppId("B2BOOST_BE"))
+                .thenReturn(Optional.of(entity));
+
+        AppConfigResponse response = appConfigService.getApp("B2BOOST_BE");
+
+        assertThat(response.getAppId()).isEqualTo("B2BOOST_BE");
+        assertThat(response.isEnabled()).isTrue();
+        assertThat(response.getClientId()).isEqualTo("client-id");
+        assertThat(response.getScopes()).containsExactly("openid", "profile", "email");
+        assertThat(response.getSessionTtlSeconds()).isEqualTo(3600);
+    }
+
+    @Test
+    void getApp_shouldThrowAppNotFoundException_whenAppDoesNotExist() {
+        when(appConfigRepository.findByAppId("UNKNOWN"))
+                .thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> appConfigService.getApp("UNKNOWN"))
+                .isInstanceOf(AppNotFoundException.class)
+                .hasMessage("App not found: UNKNOWN");
+    }
+
+    @Test
+    void getApp_shouldThrowIllegalArgumentException_whenAppIdIsBlank() {
+        assertThatThrownBy(() -> appConfigService.getApp(" "))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("appId must not be blank");
+
+        verifyNoInteractions(appConfigRepository);
+    }
+
+    @Test
+    void getApp_shouldReturnEmptyScopes_whenScopesIsNull() {
+        AppConfigEntity entity = new AppConfigEntity();
+        entity.setAppId("B2BOOST_BE");
+        entity.setScopes(null);
+
+        when(appConfigRepository.findByAppId("B2BOOST_BE"))
+                .thenReturn(Optional.of(entity));
+
+        AppConfigResponse response = appConfigService.getApp("B2BOOST_BE");
+
+        assertThat(response.getScopes()).isEmpty();
+    }
+
+    @Test
+    void getApp_shouldTrimAndRemoveBlankScopes() {
+        AppConfigEntity entity = new AppConfigEntity();
+        entity.setAppId("B2BOOST_BE");
+        entity.setScopes("openid, profile, , email ");
+
+        when(appConfigRepository.findByAppId("B2BOOST_BE"))
+                .thenReturn(Optional.of(entity));
+
+        AppConfigResponse response = appConfigService.getApp("B2BOOST_BE");
+
+        assertThat(response.getScopes()).containsExactly("openid", "profile", "email");
+    }
+}
+```
+
+Imports:
+
+```java
+import com.bnpp.pf.partner.repository.dto.AppConfigResponse;
+import com.bnpp.pf.partner.repository.entity.AppConfigEntity;
+import com.bnpp.pf.partner.repository.exception.AppNotFoundException;
+import com.bnpp.pf.partner.repository.repository.AppConfigRepository;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.util.Optional;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+```
+
+This gives good coverage for:
+
+```text
+getApp success
+app not found
+blank appId
+null scopes
+scope parsing
+```
+
+Next class should be **UserService**, because that contains the sales point relationship logic.
