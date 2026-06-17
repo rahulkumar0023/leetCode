@@ -1,156 +1,53 @@
-Yes — add controller coverage using `@WebMvcTest`.
+The test is failing because your API response is **snake_case**, but your JUnit expects **camelCase**.
 
-## 1. `AppControllerTest`
+Your response has:
 
-Location:
-
-```text
-src/test/java/com/bnpp/pf/partner/repository/controller/AppControllerTest.java
+```json
+"user_id": "testuser",
+"user_info": {...},
+"sales_points": [...]
 ```
+
+But your test is checking:
 
 ```java
-package com.bnpp.pf.partner.repository.controller;
-
-import com.bnpp.pf.partner.repository.dto.AppConfigResponse;
-import com.bnpp.pf.partner.repository.service.AppConfigService;
-import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
-import org.springframework.test.context.bean.override.mockito.MockitoBean;
-import org.springframework.test.web.servlet.MockMvc;
-
-import java.util.List;
-
-import static org.mockito.Mockito.when;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
-
-@WebMvcTest(AppController.class)
-class AppControllerTest {
-
-    @Autowired
-    private MockMvc mockMvc;
-
-    @MockitoBean
-    private AppConfigService appConfigService;
-
-    @Test
-    void getApp_shouldReturnAppConfig() throws Exception {
-        AppConfigResponse response = new AppConfigResponse();
-        response.setAppId("B2BOOST_BE");
-        response.setEnabled(true);
-        response.setClientId("client-id");
-        response.setClientSecret("secret");
-        response.setIssuerUri("issuer-uri");
-        response.setRedirectUri("redirect-uri");
-        response.setScopes(List.of("openid", "profile", "email"));
-        response.setPostLoginRedirectUrl("post-login-url");
-        response.setCookieName("ARTHUR_SESSION");
-        response.setSessionTtlSeconds(3600);
-
-        when(appConfigService.getApp("B2BOOST_BE")).thenReturn(response);
-
-        mockMvc.perform(get("/apps/B2BOOST_BE"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.appId").value("B2BOOST_BE"))
-                .andExpect(jsonPath("$.enabled").value(true))
-                .andExpect(jsonPath("$.clientId").value("client-id"))
-                .andExpect(jsonPath("$.scopes[0]").value("openid"))
-                .andExpect(jsonPath("$.scopes[1]").value("profile"))
-                .andExpect(jsonPath("$.scopes[2]").value("email"))
-                .andExpect(jsonPath("$.sessionTtlSeconds").value(3600));
-    }
-}
+jsonPath("$.userId")
+jsonPath("$.userInfo.firstName")
+jsonPath("$.salesPoints[0].id")
 ```
 
----
-
-## 2. `UserControllerTest`
-
-Location:
-
-```text
-src/test/java/com/bnpp/pf/partner/repository/controller/UserControllerTest.java
-```
+Update the test to:
 
 ```java
-package com.bnpp.pf.partner.repository.controller;
-
-import com.bnpp.pf.partner.repository.dto.user.RelatedPartyResponse;
-import com.bnpp.pf.partner.repository.dto.user.SalesPointResponse;
-import com.bnpp.pf.partner.repository.dto.user.UserInfoResponse;
-import com.bnpp.pf.partner.repository.dto.user.UserResponse;
-import com.bnpp.pf.partner.repository.service.UserService;
-import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
-import org.springframework.test.context.bean.override.mockito.MockitoBean;
-import org.springframework.test.web.servlet.MockMvc;
-
-import java.util.List;
-
-import static org.mockito.Mockito.when;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
-
-@WebMvcTest(UserController.class)
-class UserControllerTest {
-
-    @Autowired
-    private MockMvc mockMvc;
-
-    @MockitoBean
-    private UserService userService;
-
-    @Test
-    void getUserById_shouldReturnUser() throws Exception {
-        UserInfoResponse userInfo = new UserInfoResponse();
-        userInfo.setFirstName("Test");
-        userInfo.setLastName("User");
-        userInfo.setEmails(List.of("test@test.com"));
-        userInfo.setPhoneNumbers(List.of("+32123456789"));
-
-        SalesPointResponse salesPoint =
-                new SalesPointResponse("SP001", "Sales Point 1", "ORG001");
-
-        UserResponse response = new UserResponse();
-        response.setUserId("testuser");
-        response.setUsername("testuser");
-        response.setUserInfo(userInfo);
-        response.setSalesPoints(List.of(salesPoint));
-        response.setRelatedDealer(new RelatedPartyResponse("DLR001", "Dealer 1"));
-        response.setRelatedZoneManager(new RelatedPartyResponse("ZM001", "Zone Manager 1"));
-        response.setRoles(List.of("SELLER"));
-
-        when(userService.getUserById("testuser")).thenReturn(response);
-
-        mockMvc.perform(get("/users/testuser"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.userId").value("testuser"))
-                .andExpect(jsonPath("$.username").value("testuser"))
-                .andExpect(jsonPath("$.userInfo.firstName").value("Test"))
-                .andExpect(jsonPath("$.userInfo.emails[0]").value("test@test.com"))
-                .andExpect(jsonPath("$.salesPoints[0].id").value("SP001"))
-                .andExpect(jsonPath("$.salesPoints[0].label").value("Sales Point 1"))
-                .andExpect(jsonPath("$.salesPoints[0].orgUnitId").value("ORG001"))
-                .andExpect(jsonPath("$.roles[0]").value("SELLER"));
-    }
-}
+mockMvc.perform(get("/users/testuser"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.user_id").value("testuser"))
+        .andExpect(jsonPath("$.username").value("testuser"))
+        .andExpect(jsonPath("$.user_info.first_name").value("Test"))
+        .andExpect(jsonPath("$.user_info.emails[0]").value("test@test.com"))
+        .andExpect(jsonPath("$.sales_points[0].id").value("SP001"))
+        .andExpect(jsonPath("$.sales_points[0].name").value("Sales Point 1"))
+        .andExpect(jsonPath("$.sales_points[0].org_unit_id").value("ZM001"))
+        .andExpect(jsonPath("$.roles[0]").value("SELLER"));
 ```
 
-If your `SalesPointResponse` constructor has 4 fields including `relationshipType`, use:
+Also your actual response shows:
 
-```java
-new SalesPointResponse("SP001", "Sales Point 1", "ORG001", "025");
+```json
+"sales_points": [
+  {
+    "id": "SP001",
+    "name": "Sales Point 1"
+  }
+]
 ```
 
-## Next
+So if your DTO uses `name`, test `name`.
 
-After this, add controller exception tests for:
+If your DTO now uses `label`, then the response should be:
 
-```text
-/apps/UNKNOWN → 404 APP_NOT_FOUND
-/users/UNKNOWN → 404 USER_NOT_FOUND
+```json
+"label": "Sales Point 1"
 ```
 
-Those will verify your `GlobalExceptionHandler` properly.
+So either update test to `$.sales_points[0].name`, or update DTO/JSON mapping to return `label`.
