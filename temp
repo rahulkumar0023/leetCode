@@ -1,249 +1,89 @@
-Yes. Start with **AuthService** in two steps:
-
-## 1. Small code improvements first
-
-### Add null/session checks in `completeSalesPointSelection`
-
-Right now this can fail with NPE if session expired:
+Most likely the failing test is because `AuthService` now has a new constructor dependency:
 
 ```java
-UserSession session = redisSessionService.findBySessionId(sessionId);
+private final ArthurSecurityProperties arthurSecurityProperties;
 ```
 
-Use:
+So your `@InjectMocks AuthService authService;` test now needs a mock or real instance.
+
+Use a real properties object in the test.
 
 ```java
-if (sessionId == null || sessionId.isBlank()) {
-    throw new TechnicalException("Session id must not be blank");
-}
+@Mock
+private PartnerRepositoryClient partnerRepositoryClient;
 
-UserSession session = redisSessionService.findBySessionId(sessionId);
+@Mock
+private OidcDiscoveryClient oidcDiscoveryClient;
 
-if (session == null) {
-    throw new TechnicalException("Session expired");
-}
+@Mock
+private RandomValueGenerator randomValueGenerator;
 
-if (session.getSalesPoints() == null || session.getSalesPoints().isEmpty()) {
-    throw new TechnicalException("No sales points available for user");
-}
-```
+@Mock
+private PkceService pkceService;
 
-### Avoid hardcoded handoff TTL
+@Mock
+private RedisAuthTransactionService redisAuthTransactionService;
 
-Replace:
+@Mock
+private RedisLoginHandoffService redisLoginHandoffService;
 
-```java
-handoff.setExpiresAt(Instant.now().plusSeconds(60));
-```
+@Mock
+private WebClient webClient;
 
-with property later:
+@Mock
+private JwtService jwtService;
 
-```java
-handoff.setExpiresAt(Instant.now().plusSeconds(arthurSecurityProperties.getHandoff().getTtlSeconds()));
-```
+@Mock
+private RedisSessionService redisSessionService;
 
-For now, okay to keep `60`.
+private ArthurSecurityProperties arthurSecurityProperties;
 
-### Remove Keycloak-specific method later
+private AuthService authService;
 
-This is Keycloak-specific:
+@BeforeEach
+void setUp() {
+    arthurSecurityProperties = new ArthurSecurityProperties();
 
-```java
-private String toInternalUrl(String url) {
-    return url.replace("keycloak.kubernetes.localhost", "keycloak.ns-keycloak.svc.cluster.local");
-}
-```
-
-Since you’re moving to Ping, this should eventually be removed or made generic/configurable.
-
----
-
-## 2. AuthService unit test
-
-Create:
-
-```text
-src/test/java/.../service/AuthServiceTest.java
-```
-
-Start with these 4 tests:
-
-```java
-@ExtendWith(MockitoExtension.class)
-class AuthServiceTest {
-
-    @Mock
-    private PartnerRepositoryClient partnerRepositoryClient;
-
-    @Mock
-    private OidcDiscoveryClient oidcDiscoveryClient;
-
-    @Mock
-    private RandomValueGenerator randomValueGenerator;
-
-    @Mock
-    private PkceService pkceService;
-
-    @Mock
-    private RedisAuthTransactionService redisAuthTransactionService;
-
-    @Mock
-    private RedisLoginHandoffService redisLoginHandoffService;
-
-    @Mock
-    private WebClient webClient;
-
-    @Mock
-    private JwtService jwtService;
-
-    @Mock
-    private RedisSessionService redisSessionService;
-
-    @InjectMocks
-    private AuthService authService;
-
-    @Test
-    void startAuthentication_shouldReturnAuthorizationUrl() {
-        AppConfigResponse appConfig = new AppConfigResponse();
-        appConfig.setAppId("B2BOOST_BE");
-        appConfig.setEnabled(true);
-        appConfig.setClientId("client-id");
-        appConfig.setIssuerUri("https://ping.example.com");
-        appConfig.setRedirectUri("http://localhost:8080/arthur-core/auth/callback");
-        appConfig.setScopes(List.of("openid", "profile", "email"));
-        appConfig.setPostLoginRedirectUrl("http://localhost:8081/post-login");
-
-        OidcMetadata metadata = new OidcMetadata();
-        metadata.setAuthorizationEndpoint("https://ping.example.com/as/authorization.oauth2");
-
-        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
-        when(oidcDiscoveryClient.loadMetadata("https://ping.example.com")).thenReturn(metadata);
-        when(randomValueGenerator.generate())
-                .thenReturn("state-123")
-                .thenReturn("nonce-123")
-                .thenReturn("verifier-123");
-        when(pkceService.generateCodeChallenge("verifier-123")).thenReturn("challenge-123");
-
-        String result = authService.startAuthentication("B2BOOST_BE");
-
-        assertThat(result).contains("https://ping.example.com/as/authorization.oauth2");
-        assertThat(result).contains("client_id=client-id");
-        assertThat(result).contains("response_type=code");
-        assertThat(result).contains("state=state-123");
-        assertThat(result).contains("nonce=nonce-123");
-        assertThat(result).contains("code_challenge=challenge-123");
-        assertThat(result).contains("code_challenge_method=S256");
-
-        verify(redisAuthTransactionService).save(any(AuthTransaction.class));
-    }
-
-    @Test
-    void startAuthentication_shouldThrowException_whenAppIdBlank() {
-        assertThatThrownBy(() -> authService.startAuthentication(" "))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("APP_ID must not be blank");
-
-        verifyNoInteractions(partnerRepositoryClient);
-    }
-
-    @Test
-    void startAuthentication_shouldThrowException_whenAppConfigIsNull() {
-        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(null);
-
-        assertThatThrownBy(() -> authService.startAuthentication("B2BOOST_BE"))
-                .isInstanceOf(TechnicalException.class)
-                .hasMessage("App config not found");
-    }
-
-    @Test
-    void startAuthentication_shouldThrowException_whenAppIsDisabled() {
-        AppConfigResponse appConfig = new AppConfigResponse();
-        appConfig.setEnabled(false);
-
-        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
-
-        assertThatThrownBy(() -> authService.startAuthentication("B2BOOST_BE"))
-                .isInstanceOf(TechnicalException.class)
-                .hasMessage("App is disabled");
-    }
+    authService = new AuthService(
+            partnerRepositoryClient,
+            oidcDiscoveryClient,
+            randomValueGenerator,
+            pkceService,
+            redisAuthTransactionService,
+            redisLoginHandoffService,
+            webClient,
+            jwtService,
+            redisSessionService,
+            arthurSecurityProperties
+    );
 }
 ```
 
-Imports:
+Then remove:
 
 ```java
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.web.reactive.function.client.WebClient;
-
-import java.util.List;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.*;
+@InjectMocks
+private AuthService authService;
 ```
 
-No `eq(...)` used.
-
----
-
-## Next test for sales point selection
-
-Add this after the above passes:
+Also add this import:
 
 ```java
-@Test
-void completeSalesPointSelection_shouldCreateHandoffAndReturnRedirectUrl() {
-    SalesPointResponse salesPoint = new SalesPointResponse();
-    salesPoint.setId("SP001");
-    salesPoint.setLabel("Sales Point 1");
-    salesPoint.setOrgUnitId("ORG001");
-
-    UserSession session = new UserSession();
-    session.setSessionId("session-123");
-    session.setAppId("B2BOOST_BE");
-    session.setUserId("testuser");
-    session.setSalesPoints(List.of(salesPoint));
-
-    AppConfigResponse appConfig = new AppConfigResponse();
-    appConfig.setPostLoginRedirectUrl("http://localhost:8081/post-login");
-
-    when(redisSessionService.findBySessionId("session-123")).thenReturn(session);
-    when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
-
-    String redirectUrl = authService.completeSalesPointSelection("session-123", "SP001");
-
-    assertThat(redirectUrl).startsWith("http://localhost:8081/post-login?code=");
-    assertThat(session.getSelectedSalesPointId()).isEqualTo("SP001");
-    assertThat(session.getSelectedOrgUnitId()).isEqualTo("ORG001");
-
-    verify(redisSessionService).save(session);
-    verify(redisLoginHandoffService).save(any(LoginHandoff.class));
-}
+import org.junit.jupiter.api.BeforeEach;
 ```
 
-And invalid sales point:
+If your constructor order is different, follow the exact order from `AuthService` fields.
+
+In your sales-point test, now the handoff expiry uses:
 
 ```java
-@Test
-void completeSalesPointSelection_shouldThrowException_whenSalesPointInvalid() {
-    SalesPointResponse salesPoint = new SalesPointResponse();
-    salesPoint.setId("SP001");
-
-    UserSession session = new UserSession();
-    session.setSessionId("session-123");
-    session.setSalesPoints(List.of(salesPoint));
-
-    when(redisSessionService.findBySessionId("session-123")).thenReturn(session);
-
-    assertThatThrownBy(() -> authService.completeSalesPointSelection("session-123", "SP999"))
-            .isInstanceOf(TechnicalException.class)
-            .hasMessage("Invalid sales point");
-}
+arthurSecurityProperties.getHandoff().getTtlSeconds()
 ```
 
-For your UI issue, send the screenshot/current HTML/CSS next. The Figma spacing issue likely needs changes in the `sales-points.html` container width, left column padding, and radio list spacing.
+So this real object gives default value:
+
+```java
+60
+```
+
+and the test should pass again.
