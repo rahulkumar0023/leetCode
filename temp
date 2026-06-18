@@ -1,194 +1,249 @@
-Add coverage for **GlobalExceptionHandler** and the exception classes indirectly through it.
+Yes. Start with **AuthService** in two steps:
 
-## 1. Create test controller for exceptions
+## 1. Small code improvements first
 
-Location:
+### Add null/session checks in `completeSalesPointSelection`
 
-```text
-src/test/java/com/bnpp/pf/partner/repository/controller/GlobalExceptionHandlerTest.java
-```
+Right now this can fail with NPE if session expired:
 
 ```java
-package com.bnpp.pf.partner.repository.controller;
+UserSession session = redisSessionService.findBySessionId(sessionId);
+```
 
-import com.bnpp.pf.partner.repository.exception.AppNotFoundException;
-import com.bnpp.pf.partner.repository.exception.SalesPointNotFoundException;
-import com.bnpp.pf.partner.repository.exception.UserNotFoundException;
+Use:
+
+```java
+if (sessionId == null || sessionId.isBlank()) {
+    throw new TechnicalException("Session id must not be blank");
+}
+
+UserSession session = redisSessionService.findBySessionId(sessionId);
+
+if (session == null) {
+    throw new TechnicalException("Session expired");
+}
+
+if (session.getSalesPoints() == null || session.getSalesPoints().isEmpty()) {
+    throw new TechnicalException("No sales points available for user");
+}
+```
+
+### Avoid hardcoded handoff TTL
+
+Replace:
+
+```java
+handoff.setExpiresAt(Instant.now().plusSeconds(60));
+```
+
+with property later:
+
+```java
+handoff.setExpiresAt(Instant.now().plusSeconds(arthurSecurityProperties.getHandoff().getTtlSeconds()));
+```
+
+For now, okay to keep `60`.
+
+### Remove Keycloak-specific method later
+
+This is Keycloak-specific:
+
+```java
+private String toInternalUrl(String url) {
+    return url.replace("keycloak.kubernetes.localhost", "keycloak.ns-keycloak.svc.cluster.local");
+}
+```
+
+Since you’re moving to Ping, this should eventually be removed or made generic/configurable.
+
+---
+
+## 2. AuthService unit test
+
+Create:
+
+```text
+src/test/java/.../service/AuthServiceTest.java
+```
+
+Start with these 4 tests:
+
+```java
+@ExtendWith(MockitoExtension.class)
+class AuthServiceTest {
+
+    @Mock
+    private PartnerRepositoryClient partnerRepositoryClient;
+
+    @Mock
+    private OidcDiscoveryClient oidcDiscoveryClient;
+
+    @Mock
+    private RandomValueGenerator randomValueGenerator;
+
+    @Mock
+    private PkceService pkceService;
+
+    @Mock
+    private RedisAuthTransactionService redisAuthTransactionService;
+
+    @Mock
+    private RedisLoginHandoffService redisLoginHandoffService;
+
+    @Mock
+    private WebClient webClient;
+
+    @Mock
+    private JwtService jwtService;
+
+    @Mock
+    private RedisSessionService redisSessionService;
+
+    @InjectMocks
+    private AuthService authService;
+
+    @Test
+    void startAuthentication_shouldReturnAuthorizationUrl() {
+        AppConfigResponse appConfig = new AppConfigResponse();
+        appConfig.setAppId("B2BOOST_BE");
+        appConfig.setEnabled(true);
+        appConfig.setClientId("client-id");
+        appConfig.setIssuerUri("https://ping.example.com");
+        appConfig.setRedirectUri("http://localhost:8080/arthur-core/auth/callback");
+        appConfig.setScopes(List.of("openid", "profile", "email"));
+        appConfig.setPostLoginRedirectUrl("http://localhost:8081/post-login");
+
+        OidcMetadata metadata = new OidcMetadata();
+        metadata.setAuthorizationEndpoint("https://ping.example.com/as/authorization.oauth2");
+
+        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
+        when(oidcDiscoveryClient.loadMetadata("https://ping.example.com")).thenReturn(metadata);
+        when(randomValueGenerator.generate())
+                .thenReturn("state-123")
+                .thenReturn("nonce-123")
+                .thenReturn("verifier-123");
+        when(pkceService.generateCodeChallenge("verifier-123")).thenReturn("challenge-123");
+
+        String result = authService.startAuthentication("B2BOOST_BE");
+
+        assertThat(result).contains("https://ping.example.com/as/authorization.oauth2");
+        assertThat(result).contains("client_id=client-id");
+        assertThat(result).contains("response_type=code");
+        assertThat(result).contains("state=state-123");
+        assertThat(result).contains("nonce=nonce-123");
+        assertThat(result).contains("code_challenge=challenge-123");
+        assertThat(result).contains("code_challenge_method=S256");
+
+        verify(redisAuthTransactionService).save(any(AuthTransaction.class));
+    }
+
+    @Test
+    void startAuthentication_shouldThrowException_whenAppIdBlank() {
+        assertThatThrownBy(() -> authService.startAuthentication(" "))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("APP_ID must not be blank");
+
+        verifyNoInteractions(partnerRepositoryClient);
+    }
+
+    @Test
+    void startAuthentication_shouldThrowException_whenAppConfigIsNull() {
+        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(null);
+
+        assertThatThrownBy(() -> authService.startAuthentication("B2BOOST_BE"))
+                .isInstanceOf(TechnicalException.class)
+                .hasMessage("App config not found");
+    }
+
+    @Test
+    void startAuthentication_shouldThrowException_whenAppIsDisabled() {
+        AppConfigResponse appConfig = new AppConfigResponse();
+        appConfig.setEnabled(false);
+
+        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
+
+        assertThatThrownBy(() -> authService.startAuthentication("B2BOOST_BE"))
+                .isInstanceOf(TechnicalException.class)
+                .hasMessage("App is disabled");
+    }
+}
+```
+
+Imports:
+
+```java
 import org.junit.jupiter.api.Test;
-import org.springframework.http.MediaType;
-import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.test.web.servlet.setup.MockMvcBuilders;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.web.reactive.function.client.WebClient;
 
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
-
-class GlobalExceptionHandlerTest {
-
-    private final MockMvc mockMvc = MockMvcBuilders
-            .standaloneSetup(new TestController())
-            .setControllerAdvice(new GlobalExceptionHandler())
-            .build();
-
-    @Test
-    void shouldHandleIllegalArgumentException() throws Exception {
-        mockMvc.perform(get("/test/bad-request"))
-                .andExpect(status().isBadRequest())
-                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
-                .andExpect(jsonPath("$.message").value("Invalid request"));
-    }
-
-    @Test
-    void shouldHandleAppNotFoundException() throws Exception {
-        mockMvc.perform(get("/test/app-not-found"))
-                .andExpect(status().isNotFound())
-                .andExpect(jsonPath("$.status").value(404))
-                .andExpect(jsonPath("$.error").value("APP_NOT_FOUND"))
-                .andExpect(jsonPath("$.message").value("App not found: B2BOOST_BE"));
-    }
-
-    @Test
-    void shouldHandleUserNotFoundException() throws Exception {
-        mockMvc.perform(get("/test/user-not-found"))
-                .andExpect(status().isNotFound())
-                .andExpect(jsonPath("$.status").value(404))
-                .andExpect(jsonPath("$.error").value("USER_NOT_FOUND"))
-                .andExpect(jsonPath("$.message").value("User not found: testuser"));
-    }
-
-    @Test
-    void shouldHandleSalesPointNotFoundException() throws Exception {
-        mockMvc.perform(get("/test/sales-point-not-found"))
-                .andExpect(status().isNotFound())
-                .andExpect(jsonPath("$.status").value(404))
-                .andExpect(jsonPath("$.error").value("SALES_POINT_NOT_FOUND"))
-                .andExpect(jsonPath("$.message").value("Sales point not found: SP001"));
-    }
-
-    @RestController
-    static class TestController {
-
-        @GetMapping("/test/bad-request")
-        void badRequest() {
-            throw new IllegalArgumentException("Invalid request");
-        }
-
-        @GetMapping("/test/app-not-found")
-        void appNotFound() {
-            throw new AppNotFoundException("B2BOOST_BE");
-        }
-
-        @GetMapping("/test/user-not-found")
-        void userNotFound() {
-            throw new UserNotFoundException("testuser");
-        }
-
-        @GetMapping("/test/sales-point-not-found")
-        void salesPointNotFound() {
-            throw new SalesPointNotFoundException("SP001");
-        }
-    }
-}
-```
-
-## 2. Small improvement to your handler
-
-Your `IllegalArgumentException` currently returns only:
-
-```json
-{
-  "message": "..."
-}
-```
-
-That is okay, but for consistency I’d change it to:
-
-```java
-@ExceptionHandler(IllegalArgumentException.class)
-@ResponseStatus(HttpStatus.BAD_REQUEST)
-public Map<String, Object> handleIllegalArgumentException(IllegalArgumentException exception) {
-    return Map.of(
-            STATUS, 400,
-            ERROR, "BAD_REQUEST",
-            MESSAGE, exception.getMessage()
-    );
-}
-```
-
-Then update the first test to also check:
-
-```java
-.andExpect(jsonPath("$.status").value(400))
-.andExpect(jsonPath("$.error").value("BAD_REQUEST"))
-```
-
-This gives coverage for:
-
-```text
-AppNotFoundException
-UserNotFoundException
-SalesPointNotFoundException
-IllegalArgumentException
-GlobalExceptionHandler
-```
----------------------------------------
-
-For simple exception classes like these, you usually **don’t need separate tests** if they are already covered through:
-
-```text
-GlobalExceptionHandlerTest
-UserServiceTest
-AppConfigServiceTest
-```
-
-But if your coverage tool is asking for them explicitly, add a small unit test.
-
-## Exception class test
-
-Location:
-
-```text
-src/test/java/com/bnpp/pf/partner/repository/exception/ExceptionTest.java
-```
-
-```java
-package com.bnpp.pf.partner.repository.exception;
-
-import org.junit.jupiter.api.Test;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
+```
 
-class ExceptionTest {
+No `eq(...)` used.
 
-    @Test
-    void userNotFoundException_shouldContainExpectedMessage() {
-        UserNotFoundException exception = new UserNotFoundException("testuser");
+---
 
-        assertThat(exception.getMessage())
-                .isEqualTo("User not found: testuser");
-    }
+## Next test for sales point selection
 
-    @Test
-    void salesPointNotFoundException_shouldContainExpectedMessage() {
-        SalesPointNotFoundException exception =
-                new SalesPointNotFoundException("SP001");
+Add this after the above passes:
 
-        assertThat(exception.getMessage())
-                .isEqualTo("Sales point not found: SP001");
-    }
+```java
+@Test
+void completeSalesPointSelection_shouldCreateHandoffAndReturnRedirectUrl() {
+    SalesPointResponse salesPoint = new SalesPointResponse();
+    salesPoint.setId("SP001");
+    salesPoint.setLabel("Sales Point 1");
+    salesPoint.setOrgUnitId("ORG001");
 
-    @Test
-    void appNotFoundException_shouldContainExpectedMessage() {
-        AppNotFoundException exception =
-                new AppNotFoundException("B2BOOST_BE");
+    UserSession session = new UserSession();
+    session.setSessionId("session-123");
+    session.setAppId("B2BOOST_BE");
+    session.setUserId("testuser");
+    session.setSalesPoints(List.of(salesPoint));
 
-        assertThat(exception.getMessage())
-                .isEqualTo("App not found: B2BOOST_BE");
-    }
+    AppConfigResponse appConfig = new AppConfigResponse();
+    appConfig.setPostLoginRedirectUrl("http://localhost:8081/post-login");
+
+    when(redisSessionService.findBySessionId("session-123")).thenReturn(session);
+    when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
+
+    String redirectUrl = authService.completeSalesPointSelection("session-123", "SP001");
+
+    assertThat(redirectUrl).startsWith("http://localhost:8081/post-login?code=");
+    assertThat(session.getSelectedSalesPointId()).isEqualTo("SP001");
+    assertThat(session.getSelectedOrgUnitId()).isEqualTo("ORG001");
+
+    verify(redisSessionService).save(session);
+    verify(redisLoginHandoffService).save(any(LoginHandoff.class));
 }
 ```
 
-That is enough.
+And invalid sales point:
 
-No need to over-test these classes; they only wrap a message.
+```java
+@Test
+void completeSalesPointSelection_shouldThrowException_whenSalesPointInvalid() {
+    SalesPointResponse salesPoint = new SalesPointResponse();
+    salesPoint.setId("SP001");
+
+    UserSession session = new UserSession();
+    session.setSessionId("session-123");
+    session.setSalesPoints(List.of(salesPoint));
+
+    when(redisSessionService.findBySessionId("session-123")).thenReturn(session);
+
+    assertThatThrownBy(() -> authService.completeSalesPointSelection("session-123", "SP999"))
+            .isInstanceOf(TechnicalException.class)
+            .hasMessage("Invalid sales point");
+}
+```
+
+For your UI issue, send the screenshot/current HTML/CSS next. The Figma spacing issue likely needs changes in the `sales-points.html` container width, left column padding, and radio list spacing.
