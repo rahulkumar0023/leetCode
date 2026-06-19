@@ -1,438 +1,174 @@
-Yes — below is a fuller `AuthServiceTest` set covering the main paths.
-
-Assumptions:
-
-* You added `OidcTokenService`
-* No `eq(...)`
-* `AuthService` constructor order matches your screenshot
-* `TechnicalException` is your custom runtime exception
+Add this test class for `HandoffService`.
 
 ```java
 package com.bnpp.pf.arthur.core.service;
 
-import com.bnpp.pf.arthur.core.client.OidcDiscoveryClient;
-import com.bnpp.pf.arthur.core.client.PartnerRepositoryClient;
-import com.bnpp.pf.arthur.core.config.ArthurSecurityProperties;
 import com.bnpp.pf.arthur.core.exception.TechnicalException;
-import com.bnpp.pf.arthur.core.model.*;
-import com.bnpp.pf.arthur.core.util.RandomValueGenerator;
-import org.junit.jupiter.api.BeforeEach;
+import com.bnpp.pf.arthur.core.model.HandoffExchangeResponse;
+import com.bnpp.pf.arthur.core.model.LoginHandoff;
+import com.bnpp.pf.arthur.core.model.UserSession;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.ArgumentCaptor;
+import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.web.reactive.function.client.WebClient;
 
+import java.time.Instant;
 import java.util.List;
-import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
-class AuthServiceTest {
+class HandoffServiceTest {
 
-    @Mock private PartnerRepositoryClient partnerRepositoryClient;
-    @Mock private OidcDiscoveryClient oidcDiscoveryClient;
-    @Mock private RandomValueGenerator randomValueGenerator;
-    @Mock private PkceService pkceService;
-    @Mock private RedisAuthTransactionService redisAuthTransactionService;
-    @Mock private RedisLoginHandoffService redisLoginHandoffService;
-    @Mock private WebClient webClient;
-    @Mock private JwtService jwtService;
-    @Mock private RedisSessionService redisSessionService;
-    @Mock private OidcTokenService oidcTokenService;
+    @Mock
+    private RedisLoginHandoffService redisLoginHandoffService;
 
-    private ArthurSecurityProperties arthurSecurityProperties;
-    private AuthService authService;
+    @Mock
+    private RedisSessionService redisSessionService;
 
-    @BeforeEach
-    void setUp() {
-        arthurSecurityProperties = new ArthurSecurityProperties();
-
-        authService = new AuthService(
-                partnerRepositoryClient,
-                oidcDiscoveryClient,
-                randomValueGenerator,
-                pkceService,
-                redisAuthTransactionService,
-                redisLoginHandoffService,
-                webClient,
-                jwtService,
-                redisSessionService,
-                arthurSecurityProperties,
-                oidcTokenService
-        );
-    }
+    @InjectMocks
+    private HandoffService handoffService;
 
     @Test
-    void startAuthentication_shouldReturnAuthorizationUrl() {
-        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(validAppConfig());
-        when(oidcDiscoveryClient.loadMetadata("https://ping.example.com")).thenReturn(metadata());
-        when(randomValueGenerator.generate())
-                .thenReturn("state-123")
-                .thenReturn("nonce-123")
-                .thenReturn("verifier-123");
-        when(pkceService.generateCodeChallenge("verifier-123")).thenReturn("challenge-123");
-
-        String result = authService.startAuthentication("B2BOOST_BE");
-
-        assertThat(result).contains("https://ping.example.com/as/authorization.oauth2");
-        assertThat(result).contains("client_id=client-id");
-        assertThat(result).contains("response_type=code");
-        assertThat(result).contains("scope=openid+profile+email");
-        assertThat(result).contains("state=state-123");
-        assertThat(result).contains("nonce=nonce-123");
-        assertThat(result).contains("code_challenge=challenge-123");
-        assertThat(result).contains("code_challenge_method=S256");
-
-        ArgumentCaptor<AuthTransaction> captor = ArgumentCaptor.forClass(AuthTransaction.class);
-        verify(redisAuthTransactionService).save(captor.capture());
-
-        AuthTransaction tx = captor.getValue();
-        assertThat(tx.getState()).isEqualTo("state-123");
-        assertThat(tx.getNonce()).isEqualTo("nonce-123");
-        assertThat(tx.getCodeVerifier()).isEqualTo("verifier-123");
-        assertThat(tx.getAppId()).isEqualTo("B2BOOST_BE");
-        assertThat(tx.getRedirectUri()).isEqualTo("http://localhost:8080/arthur-core/auth/callback");
-    }
-
-    @Test
-    void startAuthentication_shouldThrowException_whenAppIdBlank() {
-        assertThatThrownBy(() -> authService.startAuthentication(" "))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("APP_ID must not be blank");
-
-        verifyNoInteractions(partnerRepositoryClient);
-    }
-
-    @Test
-    void startAuthentication_shouldThrowException_whenAppConfigIsNull() {
-        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(null);
-
-        assertThatThrownBy(() -> authService.startAuthentication("B2BOOST_BE"))
-                .isInstanceOf(TechnicalException.class)
-                .hasMessage("App config not found");
-    }
-
-    @Test
-    void startAuthentication_shouldThrowException_whenAppIsDisabled() {
-        AppConfigResponse appConfig = validAppConfig();
-        appConfig.setEnabled(false);
-
-        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
-
-        assertThatThrownBy(() -> authService.startAuthentication("B2BOOST_BE"))
-                .isInstanceOf(TechnicalException.class)
-                .hasMessage("App is disabled");
-    }
-
-    @Test
-    void startAuthentication_shouldThrowException_whenClientIdMissing() {
-        AppConfigResponse appConfig = validAppConfig();
-        appConfig.setClientId(" ");
-
-        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
-
-        assertThatThrownBy(() -> authService.startAuthentication("B2BOOST_BE"))
-                .isInstanceOf(TechnicalException.class)
-                .hasMessage("Missing clientId");
-    }
-
-    @Test
-    void startAuthentication_shouldThrowException_whenIssuerUriMissing() {
-        AppConfigResponse appConfig = validAppConfig();
-        appConfig.setIssuerUri(null);
-
-        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
-
-        assertThatThrownBy(() -> authService.startAuthentication("B2BOOST_BE"))
-                .isInstanceOf(TechnicalException.class)
-                .hasMessage("Missing issuerUri");
-    }
-
-    @Test
-    void startAuthentication_shouldThrowException_whenRedirectUriMissing() {
-        AppConfigResponse appConfig = validAppConfig();
-        appConfig.setRedirectUri("");
-
-        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
-
-        assertThatThrownBy(() -> authService.startAuthentication("B2BOOST_BE"))
-                .isInstanceOf(TechnicalException.class)
-                .hasMessage("Missing redirectUri");
-    }
-
-    @Test
-    void handleCallback_shouldCreateSessionAndReturnAuthResult() {
-        mockCallbackDependencies(validTokenResponse());
-
-        JwtUserClaims claims = new JwtUserClaims();
-        claims.setSub("subject-123");
-        claims.setPreferredUsername("testuser");
-
-        when(jwtService.extractClaims("id-token")).thenReturn(claims);
-        when(partnerRepositoryClient.getUserById("testuser")).thenReturn(validUser());
-
-        AuthResult result = authService.handleCallback("auth-code", "state-123");
-
-        assertThat(result.getAppId()).isEqualTo("B2BOOST_BE");
-        assertThat(result.getSessionId()).isNotBlank();
-
-        ArgumentCaptor<UserSession> sessionCaptor = ArgumentCaptor.forClass(UserSession.class);
-        verify(redisSessionService).save(sessionCaptor.capture());
-
-        UserSession session = sessionCaptor.getValue();
-        assertThat(session.getAppId()).isEqualTo("B2BOOST_BE");
-        assertThat(session.getUserId()).isEqualTo("testuser");
-        assertThat(session.getUsername()).isEqualTo("testuser");
-        assertThat(session.getAccessToken()).isEqualTo("access-token");
-        assertThat(session.getRefreshToken()).isEqualTo("refresh-token");
-        assertThat(session.getSalesPoints()).hasSize(1);
-
-        verify(redisAuthTransactionService).delete("state-123");
-    }
-
-    @Test
-    void handleCallback_shouldThrowTechnicalException_whenStateExpired() {
-        when(redisAuthTransactionService.findByState("state-123")).thenReturn(null);
-
-        assertThatThrownBy(() -> authService.handleCallback("auth-code", "state-123"))
-                .isInstanceOf(TechnicalException.class)
-                .hasMessage("Invalid or expired state");
-    }
-
-    @Test
-    void handleCallback_shouldThrowTechnicalException_whenTokenResponseIsNull() {
-        mockCallbackDependencies(null);
-
-        assertThatThrownBy(() -> authService.handleCallback("auth-code", "state-123"))
-                .isInstanceOf(TechnicalException.class)
-                .hasMessage("Token response is null");
-    }
-
-    @Test
-    void handleCallback_shouldThrowTechnicalException_whenAccessTokenMissing() {
-        mockCallbackDependencies(Map.of(
-                "id_token", "id-token",
-                "refresh_token", "refresh-token"
-        ));
-
-        assertThatThrownBy(() -> authService.handleCallback("auth-code", "state-123"))
-                .isInstanceOf(TechnicalException.class)
-                .hasMessage("Missing required token field: access_token");
-    }
-
-    @Test
-    void handleCallback_shouldThrowTechnicalException_whenIdTokenMissing() {
-        mockCallbackDependencies(Map.of(
-                "access_token", "access-token",
-                "refresh_token", "refresh-token"
-        ));
-
-        assertThatThrownBy(() -> authService.handleCallback("auth-code", "state-123"))
-                .isInstanceOf(TechnicalException.class)
-                .hasMessage("Missing required token field: id_token");
-    }
-
-    @Test
-    void handleCallback_shouldThrowTechnicalException_whenRefreshTokenMissing() {
-        mockCallbackDependencies(Map.of(
-                "access_token", "access-token",
-                "id_token", "id-token"
-        ));
-
-        assertThatThrownBy(() -> authService.handleCallback("auth-code", "state-123"))
-                .isInstanceOf(TechnicalException.class)
-                .hasMessage("Missing required token field: refresh_token");
-    }
-
-    @Test
-    void completeSalesPointSelection_shouldCreateHandoffAndReturnRedirectUrl() {
+    void exchange_shouldReturnResponseAndDeleteHandoff_whenCodeIsValid() {
+        LoginHandoff handoff = validHandoff();
         UserSession session = validSession();
 
-        AppConfigResponse appConfig = validAppConfig();
-        appConfig.setPostLoginRedirectUrl("http://localhost:8081/post-login");
+        when(redisLoginHandoffService.findByCode("code-123"))
+                .thenReturn(handoff);
+        when(redisSessionService.findBySessionId("session-123"))
+                .thenReturn(session);
 
-        when(redisSessionService.findBySessionId("session-123")).thenReturn(session);
-        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
+        HandoffExchangeResponse response = handoffService.exchange("code-123");
 
-        String result = authService.completeSalesPointSelection("session-123", "SP001");
+        assertThat(response.getUserId()).isEqualTo("testuser");
+        assertThat(response.getUsername()).isEqualTo("testuser");
+        assertThat(response.getEmail()).isEqualTo("test@test.com");
+        assertThat(response.getRoles()).containsExactly("SELLER");
+        assertThat(response.getAppId()).isEqualTo("B2BOOST_BE");
+        assertThat(response.getSelectedSalesPointId()).isEqualTo("SP001");
+        assertThat(response.getSelectedOrgUnitId()).isEqualTo("ORG001");
 
-        assertThat(result).startsWith("http://localhost:8081/post-login?code=");
-        assertThat(session.getSelectedSalesPointId()).isEqualTo("SP001");
-        assertThat(session.getSelectedOrgUnitId()).isEqualTo("ORG001");
-
-        verify(redisSessionService).save(session);
-        verify(redisLoginHandoffService).save(any(LoginHandoff.class));
+        verify(redisLoginHandoffService).delete("code-123");
     }
 
     @Test
-    void completeSalesPointSelection_shouldUseAmpersand_whenRedirectUrlAlreadyHasQueryParam() {
-        UserSession session = validSession();
+    void exchange_shouldThrowException_whenHandoffCodeIsInvalid() {
+        when(redisLoginHandoffService.findByCode("invalid-code"))
+                .thenReturn(null);
 
-        AppConfigResponse appConfig = validAppConfig();
-        appConfig.setPostLoginRedirectUrl("http://localhost:8081/post-login?lang=fr");
-
-        when(redisSessionService.findBySessionId("session-123")).thenReturn(session);
-        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
-
-        String result = authService.completeSalesPointSelection("session-123", "SP001");
-
-        assertThat(result).contains("http://localhost:8081/post-login?lang=fr&code=");
-    }
-
-    @Test
-    void completeSalesPointSelection_shouldThrowException_whenSessionIdBlank() {
-        assertThatThrownBy(() -> authService.completeSalesPointSelection(" ", "SP001"))
+        assertThatThrownBy(() -> handoffService.exchange("invalid-code"))
                 .isInstanceOf(TechnicalException.class)
-                .hasMessage("Session id must not be blank");
+                .hasMessage("Invalid or expired handoff code");
 
+        verify(redisLoginHandoffService, never()).delete("invalid-code");
         verifyNoInteractions(redisSessionService);
     }
 
     @Test
-    void completeSalesPointSelection_shouldThrowException_whenSessionExpired() {
-        when(redisSessionService.findBySessionId("session-123")).thenReturn(null);
+    void exchange_shouldThrowException_whenHandoffAlreadyUsed() {
+        LoginHandoff handoff = validHandoff();
+        handoff.setUsed(true);
 
-        assertThatThrownBy(() -> authService.completeSalesPointSelection("session-123", "SP001"))
+        when(redisLoginHandoffService.findByCode("code-123"))
+                .thenReturn(handoff);
+
+        assertThatThrownBy(() -> handoffService.exchange("code-123"))
                 .isInstanceOf(TechnicalException.class)
-                .hasMessage("Session expired");
+                .hasMessage("Handoff code already used");
+
+        verify(redisLoginHandoffService, never()).delete("code-123");
+        verifyNoInteractions(redisSessionService);
     }
 
     @Test
-    void completeSalesPointSelection_shouldThrowException_whenNoSalesPointsAvailable() {
-        UserSession session = validSession();
-        session.setSalesPoints(List.of());
+    void exchange_shouldDeleteAndThrowException_whenHandoffExpired() {
+        LoginHandoff handoff = validHandoff();
+        handoff.setExpiresAt(Instant.now().minusSeconds(10));
 
-        when(redisSessionService.findBySessionId("session-123")).thenReturn(session);
+        when(redisLoginHandoffService.findByCode("code-123"))
+                .thenReturn(handoff);
 
-        assertThatThrownBy(() -> authService.completeSalesPointSelection("session-123", "SP001"))
+        assertThatThrownBy(() -> handoffService.exchange("code-123"))
                 .isInstanceOf(TechnicalException.class)
-                .hasMessage("No sales points available for user");
+                .hasMessage("Handoff code expired");
+
+        verify(redisLoginHandoffService).delete("code-123");
+        verifyNoInteractions(redisSessionService);
     }
 
     @Test
-    void completeSalesPointSelection_shouldThrowException_whenInvalidSalesPoint() {
+    void exchange_shouldDeleteAndThrowException_whenSessionNotFound() {
+        LoginHandoff handoff = validHandoff();
+
+        when(redisLoginHandoffService.findByCode("code-123"))
+                .thenReturn(handoff);
+        when(redisSessionService.findBySessionId("session-123"))
+                .thenReturn(null);
+
+        assertThatThrownBy(() -> handoffService.exchange("code-123"))
+                .isInstanceOf(TechnicalException.class)
+                .hasMessage("Session not found for handoff code");
+
+        verify(redisLoginHandoffService).delete("code-123");
+    }
+
+    @Test
+    void exchange_shouldAllowHandoff_whenExpiresAtIsNull() {
+        LoginHandoff handoff = validHandoff();
+        handoff.setExpiresAt(null);
+
         UserSession session = validSession();
 
-        when(redisSessionService.findBySessionId("session-123")).thenReturn(session);
+        when(redisLoginHandoffService.findByCode("code-123"))
+                .thenReturn(handoff);
+        when(redisSessionService.findBySessionId("session-123"))
+                .thenReturn(session);
 
-        assertThatThrownBy(() -> authService.completeSalesPointSelection("session-123", "SP999"))
-                .isInstanceOf(TechnicalException.class)
-                .hasMessage("Invalid sales point");
+        HandoffExchangeResponse response = handoffService.exchange("code-123");
+
+        assertThat(response.getUserId()).isEqualTo("testuser");
+        verify(redisLoginHandoffService).delete("code-123");
     }
 
-    private void mockCallbackDependencies(Map<String, Object> tokenResponse) {
-        when(redisAuthTransactionService.findByState("state-123")).thenReturn(authTransaction());
-        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(validAppConfig());
-        when(oidcDiscoveryClient.loadMetadata("https://ping.example.com")).thenReturn(metadata());
-        when(oidcTokenService.exchangeToken(
-                anyString(),
-                anyString(),
-                any(AppConfigResponse.class),
-                any(AuthTransaction.class)
-        )).thenReturn(tokenResponse);
-    }
-
-    private AppConfigResponse validAppConfig() {
-        AppConfigResponse appConfig = new AppConfigResponse();
-        appConfig.setAppId("B2BOOST_BE");
-        appConfig.setEnabled(true);
-        appConfig.setClientId("client-id");
-        appConfig.setClientSecret("client-secret");
-        appConfig.setIssuerUri("https://ping.example.com");
-        appConfig.setRedirectUri("http://localhost:8080/arthur-core/auth/callback");
-        appConfig.setScopes(List.of("openid", "profile", "email"));
-        appConfig.setPostLoginRedirectUrl("http://localhost:8081/post-login");
-        return appConfig;
-    }
-
-    private OidcMetadata metadata() {
-        OidcMetadata metadata = new OidcMetadata();
-        metadata.setAuthorizationEndpoint("https://ping.example.com/as/authorization.oauth2");
-        metadata.setTokenEndpoint("https://ping.example.com/as/token.oauth2");
-        return metadata;
-    }
-
-    private AuthTransaction authTransaction() {
-        AuthTransaction tx = new AuthTransaction();
-        tx.setState("state-123");
-        tx.setNonce("nonce-123");
-        tx.setCodeVerifier("verifier-123");
-        tx.setAppId("B2BOOST_BE");
-        tx.setRedirectUri("http://localhost:8080/arthur-core/auth/callback");
-        tx.setPostLoginRedirectUrl("http://localhost:8081/post-login");
-        return tx;
-    }
-
-    private Map<String, Object> validTokenResponse() {
-        return Map.of(
-                "access_token", "access-token",
-                "id_token", "id-token",
-                "refresh_token", "refresh-token"
-        );
-    }
-
-    private UserResponse validUser() {
-        SalesPointResponse salesPoint = new SalesPointResponse();
-        salesPoint.setId("SP001");
-        salesPoint.setLabel("Sales Point 1");
-        salesPoint.setOrgUnitId("ORG001");
-
-        UserResponse user = new UserResponse();
-        user.setUserId("testuser");
-        user.setUsername("testuser");
-        user.setRoles(List.of("SELLER"));
-        user.setSalesPoints(List.of(salesPoint));
-        return user;
+    private LoginHandoff validHandoff() {
+        LoginHandoff handoff = new LoginHandoff();
+        handoff.setCode("code-123");
+        handoff.setSessionId("session-123");
+        handoff.setAppId("B2BOOST_BE");
+        handoff.setRedirectUrl("http://localhost:8081/post-login");
+        handoff.setCreatedAt(Instant.now());
+        handoff.setExpiresAt(Instant.now().plusSeconds(60));
+        handoff.setUsed(false);
+        return handoff;
     }
 
     private UserSession validSession() {
-        SalesPointResponse salesPoint = new SalesPointResponse();
-        salesPoint.setId("SP001");
-        salesPoint.setLabel("Sales Point 1");
-        salesPoint.setOrgUnitId("ORG001");
-
         UserSession session = new UserSession();
         session.setSessionId("session-123");
-        session.setAppId("B2BOOST_BE");
         session.setUserId("testuser");
         session.setUsername("testuser");
+        session.setEmail("test@test.com");
         session.setRoles(List.of("SELLER"));
-        session.setSalesPoints(List.of(salesPoint));
+        session.setAppId("B2BOOST_BE");
+        session.setSelectedSalesPointId("SP001");
+        session.setSelectedOrgUnitId("ORG001");
         return session;
     }
 }
 ```
 
-One important note: this test expects you added these guards in `completeSalesPointSelection()`:
+This covers:
 
-```java
-if (sessionId == null || sessionId.isBlank()) {
-    throw new TechnicalException("Session id must not be blank");
-}
-
-UserSession session = redisSessionService.findBySessionId(sessionId);
-
-if (session == null) {
-    throw new TechnicalException("Session expired");
-}
-
-if (session.getSalesPoints() == null || session.getSalesPoints().isEmpty()) {
-    throw new TechnicalException("No sales points available for user");
-}
-```
-
-And token validation messages:
-
-```java
-"Token response is null"
-"Missing required token field: access_token"
-"Missing required token field: id_token"
-"Missing required token field: refresh_token"
+```text
+valid exchange
+invalid code
+already used code
+expired code
+missing session
+null expiresAt
+one-time delete behavior
 ```
