@@ -1,23 +1,217 @@
-Your `GlobalExceptionHandler` is not being used. The BNPP framework handler is catching it instead:
+Yes. This controller has quite a few branches worth covering.
 
-```text
-PfExceptionHandler.handleException
-```
+## salesPoints()
 
-So for this test, don’t expect `400`.
+You need tests for:
 
-Change the test to expect the real framework response:
+### 1. No cookie → redirect to auth
 
 ```java
 @Test
-void startAuthentication_shouldThrowInternalServerError_whenAppIdMissing() throws Exception {
-    mockMvc.perform(get("/auth/start"))
-            .andExpect(status().isInternalServerError())
-            .andExpect(jsonPath("$.error_description")
-                    .value("Internal server error, contact the support with the provided error identifier"));
+void salesPoints_shouldRedirectToAuth_whenSessionIdMissing() {
+    ModelAndView mv = controller.salesPoints("B2BOOST_BE", null);
+
+    assertEquals("redirect:/auth/start?appId=B2BOOST_BE", mv.getViewName());
 }
 ```
 
-Or better: change the controller to throw your framework bad-request exception instead of `IllegalArgumentException`, if your project has one.
+---
 
-For now, for coverage, use the `500` expectation because that matches the actual project behavior.
+### 2. Blank cookie → redirect to auth
+
+```java
+@Test
+void salesPoints_shouldRedirectToAuth_whenSessionIdBlank() {
+    ModelAndView mv = controller.salesPoints("B2BOOST_BE", "");
+
+    assertEquals("redirect:/auth/start?appId=B2BOOST_BE", mv.getViewName());
+}
+```
+
+---
+
+### 3. Session not found
+
+```java
+@Test
+void salesPoints_shouldRedirectToAuth_whenSessionNotFound() {
+
+    when(redisSessionService.findBySessionId("session-123"))
+            .thenReturn(null);
+
+    ModelAndView mv =
+            controller.salesPoints("B2BOOST_BE", "session-123");
+
+    assertEquals("redirect:/auth/start?appId=B2BOOST_BE",
+            mv.getViewName());
+}
+```
+
+---
+
+### 4. No sales points
+
+```java
+@Test
+void salesPoints_shouldRedirectToNoSalesPoint_whenNoSalesPoints() {
+
+    UserSession session = new UserSession();
+    session.setSalesPoints(Collections.emptyList());
+
+    when(redisSessionService.findBySessionId("session-123"))
+            .thenReturn(session);
+
+    ModelAndView mv =
+            controller.salesPoints("B2BOOST_BE", "session-123");
+
+    assertEquals("redirect:/error/no-sales-point",
+            mv.getViewName());
+}
+```
+
+---
+
+### 5. Success path
+
+```java
+@Test
+void salesPoints_shouldReturnSalesPointsView() {
+
+    UserSession session = new UserSession();
+
+    SalesPoint sp = new SalesPoint();
+    sp.setId("SP001");
+
+    session.setSalesPoints(List.of(sp));
+
+    when(redisSessionService.findBySessionId("session-123"))
+            .thenReturn(session);
+
+    ModelAndView mv =
+            controller.salesPoints("B2BOOST_BE", "session-123");
+
+    assertEquals("views/sales-points", mv.getViewName());
+
+    assertEquals(
+            session.getSalesPoints(),
+            mv.getModel().get("salesPoints"));
+
+    assertEquals(
+            "B2BOOST_BE",
+            mv.getModel().get("appId"));
+}
+```
+
+---
+
+### 6. Exception path
+
+```java
+@Test
+void salesPoints_shouldRedirectToTechnicalError_whenExceptionOccurs() {
+
+    when(redisSessionService.findBySessionId("session-123"))
+            .thenThrow(new RuntimeException("boom"));
+
+    ModelAndView mv =
+            controller.salesPoints("B2BOOST_BE", "session-123");
+
+    assertEquals(
+            "redirect:/error/technical",
+            mv.getViewName());
+}
+```
+
+---
+
+# selectSalesPoint()
+
+### 7. Missing cookie
+
+```java
+@Test
+void selectSalesPoint_shouldRedirectToAuth_whenSessionIdMissing() {
+
+    ModelAndView mv =
+            controller.selectSalesPoint(
+                    "B2BOOST_BE",
+                    null,
+                    "SP001");
+
+    assertEquals(
+            "redirect:/arthur-core/auth/start?appId=B2BOOST_BE",
+            mv.getViewName());
+}
+```
+
+---
+
+### 8. Blank cookie
+
+```java
+@Test
+void selectSalesPoint_shouldRedirectToAuth_whenSessionIdBlank() {
+
+    ModelAndView mv =
+            controller.selectSalesPoint(
+                    "B2BOOST_BE",
+                    "",
+                    "SP001");
+
+    assertEquals(
+            "redirect:/arthur-core/auth/start?appId=B2BOOST_BE",
+            mv.getViewName());
+}
+```
+
+---
+
+### 9. Success path
+
+```java
+@Test
+void selectSalesPoint_shouldRedirectToPartner() {
+
+    when(authService.completeSalesPointSelection(
+            "session-123",
+            "SP001"))
+            .thenReturn("https://partner.example.com");
+
+    ModelAndView mv =
+            controller.selectSalesPoint(
+                    "B2BOOST_BE",
+                    "session-123",
+                    "SP001");
+
+    assertEquals(
+            "redirect:https://partner.example.com",
+            mv.getViewName());
+}
+```
+
+---
+
+### 10. Exception path
+
+```java
+@Test
+void selectSalesPoint_shouldRedirectToTechnicalError_whenExceptionOccurs() {
+
+    when(authService.completeSalesPointSelection(
+            anyString(),
+            anyString()))
+            .thenThrow(new RuntimeException("boom"));
+
+    ModelAndView mv =
+            controller.selectSalesPoint(
+                    "B2BOOST_BE",
+                    "session-123",
+                    "SP001");
+
+    assertEquals(
+            "redirect:/error/technical",
+            mv.getViewName());
+}
+```
+
+These 10 tests will give essentially 100% branch coverage for `SalesPointController`.
