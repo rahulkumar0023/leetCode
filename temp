@@ -1,71 +1,67 @@
-The remaining 2 failures are clear from the screenshot:
+You have 2 separate issues.
 
-## 1. Missing `APP_ID` test
+## 1. Callback test: `authResult` is null
 
-Your controller throws:
-
-```java
-IllegalArgumentException
-```
-
-but in `@WebMvcTest`, if your `GlobalExceptionHandler` is not loaded, the test fails with `ServletException`.
-
-Add this import on the test:
+Your mock is probably not matching because the controller calls:
 
 ```java
-@Import(GlobalExceptionHandler.class)
+authService.handleCallback(code, state)
 ```
 
-So:
+Use this, no `eq()`:
 
 ```java
-@WebMvcTest(AuthController.class)
-@AutoConfigureMockMvc(addFilters = false)
-@Import(GlobalExceptionHandler.class)
-class AuthControllerTest {
+when(authService.handleCallback(anyString(), anyString()))
+        .thenReturn(new AuthResult("session-123", "B2BOOST_BE"));
 ```
 
-Import:
+Then verify:
 
 ```java
-import com.bnpp.pf.arthur.core.exception.GlobalExceptionHandler;
-import org.springframework.context.annotation.Import;
+verify(authService).handleCallback("auth-code", "state-123");
 ```
 
-## 2. Callback test
+## 2. Exchange test: JSON is snake_case
 
-It says:
+Actual response:
 
-```text
-Exception named "APP_ID header or appId query param is empty"
+```json
+{
+  "user_id": "testuser",
+  "selected_sales_point_id": "SP001"
+}
 ```
 
-That means the callback request is somehow hitting `/auth/start`, not `/auth/callback`.
-
-Check your test method. It should be exactly:
+So change assertions from camelCase:
 
 ```java
-mockMvc.perform(get("/auth/callback")
-        .param("code", "auth-code")
-        .param("state", "state-123"))
+jsonPath("$.userId")
 ```
 
-not:
+to snake_case:
 
 ```java
-get("/auth/start")
+.andExpect(jsonPath("$.user_id").value("testuser"))
+.andExpect(jsonPath("$.username").value("testuser"))
+.andExpect(jsonPath("$.email").value("test@test.com"))
+.andExpect(jsonPath("$.roles[0]").value("SELLER"))
+.andExpect(jsonPath("$.app_id").value("B2BOOST_BE"))
+.andExpect(jsonPath("$.selected_sales_point_id").value("SP001"))
+.andExpect(jsonPath("$.selected_org_unit_id").value("ORG001"));
 ```
 
-Also your controller mapping shows:
+For missing appId, because your global handler returns 500 for now, either update the expectation to 500 or better add this in `GlobalExceptionHandler`:
 
 ```java
-@GetMapping("/callback")
+@ExceptionHandler(IllegalArgumentException.class)
+@ResponseStatus(HttpStatus.BAD_REQUEST)
+public Map<String, String> handleIllegalArgumentException(IllegalArgumentException ex) {
+    return Map.of("message", ex.getMessage());
+}
 ```
 
-so full path is:
+Then the test can stay:
 
-```text
-/auth/callback
+```java
+.andExpect(status().isBadRequest());
 ```
-
-After these two changes, rerun the controller test.
