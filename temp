@@ -1,174 +1,241 @@
-Add this test class for `HandoffService`.
+For these two classes:
+
+```text
+JwtService
+OidcTokenService
+```
+
+I would test **JwtService fully**, but for `OidcTokenService`, I’d either use `MockWebServer` or exclude it from unit coverage if your team treats external HTTP clients as integration-tested. Best option is `MockWebServer`.
+
+## 1. JwtServiceTest
+
+```java
+package com.bnpp.pf.arthur.core.service;
+
+import com.bnpp.pf.arthur.core.model.JwtUserClaims;
+import org.junit.jupiter.api.Test;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+
+import java.time.Instant;
+import java.util.Map;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+class JwtServiceTest {
+
+    private final JwtDecoder jwtDecoder = mock(JwtDecoder.class);
+    private final JwtService jwtService = new JwtService(jwtDecoder);
+
+    @Test
+    void extractClaims_shouldMapJwtClaims() {
+        Jwt jwt = new Jwt(
+                "id-token",
+                Instant.now(),
+                Instant.now().plusSeconds(300),
+                Map.of("alg", "none"),
+                Map.of(
+                        "sub", "subject-123",
+                        "preferred_username", "testuser",
+                        "email", "test@test.com",
+                        "given_name", "Test",
+                        "family_name", "User"
+                )
+        );
+
+        when(jwtDecoder.decode("id-token")).thenReturn(jwt);
+
+        JwtUserClaims claims = jwtService.extractClaims("id-token");
+
+        assertThat(claims.getSub()).isEqualTo("subject-123");
+        assertThat(claims.getPreferredUsername()).isEqualTo("testuser");
+        assertThat(claims.getEmail()).isEqualTo("test@test.com");
+        assertThat(claims.getGivenName()).isEqualTo("Test");
+        assertThat(claims.getFamilyName()).isEqualTo("User");
+    }
+
+    @Test
+    void extractClaims_shouldReturnNullFields_whenOptionalClaimsAreMissing() {
+        Jwt jwt = new Jwt(
+                "id-token",
+                Instant.now(),
+                Instant.now().plusSeconds(300),
+                Map.of("alg", "none"),
+                Map.of("sub", "subject-123")
+        );
+
+        when(jwtDecoder.decode("id-token")).thenReturn(jwt);
+
+        JwtUserClaims claims = jwtService.extractClaims("id-token");
+
+        assertThat(claims.getSub()).isEqualTo("subject-123");
+        assertThat(claims.getPreferredUsername()).isNull();
+        assertThat(claims.getEmail()).isNull();
+        assertThat(claims.getGivenName()).isNull();
+        assertThat(claims.getFamilyName()).isNull();
+    }
+}
+```
+
+## 2. Add null guard improvement in JwtService
+
+Recommended:
+
+```java
+public JwtUserClaims extractClaims(String token) {
+    if (token == null || token.isBlank()) {
+        throw new TechnicalException("JWT token must not be blank");
+    }
+
+    Jwt jwt = jwtDecoder.decode(token);
+    ...
+}
+```
+
+Then add test:
+
+```java
+@Test
+void extractClaims_shouldThrowException_whenTokenBlank() {
+    assertThatThrownBy(() -> jwtService.extractClaims(" "))
+            .isInstanceOf(TechnicalException.class)
+            .hasMessage("JWT token must not be blank");
+}
+```
+
+## 3. OidcTokenServiceTest with MockWebServer
+
+Add test dependency if needed:
+
+```xml
+<dependency>
+    <groupId>com.squareup.okhttp3</groupId>
+    <artifactId>mockwebserver</artifactId>
+    <scope>test</scope>
+</dependency>
+```
+
+Test:
 
 ```java
 package com.bnpp.pf.arthur.core.service;
 
 import com.bnpp.pf.arthur.core.exception.TechnicalException;
-import com.bnpp.pf.arthur.core.model.HandoffExchangeResponse;
-import com.bnpp.pf.arthur.core.model.LoginHandoff;
-import com.bnpp.pf.arthur.core.model.UserSession;
+import com.bnpp.pf.arthur.core.model.AppConfigResponse;
+import com.bnpp.pf.arthur.core.model.AuthTransaction;
+import okhttp3.mockwebserver.MockResponse;
+import okhttp3.mockwebserver.MockWebServer;
+import okhttp3.mockwebserver.RecordedRequest;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.web.reactive.function.client.WebClient;
 
-import java.time.Instant;
-import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.*;
 
-@ExtendWith(MockitoExtension.class)
-class HandoffServiceTest {
+class OidcTokenServiceTest {
 
-    @Mock
-    private RedisLoginHandoffService redisLoginHandoffService;
+    private MockWebServer mockWebServer;
+    private OidcTokenService oidcTokenService;
 
-    @Mock
-    private RedisSessionService redisSessionService;
+    @BeforeEach
+    void setUp() throws Exception {
+        mockWebServer = new MockWebServer();
+        mockWebServer.start();
 
-    @InjectMocks
-    private HandoffService handoffService;
+        WebClient webClient = WebClient.builder().build();
+        oidcTokenService = new OidcTokenService(webClient);
+    }
 
-    @Test
-    void exchange_shouldReturnResponseAndDeleteHandoff_whenCodeIsValid() {
-        LoginHandoff handoff = validHandoff();
-        UserSession session = validSession();
-
-        when(redisLoginHandoffService.findByCode("code-123"))
-                .thenReturn(handoff);
-        when(redisSessionService.findBySessionId("session-123"))
-                .thenReturn(session);
-
-        HandoffExchangeResponse response = handoffService.exchange("code-123");
-
-        assertThat(response.getUserId()).isEqualTo("testuser");
-        assertThat(response.getUsername()).isEqualTo("testuser");
-        assertThat(response.getEmail()).isEqualTo("test@test.com");
-        assertThat(response.getRoles()).containsExactly("SELLER");
-        assertThat(response.getAppId()).isEqualTo("B2BOOST_BE");
-        assertThat(response.getSelectedSalesPointId()).isEqualTo("SP001");
-        assertThat(response.getSelectedOrgUnitId()).isEqualTo("ORG001");
-
-        verify(redisLoginHandoffService).delete("code-123");
+    @AfterEach
+    void tearDown() throws Exception {
+        mockWebServer.shutdown();
     }
 
     @Test
-    void exchange_shouldThrowException_whenHandoffCodeIsInvalid() {
-        when(redisLoginHandoffService.findByCode("invalid-code"))
-                .thenReturn(null);
+    void exchangeToken_shouldReturnTokenResponse() throws Exception {
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""
+                        {
+                          "access_token": "access-token",
+                          "id_token": "id-token",
+                          "refresh_token": "refresh-token"
+                        }
+                        """));
 
-        assertThatThrownBy(() -> handoffService.exchange("invalid-code"))
+        String tokenUrl = mockWebServer.url("/token").toString();
+
+        Map<String, Object> response =
+                oidcTokenService.exchangeToken(
+                        "auth-code",
+                        tokenUrl,
+                        validAppConfig(),
+                        authTransaction()
+                );
+
+        assertThat(response.get("access_token")).isEqualTo("access-token");
+        assertThat(response.get("id_token")).isEqualTo("id-token");
+        assertThat(response.get("refresh_token")).isEqualTo("refresh-token");
+
+        RecordedRequest request = mockWebServer.takeRequest();
+
+        assertThat(request.getMethod()).isEqualTo("POST");
+        assertThat(request.getPath()).isEqualTo("/token");
+
+        String body = request.getBody().readUtf8();
+        assertThat(body).contains("grant_type=authorization_code");
+        assertThat(body).contains("client_id=client-id");
+        assertThat(body).contains("client_secret=client-secret");
+        assertThat(body).contains("code=auth-code");
+        assertThat(body).contains("redirect_uri=http%3A%2F%2Flocalhost%3A8080%2Farthur-core%2Fauth%2Fcallback");
+        assertThat(body).contains("code_verifier=verifier-123");
+    }
+
+    @Test
+    void exchangeToken_shouldThrowTechnicalException_whenTokenEndpointReturnsError() {
+        mockWebServer.enqueue(new MockResponse()
+                .setResponseCode(400)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""
+                        {
+                          "error": "invalid_grant"
+                        }
+                        """));
+
+        String tokenUrl = mockWebServer.url("/token").toString();
+
+        assertThatThrownBy(() ->
+                oidcTokenService.exchangeToken(
+                        "auth-code",
+                        tokenUrl,
+                        validAppConfig(),
+                        authTransaction()
+                ))
                 .isInstanceOf(TechnicalException.class)
-                .hasMessage("Invalid or expired handoff code");
-
-        verify(redisLoginHandoffService, never()).delete("invalid-code");
-        verifyNoInteractions(redisSessionService);
+                .hasMessageContaining("Token exchange failed");
     }
 
-    @Test
-    void exchange_shouldThrowException_whenHandoffAlreadyUsed() {
-        LoginHandoff handoff = validHandoff();
-        handoff.setUsed(true);
-
-        when(redisLoginHandoffService.findByCode("code-123"))
-                .thenReturn(handoff);
-
-        assertThatThrownBy(() -> handoffService.exchange("code-123"))
-                .isInstanceOf(TechnicalException.class)
-                .hasMessage("Handoff code already used");
-
-        verify(redisLoginHandoffService, never()).delete("code-123");
-        verifyNoInteractions(redisSessionService);
+    private AppConfigResponse validAppConfig() {
+        AppConfigResponse appConfig = new AppConfigResponse();
+        appConfig.setClientId("client-id");
+        appConfig.setClientSecret("client-secret");
+        return appConfig;
     }
 
-    @Test
-    void exchange_shouldDeleteAndThrowException_whenHandoffExpired() {
-        LoginHandoff handoff = validHandoff();
-        handoff.setExpiresAt(Instant.now().minusSeconds(10));
-
-        when(redisLoginHandoffService.findByCode("code-123"))
-                .thenReturn(handoff);
-
-        assertThatThrownBy(() -> handoffService.exchange("code-123"))
-                .isInstanceOf(TechnicalException.class)
-                .hasMessage("Handoff code expired");
-
-        verify(redisLoginHandoffService).delete("code-123");
-        verifyNoInteractions(redisSessionService);
-    }
-
-    @Test
-    void exchange_shouldDeleteAndThrowException_whenSessionNotFound() {
-        LoginHandoff handoff = validHandoff();
-
-        when(redisLoginHandoffService.findByCode("code-123"))
-                .thenReturn(handoff);
-        when(redisSessionService.findBySessionId("session-123"))
-                .thenReturn(null);
-
-        assertThatThrownBy(() -> handoffService.exchange("code-123"))
-                .isInstanceOf(TechnicalException.class)
-                .hasMessage("Session not found for handoff code");
-
-        verify(redisLoginHandoffService).delete("code-123");
-    }
-
-    @Test
-    void exchange_shouldAllowHandoff_whenExpiresAtIsNull() {
-        LoginHandoff handoff = validHandoff();
-        handoff.setExpiresAt(null);
-
-        UserSession session = validSession();
-
-        when(redisLoginHandoffService.findByCode("code-123"))
-                .thenReturn(handoff);
-        when(redisSessionService.findBySessionId("session-123"))
-                .thenReturn(session);
-
-        HandoffExchangeResponse response = handoffService.exchange("code-123");
-
-        assertThat(response.getUserId()).isEqualTo("testuser");
-        verify(redisLoginHandoffService).delete("code-123");
-    }
-
-    private LoginHandoff validHandoff() {
-        LoginHandoff handoff = new LoginHandoff();
-        handoff.setCode("code-123");
-        handoff.setSessionId("session-123");
-        handoff.setAppId("B2BOOST_BE");
-        handoff.setRedirectUrl("http://localhost:8081/post-login");
-        handoff.setCreatedAt(Instant.now());
-        handoff.setExpiresAt(Instant.now().plusSeconds(60));
-        handoff.setUsed(false);
-        return handoff;
-    }
-
-    private UserSession validSession() {
-        UserSession session = new UserSession();
-        session.setSessionId("session-123");
-        session.setUserId("testuser");
-        session.setUsername("testuser");
-        session.setEmail("test@test.com");
-        session.setRoles(List.of("SELLER"));
-        session.setAppId("B2BOOST_BE");
-        session.setSelectedSalesPointId("SP001");
-        session.setSelectedOrgUnitId("ORG001");
-        return session;
+    private AuthTransaction authTransaction() {
+        AuthTransaction tx = new AuthTransaction();
+        tx.setRedirectUri("http://localhost:8080/arthur-core/auth/callback");
+        tx.setCodeVerifier("verifier-123");
+        return tx;
     }
 }
 ```
 
-This covers:
-
-```text
-valid exchange
-invalid code
-already used code
-expired code
-missing session
-null expiresAt
-one-time delete behavior
-```
+This gives good Sonar coverage without ugly `WebClient` chain mocking.
