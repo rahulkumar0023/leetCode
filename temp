@@ -1,40 +1,27 @@
-It’s failing because `IllegalArgumentException` is not being converted to `400`; your exception handler is returning `500`.
-
-Add this to Arthur Core `GlobalExceptionHandler`:
-
-```java
-@ExceptionHandler(IllegalArgumentException.class)
-public ResponseEntity<Map<String, Object>> handleIllegalArgumentException(IllegalArgumentException ex) {
-    return ResponseEntity.badRequest()
-            .body(Map.of(
-                    "error", "BAD_REQUEST",
-                    "message", ex.getMessage()
-            ));
-}
-```
-
-And make sure your test has:
-
-```java
-@Import(GlobalExceptionHandler.class)
-```
-
-Full top:
-
-```java
-@WebMvcTest(AuthController.class)
-@AutoConfigureMockMvc(addFilters = false)
-@Import(GlobalExceptionHandler.class)
-class AuthControllerTest {
-```
-
-Then this should pass:
+That message is correct. For this test, assert the message too:
 
 ```java
 @Test
 void startAuthentication_shouldThrowBadRequest_whenAppIdMissing() throws Exception {
     mockMvc.perform(get("/auth/start"))
             .andExpect(status().isBadRequest())
-            .andExpect(jsonPath("$.error").value("BAD_REQUEST"));
+            .andExpect(jsonPath("$.message")
+                    .value("APP_ID header or appId query param is empty"));
 }
+```
+
+Your `GlobalExceptionHandler` must include:
+
+```java
+@ExceptionHandler(IllegalArgumentException.class)
+public ResponseEntity<Map<String, Object>> handleIllegalArgumentException(IllegalArgumentException ex) {
+    return ResponseEntity.badRequest()
+            .body(Map.of("message", ex.getMessage()));
+}
+```
+
+If your handler also returns `error`, then add:
+
+```java
+.andExpect(jsonPath("$.error").value("BAD_REQUEST"))
 ```
