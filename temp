@@ -1,134 +1,215 @@
-Yes, absolutely. From a production and security perspective, you should never assume Ping/Keycloak/OIDC will always return all three tokens.
-
-Right now you have something like:
+Yes. After adding `validateTokenResponse(...)` / `getRequiredToken(...)`, add these tests in `AuthServiceTest`.
 
 ```java
-String accessToken = (String) tokenResponse.get("access_token");
-String idToken = (String) tokenResponse.get("id_token");
-String refreshToken = (String) tokenResponse.get("refresh_token");
-```
+@Test
+void handleCallback_shouldThrowTechnicalException_whenTokenResponseIsNull() {
+    AuthTransaction tx = authTransaction();
 
-Then immediately:
+    when(redisAuthTransactionService.findByState("state-123")).thenReturn(tx);
+    when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(validAppConfig());
+    when(oidcDiscoveryClient.loadMetadata("issuer-uri")).thenReturn(metadata());
 
-```java
-JwtUserClaims claims = jwtService.extractClaims(idToken);
-```
-
-If `id_token` is missing, you'll get a NullPointerException or JWT parsing exception later, which makes debugging harder.
-
----
-
-## Recommended approach
-
-Add a helper:
-
-```java
-private String getRequiredToken(
-        Map<String, Object> tokenResponse,
-        String tokenName) {
-
-    Object value = tokenResponse.get(tokenName);
-
-    if (!(value instanceof String token) || token.isBlank()) {
-        throw new TechnicalException(
-                "Missing token in response: " + tokenName);
-    }
-
-    return token;
+    // mock exchangeToken result as null if you can
+    // If exchangeToken is private and uses WebClient, this may be hard to unit test directly.
 }
 ```
 
-Then:
+Because `exchangeToken(...)` is private and uses chained `WebClient`, the cleanest option is to extract token exchange into its own service.
 
-```java
-String accessToken = getRequiredToken(tokenResponse, "access_token");
-String idToken = getRequiredToken(tokenResponse, "id_token");
-String refreshToken = getRequiredToken(tokenResponse, "refresh_token");
+## Recommended small refactor
+
+Create:
+
+```text
+service/OidcTokenService.java
 ```
 
----
-
-## Even better
-
-Validate the whole token response once:
-
 ```java
-private void validateTokenResponse(Map<String, Object> tokenResponse) {
+@Service
+@RequiredArgsConstructor
+public class OidcTokenService {
 
-    if (tokenResponse == null) {
-        throw new TechnicalException("Token response is null");
-    }
+    private final WebClient webClient;
 
-    validateRequiredField(tokenResponse, "access_token");
-    validateRequiredField(tokenResponse, "id_token");
-    validateRequiredField(tokenResponse, "refresh_token");
-}
-
-private void validateRequiredField(
-        Map<String, Object> tokenResponse,
-        String fieldName) {
-
-    Object value = tokenResponse.get(fieldName);
-
-    if (!(value instanceof String token) || token.isBlank()) {
-        throw new TechnicalException(
-                "Missing required token field: " + fieldName);
+    public Map<String, Object> exchangeToken(
+            String code,
+            String tokenUrl,
+            AppConfigResponse appConfig,
+            AuthTransaction tx
+    ) {
+        return webClient.post()
+                .uri(tokenUrl)
+                .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+                .body(BodyInserters.fromFormData("grant_type", "authorization_code")
+                        .with("client_id", appConfig.getClientId())
+                        .with("client_secret", appConfig.getClientSecret())
+                        .with("code", code)
+                        .with("redirect_uri", tx.getRedirectUri())
+                        .with("code_verifier", tx.getCodeVerifier()))
+                .retrieve()
+                .onStatus(HttpStatusCode::isError, clientResponse ->
+                        clientResponse.bodyToMono(String.class)
+                                .flatMap(body -> Mono.error(
+                                        new TechnicalException("Token exchange failed: " + body))))
+                .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
+                .block();
     }
 }
 ```
 
-Usage:
+Then inject it into `AuthService`:
+
+```java
+private final OidcTokenService oidcTokenService;
+```
+
+Replace:
+
+```java
+Map<String, Object> tokenResponse = exchangeToken(code, tokenUrl, appConfig, tx);
+```
+
+with:
 
 ```java
 Map<String, Object> tokenResponse =
-        exchangeToken(code, tokenUrl, appConfig, tx);
-
-validateTokenResponse(tokenResponse);
+        oidcTokenService.exchangeToken(code, tokenUrl, appConfig, tx);
 ```
 
-Then safely read the values.
+Now tests become easy.
 
----
-
-## One more improvement
-
-Currently you have:
+## AuthService tests for missing tokens
 
 ```java
-catch (Exception e) {
-    throw new TechnicalException(
-            "Unable to load user from partner repository");
-}
+@Mock
+private OidcTokenService oidcTokenService;
 ```
 
-This is too broad.
+Then add this dependency in the constructor setup.
 
-If `exchangeToken()` fails, or JWT parsing fails, or Redis fails, you'll still get:
-
-> Unable to load user from partner repository
-
-which is misleading.
-
-I'd change it to:
+### 1. Null token response
 
 ```java
-catch (TechnicalException e) {
-    throw e;
-}
-catch (Exception e) {
-    log.error("Authentication callback failed", e);
-    throw new TechnicalException("Authentication callback failed");
+@Test
+void handleCallback_shouldThrowTechnicalException_whenTokenResponseIsNull() {
+    when(redisAuthTransactionService.findByState("state-123"))
+            .thenReturn(authTransaction());
+
+    when(partnerRepositoryClient.getApp("B2BOOST_BE"))
+            .thenReturn(validAppConfig());
+
+    when(oidcDiscoveryClient.loadMetadata("issuer-uri"))
+            .thenReturn(metadata());
+
+    when(oidcTokenService.exchangeToken(
+            "auth-code",
+            "token-uri",
+            validAppConfig(),
+            authTransaction()
+    )).thenReturn(null);
 }
 ```
 
-This preserves your specific errors like:
+But since you don’t want `eq(...)`, don’t match complex objects. Use:
 
-* Missing access_token
-* Missing id_token
-* Invalid state
-* App config not found
+```java
+when(oidcTokenService.exchangeToken(
+        anyString(),
+        anyString(),
+        any(AppConfigResponse.class),
+        any(AuthTransaction.class)
+)).thenReturn(null);
+```
 
-instead of masking everything behind one generic message.
+Full test:
 
-These changes will make Fortify, Sonar, and operational debugging much happier.
+```java
+@Test
+void handleCallback_shouldThrowTechnicalException_whenTokenResponseIsNull() {
+    when(redisAuthTransactionService.findByState("state-123"))
+            .thenReturn(authTransaction());
+    when(partnerRepositoryClient.getApp("B2BOOST_BE"))
+            .thenReturn(validAppConfig());
+    when(oidcDiscoveryClient.loadMetadata("issuer-uri"))
+            .thenReturn(metadata());
+    when(oidcTokenService.exchangeToken(
+            anyString(),
+            anyString(),
+            any(AppConfigResponse.class),
+            any(AuthTransaction.class)
+    )).thenReturn(null);
 
+    assertThatThrownBy(() -> authService.handleCallback("auth-code", "state-123"))
+            .isInstanceOf(TechnicalException.class)
+            .hasMessage("Token response is null");
+}
+```
+
+### 2. Missing access token
+
+```java
+@Test
+void handleCallback_shouldThrowTechnicalException_whenAccessTokenMissing() {
+    mockCallbackUntilTokenExchange(Map.of(
+            "id_token", "id-token",
+            "refresh_token", "refresh-token"
+    ));
+
+    assertThatThrownBy(() -> authService.handleCallback("auth-code", "state-123"))
+            .isInstanceOf(TechnicalException.class)
+            .hasMessage("Missing required token field: access_token");
+}
+```
+
+### 3. Missing id token
+
+```java
+@Test
+void handleCallback_shouldThrowTechnicalException_whenIdTokenMissing() {
+    mockCallbackUntilTokenExchange(Map.of(
+            "access_token", "access-token",
+            "refresh_token", "refresh-token"
+    ));
+
+    assertThatThrownBy(() -> authService.handleCallback("auth-code", "state-123"))
+            .isInstanceOf(TechnicalException.class)
+            .hasMessage("Missing required token field: id_token");
+}
+```
+
+### 4. Missing refresh token
+
+```java
+@Test
+void handleCallback_shouldThrowTechnicalException_whenRefreshTokenMissing() {
+    mockCallbackUntilTokenExchange(Map.of(
+            "access_token", "access-token",
+            "id_token", "id-token"
+    ));
+
+    assertThatThrownBy(() -> authService.handleCallback("auth-code", "state-123"))
+            .isInstanceOf(TechnicalException.class)
+            .hasMessage("Missing required token field: refresh_token");
+}
+```
+
+Helper:
+
+```java
+private void mockCallbackUntilTokenExchange(Map<String, Object> tokenResponse) {
+    when(redisAuthTransactionService.findByState("state-123"))
+            .thenReturn(authTransaction());
+    when(partnerRepositoryClient.getApp("B2BOOST_BE"))
+            .thenReturn(validAppConfig());
+    when(oidcDiscoveryClient.loadMetadata("issuer-uri"))
+            .thenReturn(metadata());
+    when(oidcTokenService.exchangeToken(
+            anyString(),
+            anyString(),
+            any(AppConfigResponse.class),
+            any(AuthTransaction.class)
+    )).thenReturn(tokenResponse);
+}
+```
+
+Use this if you refactor token exchange out. That will give clean coverage and avoid painful `WebClient` chain mocking.
