@@ -1,157 +1,71 @@
-For `AuthController`, add `@WebMvcTest` coverage for these 4 flows:
+The remaining 2 failures are clear from the screenshot:
 
-```text
-/auth/start with APP_ID header
-/auth/start with appId query param
-/auth/start duplicate request reuse
-/auth/callback sets cookie + redirects
-/auth/handoff/exchange returns response
+## 1. Missing `APP_ID` test
+
+Your controller throws:
+
+```java
+IllegalArgumentException
 ```
 
-Use this as the base:
+but in `@WebMvcTest`, if your `GlobalExceptionHandler` is not loaded, the test fails with `ServletException`.
+
+Add this import on the test:
+
+```java
+@Import(GlobalExceptionHandler.class)
+```
+
+So:
 
 ```java
 @WebMvcTest(AuthController.class)
+@AutoConfigureMockMvc(addFilters = false)
+@Import(GlobalExceptionHandler.class)
 class AuthControllerTest {
-
-    @Autowired
-    private MockMvc mockMvc;
-
-    @MockitoBean
-    private AuthService authService;
-
-    @MockitoBean
-    private HandoffService handoffService;
-
-    @MockitoBean
-    private PartnerRepositoryClient partnerRepositoryClient;
-
-    @Test
-    void startAuthentication_shouldRedirect_whenAppIdHeaderPresent() throws Exception {
-        when(authService.startAuthentication("B2BOOST_BE"))
-                .thenReturn("https://ping.example.com/auth");
-
-        mockMvc.perform(get("/auth/start")
-                        .header("APP_ID", "B2BOOST_BE"))
-                .andExpect(status().isFound())
-                .andExpect(header().string("Location", "https://ping.example.com/auth"));
-    }
-
-    @Test
-    void startAuthentication_shouldRedirect_whenAppIdQueryParamPresent() throws Exception {
-        when(authService.startAuthentication("B2BOOST_BE"))
-                .thenReturn("https://ping.example.com/auth");
-
-        mockMvc.perform(get("/auth/start")
-                        .param("appId", "B2BOOST_BE"))
-                .andExpect(status().isFound())
-                .andExpect(header().string("Location", "https://ping.example.com/auth"));
-    }
-
-    @Test
-    void startAuthentication_shouldThrowBadRequest_whenAppIdMissing() throws Exception {
-        mockMvc.perform(get("/auth/start"))
-                .andExpect(status().isBadRequest());
-    }
-
-    @Test
-    void startAuthentication_shouldReusePendingRedirect_whenDuplicateWithinTenSeconds() throws Exception {
-        MockHttpSession session = new MockHttpSession();
-        session.setAttribute("AUTH_PENDING_REDIRECT", "https://ping.example.com/auth");
-        session.setAttribute("AUTH_PENDING_TIME", System.currentTimeMillis());
-
-        mockMvc.perform(get("/auth/start")
-                        .session(session)
-                        .header("APP_ID", "B2BOOST_BE"))
-                .andExpect(status().isFound())
-                .andExpect(header().string("Location", "https://ping.example.com/auth"));
-
-        verifyNoInteractions(authService);
-    }
-
-    @Test
-    void callback_shouldSetCookieAndRedirectToSalesPoints() throws Exception {
-        AuthResult authResult = new AuthResult("session-123", "B2BOOST_BE");
-
-        when(authService.handleCallback("auth-code", "state-123"))
-                .thenReturn(authResult);
-
-        mockMvc.perform(get("/auth/callback")
-                        .param("code", "auth-code")
-                        .param("state", "state-123"))
-                .andExpect(status().isFound())
-                .andExpect(header().string(
-                        "Location",
-                        "/arthur-core/sales-points?appId=B2BOOST_BE"
-                ))
-                .andExpect(cookie().value("ARTHUR_SESSION", "session-123"))
-                .andExpect(cookie().httpOnly("ARTHUR_SESSION", true))
-                .andExpect(cookie().secure("ARTHUR_SESSION", true))
-                .andExpect(cookie().path("ARTHUR_SESSION", "/"))
-                .andExpect(cookie().maxAge("ARTHUR_SESSION", 3600));
-    }
-
-    @Test
-    void exchange_shouldReturnHandoffExchangeResponse() throws Exception {
-        HandoffExchangeResponse response = new HandoffExchangeResponse();
-        response.setUserId("testuser");
-        response.setUsername("testuser");
-        response.setEmail("test@test.com");
-        response.setRoles(List.of("SELLER"));
-        response.setAppId("B2BOOST_BE");
-        response.setSelectedSalesPointId("SP001");
-        response.setSelectedOrgUnitId("ORG001");
-
-        when(handoffService.exchange("code-123")).thenReturn(response);
-
-        mockMvc.perform(post("/auth/handoff/exchange")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("""
-                                {
-                                  "code": "code-123"
-                                }
-                                """))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.userId").value("testuser"))
-                .andExpect(jsonPath("$.username").value("testuser"))
-                .andExpect(jsonPath("$.email").value("test@test.com"))
-                .andExpect(jsonPath("$.roles[0]").value("SELLER"))
-                .andExpect(jsonPath("$.appId").value("B2BOOST_BE"))
-                .andExpect(jsonPath("$.selectedSalesPointId").value("SP001"))
-                .andExpect(jsonPath("$.selectedOrgUnitId").value("ORG001"));
-    }
-}
 ```
 
-Imports:
+Import:
 
 ```java
-import com.bnpp.pf.arthur.core.client.PartnerRepositoryClient;
-import com.bnpp.pf.arthur.core.model.AuthResult;
-import com.bnpp.pf.arthur.core.model.HandoffExchangeResponse;
-import com.bnpp.pf.arthur.core.service.AuthService;
-import com.bnpp.pf.arthur.core.service.HandoffService;
-import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
-import org.springframework.http.MediaType;
-import org.springframework.mock.web.MockHttpSession;
-import org.springframework.test.context.bean.override.mockito.MockitoBean;
-import org.springframework.test.web.servlet.MockMvc;
-
-import java.util.List;
-
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.when;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
+import com.bnpp.pf.arthur.core.exception.GlobalExceptionHandler;
+import org.springframework.context.annotation.Import;
 ```
 
-If your JSON is snake_case, change assertions to:
+## 2. Callback test
+
+It says:
+
+```text
+Exception named "APP_ID header or appId query param is empty"
+```
+
+That means the callback request is somehow hitting `/auth/start`, not `/auth/callback`.
+
+Check your test method. It should be exactly:
 
 ```java
-jsonPath("$.user_id")
-jsonPath("$.selected_sales_point_id")
-jsonPath("$.selected_org_unit_id")
+mockMvc.perform(get("/auth/callback")
+        .param("code", "auth-code")
+        .param("state", "state-123"))
 ```
+
+not:
+
+```java
+get("/auth/start")
+```
+
+Also your controller mapping shows:
+
+```java
+@GetMapping("/callback")
+```
+
+so full path is:
+
+```text
+/auth/callback
+```
+
+After these two changes, rerun the controller test.
