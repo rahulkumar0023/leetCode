@@ -1,67 +1,40 @@
-You have 2 separate issues.
+It’s failing because `IllegalArgumentException` is not being converted to `400`; your exception handler is returning `500`.
 
-## 1. Callback test: `authResult` is null
-
-Your mock is probably not matching because the controller calls:
-
-```java
-authService.handleCallback(code, state)
-```
-
-Use this, no `eq()`:
-
-```java
-when(authService.handleCallback(anyString(), anyString()))
-        .thenReturn(new AuthResult("session-123", "B2BOOST_BE"));
-```
-
-Then verify:
-
-```java
-verify(authService).handleCallback("auth-code", "state-123");
-```
-
-## 2. Exchange test: JSON is snake_case
-
-Actual response:
-
-```json
-{
-  "user_id": "testuser",
-  "selected_sales_point_id": "SP001"
-}
-```
-
-So change assertions from camelCase:
-
-```java
-jsonPath("$.userId")
-```
-
-to snake_case:
-
-```java
-.andExpect(jsonPath("$.user_id").value("testuser"))
-.andExpect(jsonPath("$.username").value("testuser"))
-.andExpect(jsonPath("$.email").value("test@test.com"))
-.andExpect(jsonPath("$.roles[0]").value("SELLER"))
-.andExpect(jsonPath("$.app_id").value("B2BOOST_BE"))
-.andExpect(jsonPath("$.selected_sales_point_id").value("SP001"))
-.andExpect(jsonPath("$.selected_org_unit_id").value("ORG001"));
-```
-
-For missing appId, because your global handler returns 500 for now, either update the expectation to 500 or better add this in `GlobalExceptionHandler`:
+Add this to Arthur Core `GlobalExceptionHandler`:
 
 ```java
 @ExceptionHandler(IllegalArgumentException.class)
-@ResponseStatus(HttpStatus.BAD_REQUEST)
-public Map<String, String> handleIllegalArgumentException(IllegalArgumentException ex) {
-    return Map.of("message", ex.getMessage());
+public ResponseEntity<Map<String, Object>> handleIllegalArgumentException(IllegalArgumentException ex) {
+    return ResponseEntity.badRequest()
+            .body(Map.of(
+                    "error", "BAD_REQUEST",
+                    "message", ex.getMessage()
+            ));
 }
 ```
 
-Then the test can stay:
+And make sure your test has:
 
 ```java
-.andExpect(status().isBadRequest());
+@Import(GlobalExceptionHandler.class)
+```
+
+Full top:
+
+```java
+@WebMvcTest(AuthController.class)
+@AutoConfigureMockMvc(addFilters = false)
+@Import(GlobalExceptionHandler.class)
+class AuthControllerTest {
+```
+
+Then this should pass:
+
+```java
+@Test
+void startAuthentication_shouldThrowBadRequest_whenAppIdMissing() throws Exception {
+    mockMvc.perform(get("/auth/start"))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.error").value("BAD_REQUEST"));
+}
 ```
