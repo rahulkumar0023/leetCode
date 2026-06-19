@@ -1,87 +1,15 @@
-Add tests for:
+For these two services, add separate unit tests:
 
 ```text
-PkceService
-RedisAuthTransactionService
+RedisLoginHandoffServiceTest
+RedisSessionServiceTest
 ```
 
-## 1. `PkceServiceTest`
+## 1. RedisLoginHandoffServiceTest
 
 ```java
-package com.bnpp.pf.arthur.core.service;
-
-import com.bnpp.pf.arthur.core.exception.TechnicalException;
-import org.junit.jupiter.api.Test;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
-class PkceServiceTest {
-
-    private final PkceService pkceService = new PkceService();
-
-    @Test
-    void generateCodeChallenge_shouldReturnExpectedSha256Base64UrlValue() {
-        String result = pkceService.generateCodeChallenge("verifier-123");
-
-        assertThat(result).isNotBlank();
-        assertThat(result).doesNotContain("=");
-        assertThat(result).doesNotContain("+");
-        assertThat(result).doesNotContain("/");
-    }
-
-    @Test
-    void generateCodeChallenge_shouldReturnSameValueForSameVerifier() {
-        String first = pkceService.generateCodeChallenge("verifier-123");
-        String second = pkceService.generateCodeChallenge("verifier-123");
-
-        assertThat(first).isEqualTo(second);
-    }
-
-    @Test
-    void generateCodeChallenge_shouldThrowException_whenVerifierIsNull() {
-        assertThatThrownBy(() -> pkceService.generateCodeChallenge(null))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("codeVerifier must not be blank");
-    }
-
-    @Test
-    void generateCodeChallenge_shouldThrowException_whenVerifierIsBlank() {
-        assertThatThrownBy(() -> pkceService.generateCodeChallenge(" "))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("codeVerifier must not be blank");
-    }
-}
-```
-
-No need to test `NoSuchAlgorithmException` branch. `SHA-256` is guaranteed by the JDK, so that branch is practically unreachable. Sonar may still mark it partially uncovered; acceptable.
-
----
-
-## 2. `RedisAuthTransactionServiceTest`
-
-```java
-package com.bnpp.pf.arthur.core.service;
-
-import com.bnpp.pf.arthur.core.exception.TechnicalException;
-import com.bnpp.pf.arthur.core.model.AuthTransaction;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.data.redis.core.ValueOperations;
-
-import java.time.Duration;
-import java.util.Map;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.*;
-
 @ExtendWith(MockitoExtension.class)
-class RedisAuthTransactionServiceTest {
+class RedisLoginHandoffServiceTest {
 
     @Mock
     private RedisTemplate<String, Object> redisTemplate;
@@ -91,121 +19,226 @@ class RedisAuthTransactionServiceTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    @Test
-    void save_shouldStoreAuthTransactionWithTtl() {
-        RedisAuthTransactionService service =
-                new RedisAuthTransactionService(redisTemplate, objectMapper);
+    private RedisLoginHandoffService service;
 
-        AuthTransaction tx = authTransaction();
+    @BeforeEach
+    void setUp() {
+        ArthurSecurityProperties properties = new ArthurSecurityProperties();
 
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-
-        service.save(tx);
-
-        verify(valueOperations).set(
-                "auth:state:state-123",
-                tx,
-                Duration.ofMinutes(5)
+        service = new RedisLoginHandoffService(
+                redisTemplate,
+                objectMapper,
+                properties
         );
     }
 
     @Test
-    void findByState_shouldReturnNull_whenValueIsNull() {
-        RedisAuthTransactionService service =
-                new RedisAuthTransactionService(redisTemplate, objectMapper);
+    void save_shouldStoreHandoffWithTtl() {
+        LoginHandoff handoff = handoff();
 
         when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-        when(valueOperations.get("auth:state:state-123")).thenReturn(null);
 
-        AuthTransaction result = service.findByState("state-123");
+        service.save(handoff);
+
+        verify(valueOperations).set(
+                "handoff:code-123",
+                handoff,
+                Duration.ofSeconds(60)
+        );
+    }
+
+    @Test
+    void findByCode_shouldReturnNull_whenValueIsNull() {
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+        when(valueOperations.get("handoff:code-123")).thenReturn(null);
+
+        LoginHandoff result = service.findByCode("code-123");
 
         assertThat(result).isNull();
     }
 
     @Test
-    void findByState_shouldReturnAuthTransaction_whenValueIsAuthTransaction() {
-        RedisAuthTransactionService service =
-                new RedisAuthTransactionService(redisTemplate, objectMapper);
-
-        AuthTransaction tx = authTransaction();
+    void findByCode_shouldReturnHandoff_whenValueIsLoginHandoff() {
+        LoginHandoff handoff = handoff();
 
         when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-        when(valueOperations.get("auth:state:state-123")).thenReturn(tx);
+        when(valueOperations.get("handoff:code-123")).thenReturn(handoff);
 
-        AuthTransaction result = service.findByState("state-123");
+        LoginHandoff result = service.findByCode("code-123");
 
-        assertThat(result).isSameAs(tx);
+        assertThat(result).isSameAs(handoff);
     }
 
     @Test
-    void findByState_shouldConvertMapToAuthTransaction_whenValueIsMap() {
-        RedisAuthTransactionService service =
-                new RedisAuthTransactionService(redisTemplate, objectMapper);
-
+    void findByCode_shouldConvertMapToLoginHandoff() {
         Map<String, Object> value = Map.of(
-                "state", "state-123",
-                "nonce", "nonce-123",
-                "codeVerifier", "verifier-123",
+                "code", "code-123",
+                "sessionId", "session-123",
                 "appId", "B2BOOST_BE",
-                "redirectUri", "http://localhost/callback"
+                "redirectUrl", "http://localhost/post-login",
+                "used", false
         );
 
         when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-        when(valueOperations.get("auth:state:state-123")).thenReturn(value);
+        when(valueOperations.get("handoff:code-123")).thenReturn(value);
 
-        AuthTransaction result = service.findByState("state-123");
+        LoginHandoff result = service.findByCode("code-123");
 
-        assertThat(result.getState()).isEqualTo("state-123");
-        assertThat(result.getNonce()).isEqualTo("nonce-123");
-        assertThat(result.getCodeVerifier()).isEqualTo("verifier-123");
+        assertThat(result.getCode()).isEqualTo("code-123");
+        assertThat(result.getSessionId()).isEqualTo("session-123");
         assertThat(result.getAppId()).isEqualTo("B2BOOST_BE");
-        assertThat(result.getRedirectUri()).isEqualTo("http://localhost/callback");
+        assertThat(result.getRedirectUrl()).isEqualTo("http://localhost/post-login");
+        assertThat(result.isUsed()).isFalse();
     }
 
     @Test
-    void findByState_shouldThrowException_whenValueTypeIsUnexpected() {
-        RedisAuthTransactionService service =
-                new RedisAuthTransactionService(redisTemplate, objectMapper);
+    void delete_shouldDeleteHandoffCode() {
+        service.delete("code-123");
 
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-        when(valueOperations.get("auth:state:state-123")).thenReturn("unexpected");
-
-        assertThatThrownBy(() -> service.findByState("state-123"))
-                .isInstanceOf(TechnicalException.class)
-                .hasMessageContaining("Unexpected auth transaction type");
+        verify(redisTemplate).delete("handoff:code-123");
     }
 
-    @Test
-    void delete_shouldDeleteAuthTransactionByState() {
-        RedisAuthTransactionService service =
-                new RedisAuthTransactionService(redisTemplate, objectMapper);
-
-        service.delete("state-123");
-
-        verify(redisTemplate).delete("auth:state:state-123");
-    }
-
-    private AuthTransaction authTransaction() {
-        AuthTransaction tx = new AuthTransaction();
-        tx.setState("state-123");
-        tx.setNonce("nonce-123");
-        tx.setCodeVerifier("verifier-123");
-        tx.setAppId("B2BOOST_BE");
-        tx.setRedirectUri("http://localhost/callback");
-        return tx;
+    private LoginHandoff handoff() {
+        LoginHandoff handoff = new LoginHandoff();
+        handoff.setCode("code-123");
+        handoff.setSessionId("session-123");
+        handoff.setAppId("B2BOOST_BE");
+        handoff.setRedirectUrl("http://localhost/post-login");
+        handoff.setExpiresAt(Instant.now().plusSeconds(60));
+        handoff.setUsed(false);
+        return handoff;
     }
 }
 ```
 
-This covers:
+## 2. RedisSessionServiceTest
 
-```text
-Pkce success
-Pkce null/blank
-Redis save
-Redis find null
-Redis find direct object
-Redis find map conversion
-Redis unexpected type
-Redis delete
+```java
+@ExtendWith(MockitoExtension.class)
+class RedisSessionServiceTest {
+
+    @Mock
+    private RedisTemplate<String, Object> redisTemplate;
+
+    @Mock
+    private ValueOperations<String, Object> valueOperations;
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    private RedisSessionService service;
+
+    @BeforeEach
+    void setUp() {
+        ArthurSecurityProperties properties = new ArthurSecurityProperties();
+
+        service = new RedisSessionService(
+                redisTemplate,
+                properties,
+                objectMapper
+        );
+    }
+
+    @Test
+    void save_shouldStoreSessionWithTtl() {
+        UserSession session = session();
+
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+
+        service.save(session);
+
+        verify(valueOperations).set(
+                "session:session-123",
+                session,
+                Duration.ofMinutes(60)
+        );
+    }
+
+    @Test
+    void findBySessionId_shouldReturnNull_whenValueIsNull() {
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+        when(valueOperations.get("session:session-123")).thenReturn(null);
+
+        UserSession result = service.findBySessionId("session-123");
+
+        assertThat(result).isNull();
+    }
+
+    @Test
+    void findBySessionId_shouldReturnSession_whenValueIsUserSession() {
+        UserSession session = session();
+
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+        when(valueOperations.get("session:session-123")).thenReturn(session);
+
+        UserSession result = service.findBySessionId("session-123");
+
+        assertThat(result).isSameAs(session);
+    }
+
+    @Test
+    void findBySessionId_shouldConvertMapToUserSession() {
+        Map<String, Object> value = Map.of(
+                "sessionId", "session-123",
+                "appId", "B2BOOST_BE",
+                "userId", "testuser",
+                "username", "testuser",
+                "selectedSalesPointId", "SP001",
+                "selectedOrgUnitId", "ORG001"
+        );
+
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+        when(valueOperations.get("session:session-123")).thenReturn(value);
+
+        UserSession result = service.findBySessionId("session-123");
+
+        assertThat(result.getSessionId()).isEqualTo("session-123");
+        assertThat(result.getAppId()).isEqualTo("B2BOOST_BE");
+        assertThat(result.getUserId()).isEqualTo("testuser");
+        assertThat(result.getUsername()).isEqualTo("testuser");
+        assertThat(result.getSelectedSalesPointId()).isEqualTo("SP001");
+        assertThat(result.getSelectedOrgUnitId()).isEqualTo("ORG001");
+    }
+
+    @Test
+    void delete_shouldDeleteSession() {
+        service.delete("session-123");
+
+        verify(redisTemplate).delete("session:session-123");
+    }
+
+    private UserSession session() {
+        UserSession session = new UserSession();
+        session.setSessionId("session-123");
+        session.setAppId("B2BOOST_BE");
+        session.setUserId("testuser");
+        session.setUsername("testuser");
+        session.setSelectedSalesPointId("SP001");
+        session.setSelectedOrgUnitId("ORG001");
+        return session;
+    }
+}
+```
+
+Imports needed:
+
+```java
+import com.bnpp.pf.arthur.core.config.ArthurSecurityProperties;
+import com.bnpp.pf.arthur.core.model.LoginHandoff;
+import com.bnpp.pf.arthur.core.model.UserSession;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Map;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 ```
