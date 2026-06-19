@@ -1,89 +1,134 @@
-Most likely the failing test is because `AuthService` now has a new constructor dependency:
+Yes, absolutely. From a production and security perspective, you should never assume Ping/Keycloak/OIDC will always return all three tokens.
+
+Right now you have something like:
 
 ```java
-private final ArthurSecurityProperties arthurSecurityProperties;
+String accessToken = (String) tokenResponse.get("access_token");
+String idToken = (String) tokenResponse.get("id_token");
+String refreshToken = (String) tokenResponse.get("refresh_token");
 ```
 
-So your `@InjectMocks AuthService authService;` test now needs a mock or real instance.
-
-Use a real properties object in the test.
+Then immediately:
 
 ```java
-@Mock
-private PartnerRepositoryClient partnerRepositoryClient;
+JwtUserClaims claims = jwtService.extractClaims(idToken);
+```
 
-@Mock
-private OidcDiscoveryClient oidcDiscoveryClient;
+If `id_token` is missing, you'll get a NullPointerException or JWT parsing exception later, which makes debugging harder.
 
-@Mock
-private RandomValueGenerator randomValueGenerator;
+---
 
-@Mock
-private PkceService pkceService;
+## Recommended approach
 
-@Mock
-private RedisAuthTransactionService redisAuthTransactionService;
+Add a helper:
 
-@Mock
-private RedisLoginHandoffService redisLoginHandoffService;
+```java
+private String getRequiredToken(
+        Map<String, Object> tokenResponse,
+        String tokenName) {
 
-@Mock
-private WebClient webClient;
+    Object value = tokenResponse.get(tokenName);
 
-@Mock
-private JwtService jwtService;
+    if (!(value instanceof String token) || token.isBlank()) {
+        throw new TechnicalException(
+                "Missing token in response: " + tokenName);
+    }
 
-@Mock
-private RedisSessionService redisSessionService;
-
-private ArthurSecurityProperties arthurSecurityProperties;
-
-private AuthService authService;
-
-@BeforeEach
-void setUp() {
-    arthurSecurityProperties = new ArthurSecurityProperties();
-
-    authService = new AuthService(
-            partnerRepositoryClient,
-            oidcDiscoveryClient,
-            randomValueGenerator,
-            pkceService,
-            redisAuthTransactionService,
-            redisLoginHandoffService,
-            webClient,
-            jwtService,
-            redisSessionService,
-            arthurSecurityProperties
-    );
+    return token;
 }
 ```
 
-Then remove:
+Then:
 
 ```java
-@InjectMocks
-private AuthService authService;
+String accessToken = getRequiredToken(tokenResponse, "access_token");
+String idToken = getRequiredToken(tokenResponse, "id_token");
+String refreshToken = getRequiredToken(tokenResponse, "refresh_token");
 ```
 
-Also add this import:
+---
+
+## Even better
+
+Validate the whole token response once:
 
 ```java
-import org.junit.jupiter.api.BeforeEach;
+private void validateTokenResponse(Map<String, Object> tokenResponse) {
+
+    if (tokenResponse == null) {
+        throw new TechnicalException("Token response is null");
+    }
+
+    validateRequiredField(tokenResponse, "access_token");
+    validateRequiredField(tokenResponse, "id_token");
+    validateRequiredField(tokenResponse, "refresh_token");
+}
+
+private void validateRequiredField(
+        Map<String, Object> tokenResponse,
+        String fieldName) {
+
+    Object value = tokenResponse.get(fieldName);
+
+    if (!(value instanceof String token) || token.isBlank()) {
+        throw new TechnicalException(
+                "Missing required token field: " + fieldName);
+    }
+}
 ```
 
-If your constructor order is different, follow the exact order from `AuthService` fields.
-
-In your sales-point test, now the handoff expiry uses:
+Usage:
 
 ```java
-arthurSecurityProperties.getHandoff().getTtlSeconds()
+Map<String, Object> tokenResponse =
+        exchangeToken(code, tokenUrl, appConfig, tx);
+
+validateTokenResponse(tokenResponse);
 ```
 
-So this real object gives default value:
+Then safely read the values.
+
+---
+
+## One more improvement
+
+Currently you have:
 
 ```java
-60
+catch (Exception e) {
+    throw new TechnicalException(
+            "Unable to load user from partner repository");
+}
 ```
 
-and the test should pass again.
+This is too broad.
+
+If `exchangeToken()` fails, or JWT parsing fails, or Redis fails, you'll still get:
+
+> Unable to load user from partner repository
+
+which is misleading.
+
+I'd change it to:
+
+```java
+catch (TechnicalException e) {
+    throw e;
+}
+catch (Exception e) {
+    log.error("Authentication callback failed", e);
+    throw new TechnicalException("Authentication callback failed");
+}
+```
+
+This preserves your specific errors like:
+
+* Missing access_token
+* Missing id_token
+* Invalid state
+* App config not found
+
+instead of masking everything behind one generic message.
+
+These changes will make Fortify, Sonar, and operational debugging much happier.
+
