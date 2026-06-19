@@ -1,119 +1,211 @@
-Yes. For `OidcTokenService`, without adding `mockwebserver`, use Mockito to mock the `WebClient` chain.
+Add tests for:
 
-It is uglier, but works.
+```text
+PkceService
+RedisAuthTransactionService
+```
+
+## 1. `PkceServiceTest`
 
 ```java
-@ExtendWith(MockitoExtension.class)
-class OidcTokenServiceTest {
+package com.bnpp.pf.arthur.core.service;
 
-    @Mock private WebClient webClient;
-    @Mock private WebClient.RequestBodyUriSpec requestBodyUriSpec;
-    @Mock private WebClient.RequestBodySpec requestBodySpec;
-    @Mock private WebClient.RequestHeadersSpec<?> requestHeadersSpec;
-    @Mock private WebClient.ResponseSpec responseSpec;
+import com.bnpp.pf.arthur.core.exception.TechnicalException;
+import org.junit.jupiter.api.Test;
 
-    private OidcTokenService oidcTokenService;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-    @BeforeEach
-    void setUp() {
-        oidcTokenService = new OidcTokenService(webClient);
+class PkceServiceTest {
+
+    private final PkceService pkceService = new PkceService();
+
+    @Test
+    void generateCodeChallenge_shouldReturnExpectedSha256Base64UrlValue() {
+        String result = pkceService.generateCodeChallenge("verifier-123");
+
+        assertThat(result).isNotBlank();
+        assertThat(result).doesNotContain("=");
+        assertThat(result).doesNotContain("+");
+        assertThat(result).doesNotContain("/");
     }
 
     @Test
-    void exchangeToken_shouldReturnTokenResponse() {
-        when(webClient.post()).thenReturn(requestBodyUriSpec);
-        when(requestBodyUriSpec.uri("token-uri")).thenReturn(requestBodySpec);
-        when(requestBodySpec.contentType(MediaType.APPLICATION_FORM_URLENCODED))
-                .thenReturn(requestBodySpec);
-        when(requestBodySpec.body(any(BodyInserter.class)))
-                .thenReturn(requestHeadersSpec);
-        when(requestHeadersSpec.retrieve()).thenReturn(responseSpec);
-        when(responseSpec.onStatus(any(), any())).thenReturn(responseSpec);
-        when(responseSpec.bodyToMono(any(ParameterizedTypeReference.class)))
-                .thenReturn(Mono.just(Map.of(
-                        "access_token", "access-token",
-                        "id_token", "id-token",
-                        "refresh_token", "refresh-token"
-                )));
+    void generateCodeChallenge_shouldReturnSameValueForSameVerifier() {
+        String first = pkceService.generateCodeChallenge("verifier-123");
+        String second = pkceService.generateCodeChallenge("verifier-123");
 
-        Map<String, Object> result = oidcTokenService.exchangeToken(
-                "auth-code",
-                "token-uri",
-                validAppConfig(),
-                authTransaction()
+        assertThat(first).isEqualTo(second);
+    }
+
+    @Test
+    void generateCodeChallenge_shouldThrowException_whenVerifierIsNull() {
+        assertThatThrownBy(() -> pkceService.generateCodeChallenge(null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("codeVerifier must not be blank");
+    }
+
+    @Test
+    void generateCodeChallenge_shouldThrowException_whenVerifierIsBlank() {
+        assertThatThrownBy(() -> pkceService.generateCodeChallenge(" "))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("codeVerifier must not be blank");
+    }
+}
+```
+
+No need to test `NoSuchAlgorithmException` branch. `SHA-256` is guaranteed by the JDK, so that branch is practically unreachable. Sonar may still mark it partially uncovered; acceptable.
+
+---
+
+## 2. `RedisAuthTransactionServiceTest`
+
+```java
+package com.bnpp.pf.arthur.core.service;
+
+import com.bnpp.pf.arthur.core.exception.TechnicalException;
+import com.bnpp.pf.arthur.core.model.AuthTransaction;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
+
+import java.time.Duration;
+import java.util.Map;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class RedisAuthTransactionServiceTest {
+
+    @Mock
+    private RedisTemplate<String, Object> redisTemplate;
+
+    @Mock
+    private ValueOperations<String, Object> valueOperations;
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @Test
+    void save_shouldStoreAuthTransactionWithTtl() {
+        RedisAuthTransactionService service =
+                new RedisAuthTransactionService(redisTemplate, objectMapper);
+
+        AuthTransaction tx = authTransaction();
+
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+
+        service.save(tx);
+
+        verify(valueOperations).set(
+                "auth:state:state-123",
+                tx,
+                Duration.ofMinutes(5)
+        );
+    }
+
+    @Test
+    void findByState_shouldReturnNull_whenValueIsNull() {
+        RedisAuthTransactionService service =
+                new RedisAuthTransactionService(redisTemplate, objectMapper);
+
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+        when(valueOperations.get("auth:state:state-123")).thenReturn(null);
+
+        AuthTransaction result = service.findByState("state-123");
+
+        assertThat(result).isNull();
+    }
+
+    @Test
+    void findByState_shouldReturnAuthTransaction_whenValueIsAuthTransaction() {
+        RedisAuthTransactionService service =
+                new RedisAuthTransactionService(redisTemplate, objectMapper);
+
+        AuthTransaction tx = authTransaction();
+
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+        when(valueOperations.get("auth:state:state-123")).thenReturn(tx);
+
+        AuthTransaction result = service.findByState("state-123");
+
+        assertThat(result).isSameAs(tx);
+    }
+
+    @Test
+    void findByState_shouldConvertMapToAuthTransaction_whenValueIsMap() {
+        RedisAuthTransactionService service =
+                new RedisAuthTransactionService(redisTemplate, objectMapper);
+
+        Map<String, Object> value = Map.of(
+                "state", "state-123",
+                "nonce", "nonce-123",
+                "codeVerifier", "verifier-123",
+                "appId", "B2BOOST_BE",
+                "redirectUri", "http://localhost/callback"
         );
 
-        assertThat(result.get("access_token")).isEqualTo("access-token");
-        assertThat(result.get("id_token")).isEqualTo("id-token");
-        assertThat(result.get("refresh_token")).isEqualTo("refresh-token");
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+        when(valueOperations.get("auth:state:state-123")).thenReturn(value);
 
-        verify(webClient).post();
-        verify(requestBodyUriSpec).uri("token-uri");
-        verify(requestBodySpec).contentType(MediaType.APPLICATION_FORM_URLENCODED);
+        AuthTransaction result = service.findByState("state-123");
+
+        assertThat(result.getState()).isEqualTo("state-123");
+        assertThat(result.getNonce()).isEqualTo("nonce-123");
+        assertThat(result.getCodeVerifier()).isEqualTo("verifier-123");
+        assertThat(result.getAppId()).isEqualTo("B2BOOST_BE");
+        assertThat(result.getRedirectUri()).isEqualTo("http://localhost/callback");
     }
 
     @Test
-    void exchangeToken_shouldThrowTechnicalException_whenWebClientFails() {
-        when(webClient.post()).thenReturn(requestBodyUriSpec);
-        when(requestBodyUriSpec.uri("token-uri")).thenReturn(requestBodySpec);
-        when(requestBodySpec.contentType(MediaType.APPLICATION_FORM_URLENCODED))
-                .thenReturn(requestBodySpec);
-        when(requestBodySpec.body(any(BodyInserter.class)))
-                .thenReturn(requestHeadersSpec);
-        when(requestHeadersSpec.retrieve()).thenReturn(responseSpec);
-        when(responseSpec.onStatus(any(), any())).thenReturn(responseSpec);
-        when(responseSpec.bodyToMono(any(ParameterizedTypeReference.class)))
-                .thenReturn(Mono.error(new TechnicalException("Token exchange failed: invalid_grant")));
+    void findByState_shouldThrowException_whenValueTypeIsUnexpected() {
+        RedisAuthTransactionService service =
+                new RedisAuthTransactionService(redisTemplate, objectMapper);
 
-        assertThatThrownBy(() -> oidcTokenService.exchangeToken(
-                "auth-code",
-                "token-uri",
-                validAppConfig(),
-                authTransaction()
-        ))
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+        when(valueOperations.get("auth:state:state-123")).thenReturn("unexpected");
+
+        assertThatThrownBy(() -> service.findByState("state-123"))
                 .isInstanceOf(TechnicalException.class)
-                .hasMessageContaining("Token exchange failed");
+                .hasMessageContaining("Unexpected auth transaction type");
     }
 
-    private AppConfigResponse validAppConfig() {
-        AppConfigResponse appConfig = new AppConfigResponse();
-        appConfig.setClientId("client-id");
-        appConfig.setClientSecret("client-secret");
-        return appConfig;
+    @Test
+    void delete_shouldDeleteAuthTransactionByState() {
+        RedisAuthTransactionService service =
+                new RedisAuthTransactionService(redisTemplate, objectMapper);
+
+        service.delete("state-123");
+
+        verify(redisTemplate).delete("auth:state:state-123");
     }
 
     private AuthTransaction authTransaction() {
         AuthTransaction tx = new AuthTransaction();
-        tx.setRedirectUri("http://localhost:8080/arthur-core/auth/callback");
+        tx.setState("state-123");
+        tx.setNonce("nonce-123");
         tx.setCodeVerifier("verifier-123");
+        tx.setAppId("B2BOOST_BE");
+        tx.setRedirectUri("http://localhost/callback");
         return tx;
     }
 }
 ```
 
-Imports:
+This covers:
 
-```java
-import com.bnpp.pf.arthur.core.exception.TechnicalException;
-import com.bnpp.pf.arthur.core.model.AppConfigResponse;
-import com.bnpp.pf.arthur.core.model.AuthTransaction;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.core.ParameterizedTypeReference;
-import org.springframework.http.MediaType;
-import org.springframework.web.reactive.function.BodyInserter;
-import org.springframework.web.reactive.function.client.WebClient;
-import reactor.core.publisher.Mono;
-
-import java.util.Map;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.*;
+```text
+Pkce success
+Pkce null/blank
+Redis save
+Redis find null
+Redis find direct object
+Redis find map conversion
+Redis unexpected type
+Redis delete
 ```
-
-This avoids adding any new test dependency.
