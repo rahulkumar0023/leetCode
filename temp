@@ -1,215 +1,438 @@
-Yes. After adding `validateTokenResponse(...)` / `getRequiredToken(...)`, add these tests in `AuthServiceTest`.
+Yes — below is a fuller `AuthServiceTest` set covering the main paths.
+
+Assumptions:
+
+* You added `OidcTokenService`
+* No `eq(...)`
+* `AuthService` constructor order matches your screenshot
+* `TechnicalException` is your custom runtime exception
 
 ```java
-@Test
-void handleCallback_shouldThrowTechnicalException_whenTokenResponseIsNull() {
-    AuthTransaction tx = authTransaction();
+package com.bnpp.pf.arthur.core.service;
 
-    when(redisAuthTransactionService.findByState("state-123")).thenReturn(tx);
-    when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(validAppConfig());
-    when(oidcDiscoveryClient.loadMetadata("issuer-uri")).thenReturn(metadata());
+import com.bnpp.pf.arthur.core.client.OidcDiscoveryClient;
+import com.bnpp.pf.arthur.core.client.PartnerRepositoryClient;
+import com.bnpp.pf.arthur.core.config.ArthurSecurityProperties;
+import com.bnpp.pf.arthur.core.exception.TechnicalException;
+import com.bnpp.pf.arthur.core.model.*;
+import com.bnpp.pf.arthur.core.util.RandomValueGenerator;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.web.reactive.function.client.WebClient;
 
-    // mock exchangeToken result as null if you can
-    // If exchangeToken is private and uses WebClient, this may be hard to unit test directly.
-}
-```
+import java.util.List;
+import java.util.Map;
 
-Because `exchangeToken(...)` is private and uses chained `WebClient`, the cleanest option is to extract token exchange into its own service.
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.*;
 
-## Recommended small refactor
+@ExtendWith(MockitoExtension.class)
+class AuthServiceTest {
 
-Create:
+    @Mock private PartnerRepositoryClient partnerRepositoryClient;
+    @Mock private OidcDiscoveryClient oidcDiscoveryClient;
+    @Mock private RandomValueGenerator randomValueGenerator;
+    @Mock private PkceService pkceService;
+    @Mock private RedisAuthTransactionService redisAuthTransactionService;
+    @Mock private RedisLoginHandoffService redisLoginHandoffService;
+    @Mock private WebClient webClient;
+    @Mock private JwtService jwtService;
+    @Mock private RedisSessionService redisSessionService;
+    @Mock private OidcTokenService oidcTokenService;
 
-```text
-service/OidcTokenService.java
-```
+    private ArthurSecurityProperties arthurSecurityProperties;
+    private AuthService authService;
 
-```java
-@Service
-@RequiredArgsConstructor
-public class OidcTokenService {
+    @BeforeEach
+    void setUp() {
+        arthurSecurityProperties = new ArthurSecurityProperties();
 
-    private final WebClient webClient;
+        authService = new AuthService(
+                partnerRepositoryClient,
+                oidcDiscoveryClient,
+                randomValueGenerator,
+                pkceService,
+                redisAuthTransactionService,
+                redisLoginHandoffService,
+                webClient,
+                jwtService,
+                redisSessionService,
+                arthurSecurityProperties,
+                oidcTokenService
+        );
+    }
 
-    public Map<String, Object> exchangeToken(
-            String code,
-            String tokenUrl,
-            AppConfigResponse appConfig,
-            AuthTransaction tx
-    ) {
-        return webClient.post()
-                .uri(tokenUrl)
-                .contentType(MediaType.APPLICATION_FORM_URLENCODED)
-                .body(BodyInserters.fromFormData("grant_type", "authorization_code")
-                        .with("client_id", appConfig.getClientId())
-                        .with("client_secret", appConfig.getClientSecret())
-                        .with("code", code)
-                        .with("redirect_uri", tx.getRedirectUri())
-                        .with("code_verifier", tx.getCodeVerifier()))
-                .retrieve()
-                .onStatus(HttpStatusCode::isError, clientResponse ->
-                        clientResponse.bodyToMono(String.class)
-                                .flatMap(body -> Mono.error(
-                                        new TechnicalException("Token exchange failed: " + body))))
-                .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})
-                .block();
+    @Test
+    void startAuthentication_shouldReturnAuthorizationUrl() {
+        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(validAppConfig());
+        when(oidcDiscoveryClient.loadMetadata("https://ping.example.com")).thenReturn(metadata());
+        when(randomValueGenerator.generate())
+                .thenReturn("state-123")
+                .thenReturn("nonce-123")
+                .thenReturn("verifier-123");
+        when(pkceService.generateCodeChallenge("verifier-123")).thenReturn("challenge-123");
+
+        String result = authService.startAuthentication("B2BOOST_BE");
+
+        assertThat(result).contains("https://ping.example.com/as/authorization.oauth2");
+        assertThat(result).contains("client_id=client-id");
+        assertThat(result).contains("response_type=code");
+        assertThat(result).contains("scope=openid+profile+email");
+        assertThat(result).contains("state=state-123");
+        assertThat(result).contains("nonce=nonce-123");
+        assertThat(result).contains("code_challenge=challenge-123");
+        assertThat(result).contains("code_challenge_method=S256");
+
+        ArgumentCaptor<AuthTransaction> captor = ArgumentCaptor.forClass(AuthTransaction.class);
+        verify(redisAuthTransactionService).save(captor.capture());
+
+        AuthTransaction tx = captor.getValue();
+        assertThat(tx.getState()).isEqualTo("state-123");
+        assertThat(tx.getNonce()).isEqualTo("nonce-123");
+        assertThat(tx.getCodeVerifier()).isEqualTo("verifier-123");
+        assertThat(tx.getAppId()).isEqualTo("B2BOOST_BE");
+        assertThat(tx.getRedirectUri()).isEqualTo("http://localhost:8080/arthur-core/auth/callback");
+    }
+
+    @Test
+    void startAuthentication_shouldThrowException_whenAppIdBlank() {
+        assertThatThrownBy(() -> authService.startAuthentication(" "))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("APP_ID must not be blank");
+
+        verifyNoInteractions(partnerRepositoryClient);
+    }
+
+    @Test
+    void startAuthentication_shouldThrowException_whenAppConfigIsNull() {
+        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(null);
+
+        assertThatThrownBy(() -> authService.startAuthentication("B2BOOST_BE"))
+                .isInstanceOf(TechnicalException.class)
+                .hasMessage("App config not found");
+    }
+
+    @Test
+    void startAuthentication_shouldThrowException_whenAppIsDisabled() {
+        AppConfigResponse appConfig = validAppConfig();
+        appConfig.setEnabled(false);
+
+        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
+
+        assertThatThrownBy(() -> authService.startAuthentication("B2BOOST_BE"))
+                .isInstanceOf(TechnicalException.class)
+                .hasMessage("App is disabled");
+    }
+
+    @Test
+    void startAuthentication_shouldThrowException_whenClientIdMissing() {
+        AppConfigResponse appConfig = validAppConfig();
+        appConfig.setClientId(" ");
+
+        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
+
+        assertThatThrownBy(() -> authService.startAuthentication("B2BOOST_BE"))
+                .isInstanceOf(TechnicalException.class)
+                .hasMessage("Missing clientId");
+    }
+
+    @Test
+    void startAuthentication_shouldThrowException_whenIssuerUriMissing() {
+        AppConfigResponse appConfig = validAppConfig();
+        appConfig.setIssuerUri(null);
+
+        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
+
+        assertThatThrownBy(() -> authService.startAuthentication("B2BOOST_BE"))
+                .isInstanceOf(TechnicalException.class)
+                .hasMessage("Missing issuerUri");
+    }
+
+    @Test
+    void startAuthentication_shouldThrowException_whenRedirectUriMissing() {
+        AppConfigResponse appConfig = validAppConfig();
+        appConfig.setRedirectUri("");
+
+        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
+
+        assertThatThrownBy(() -> authService.startAuthentication("B2BOOST_BE"))
+                .isInstanceOf(TechnicalException.class)
+                .hasMessage("Missing redirectUri");
+    }
+
+    @Test
+    void handleCallback_shouldCreateSessionAndReturnAuthResult() {
+        mockCallbackDependencies(validTokenResponse());
+
+        JwtUserClaims claims = new JwtUserClaims();
+        claims.setSub("subject-123");
+        claims.setPreferredUsername("testuser");
+
+        when(jwtService.extractClaims("id-token")).thenReturn(claims);
+        when(partnerRepositoryClient.getUserById("testuser")).thenReturn(validUser());
+
+        AuthResult result = authService.handleCallback("auth-code", "state-123");
+
+        assertThat(result.getAppId()).isEqualTo("B2BOOST_BE");
+        assertThat(result.getSessionId()).isNotBlank();
+
+        ArgumentCaptor<UserSession> sessionCaptor = ArgumentCaptor.forClass(UserSession.class);
+        verify(redisSessionService).save(sessionCaptor.capture());
+
+        UserSession session = sessionCaptor.getValue();
+        assertThat(session.getAppId()).isEqualTo("B2BOOST_BE");
+        assertThat(session.getUserId()).isEqualTo("testuser");
+        assertThat(session.getUsername()).isEqualTo("testuser");
+        assertThat(session.getAccessToken()).isEqualTo("access-token");
+        assertThat(session.getRefreshToken()).isEqualTo("refresh-token");
+        assertThat(session.getSalesPoints()).hasSize(1);
+
+        verify(redisAuthTransactionService).delete("state-123");
+    }
+
+    @Test
+    void handleCallback_shouldThrowTechnicalException_whenStateExpired() {
+        when(redisAuthTransactionService.findByState("state-123")).thenReturn(null);
+
+        assertThatThrownBy(() -> authService.handleCallback("auth-code", "state-123"))
+                .isInstanceOf(TechnicalException.class)
+                .hasMessage("Invalid or expired state");
+    }
+
+    @Test
+    void handleCallback_shouldThrowTechnicalException_whenTokenResponseIsNull() {
+        mockCallbackDependencies(null);
+
+        assertThatThrownBy(() -> authService.handleCallback("auth-code", "state-123"))
+                .isInstanceOf(TechnicalException.class)
+                .hasMessage("Token response is null");
+    }
+
+    @Test
+    void handleCallback_shouldThrowTechnicalException_whenAccessTokenMissing() {
+        mockCallbackDependencies(Map.of(
+                "id_token", "id-token",
+                "refresh_token", "refresh-token"
+        ));
+
+        assertThatThrownBy(() -> authService.handleCallback("auth-code", "state-123"))
+                .isInstanceOf(TechnicalException.class)
+                .hasMessage("Missing required token field: access_token");
+    }
+
+    @Test
+    void handleCallback_shouldThrowTechnicalException_whenIdTokenMissing() {
+        mockCallbackDependencies(Map.of(
+                "access_token", "access-token",
+                "refresh_token", "refresh-token"
+        ));
+
+        assertThatThrownBy(() -> authService.handleCallback("auth-code", "state-123"))
+                .isInstanceOf(TechnicalException.class)
+                .hasMessage("Missing required token field: id_token");
+    }
+
+    @Test
+    void handleCallback_shouldThrowTechnicalException_whenRefreshTokenMissing() {
+        mockCallbackDependencies(Map.of(
+                "access_token", "access-token",
+                "id_token", "id-token"
+        ));
+
+        assertThatThrownBy(() -> authService.handleCallback("auth-code", "state-123"))
+                .isInstanceOf(TechnicalException.class)
+                .hasMessage("Missing required token field: refresh_token");
+    }
+
+    @Test
+    void completeSalesPointSelection_shouldCreateHandoffAndReturnRedirectUrl() {
+        UserSession session = validSession();
+
+        AppConfigResponse appConfig = validAppConfig();
+        appConfig.setPostLoginRedirectUrl("http://localhost:8081/post-login");
+
+        when(redisSessionService.findBySessionId("session-123")).thenReturn(session);
+        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
+
+        String result = authService.completeSalesPointSelection("session-123", "SP001");
+
+        assertThat(result).startsWith("http://localhost:8081/post-login?code=");
+        assertThat(session.getSelectedSalesPointId()).isEqualTo("SP001");
+        assertThat(session.getSelectedOrgUnitId()).isEqualTo("ORG001");
+
+        verify(redisSessionService).save(session);
+        verify(redisLoginHandoffService).save(any(LoginHandoff.class));
+    }
+
+    @Test
+    void completeSalesPointSelection_shouldUseAmpersand_whenRedirectUrlAlreadyHasQueryParam() {
+        UserSession session = validSession();
+
+        AppConfigResponse appConfig = validAppConfig();
+        appConfig.setPostLoginRedirectUrl("http://localhost:8081/post-login?lang=fr");
+
+        when(redisSessionService.findBySessionId("session-123")).thenReturn(session);
+        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(appConfig);
+
+        String result = authService.completeSalesPointSelection("session-123", "SP001");
+
+        assertThat(result).contains("http://localhost:8081/post-login?lang=fr&code=");
+    }
+
+    @Test
+    void completeSalesPointSelection_shouldThrowException_whenSessionIdBlank() {
+        assertThatThrownBy(() -> authService.completeSalesPointSelection(" ", "SP001"))
+                .isInstanceOf(TechnicalException.class)
+                .hasMessage("Session id must not be blank");
+
+        verifyNoInteractions(redisSessionService);
+    }
+
+    @Test
+    void completeSalesPointSelection_shouldThrowException_whenSessionExpired() {
+        when(redisSessionService.findBySessionId("session-123")).thenReturn(null);
+
+        assertThatThrownBy(() -> authService.completeSalesPointSelection("session-123", "SP001"))
+                .isInstanceOf(TechnicalException.class)
+                .hasMessage("Session expired");
+    }
+
+    @Test
+    void completeSalesPointSelection_shouldThrowException_whenNoSalesPointsAvailable() {
+        UserSession session = validSession();
+        session.setSalesPoints(List.of());
+
+        when(redisSessionService.findBySessionId("session-123")).thenReturn(session);
+
+        assertThatThrownBy(() -> authService.completeSalesPointSelection("session-123", "SP001"))
+                .isInstanceOf(TechnicalException.class)
+                .hasMessage("No sales points available for user");
+    }
+
+    @Test
+    void completeSalesPointSelection_shouldThrowException_whenInvalidSalesPoint() {
+        UserSession session = validSession();
+
+        when(redisSessionService.findBySessionId("session-123")).thenReturn(session);
+
+        assertThatThrownBy(() -> authService.completeSalesPointSelection("session-123", "SP999"))
+                .isInstanceOf(TechnicalException.class)
+                .hasMessage("Invalid sales point");
+    }
+
+    private void mockCallbackDependencies(Map<String, Object> tokenResponse) {
+        when(redisAuthTransactionService.findByState("state-123")).thenReturn(authTransaction());
+        when(partnerRepositoryClient.getApp("B2BOOST_BE")).thenReturn(validAppConfig());
+        when(oidcDiscoveryClient.loadMetadata("https://ping.example.com")).thenReturn(metadata());
+        when(oidcTokenService.exchangeToken(
+                anyString(),
+                anyString(),
+                any(AppConfigResponse.class),
+                any(AuthTransaction.class)
+        )).thenReturn(tokenResponse);
+    }
+
+    private AppConfigResponse validAppConfig() {
+        AppConfigResponse appConfig = new AppConfigResponse();
+        appConfig.setAppId("B2BOOST_BE");
+        appConfig.setEnabled(true);
+        appConfig.setClientId("client-id");
+        appConfig.setClientSecret("client-secret");
+        appConfig.setIssuerUri("https://ping.example.com");
+        appConfig.setRedirectUri("http://localhost:8080/arthur-core/auth/callback");
+        appConfig.setScopes(List.of("openid", "profile", "email"));
+        appConfig.setPostLoginRedirectUrl("http://localhost:8081/post-login");
+        return appConfig;
+    }
+
+    private OidcMetadata metadata() {
+        OidcMetadata metadata = new OidcMetadata();
+        metadata.setAuthorizationEndpoint("https://ping.example.com/as/authorization.oauth2");
+        metadata.setTokenEndpoint("https://ping.example.com/as/token.oauth2");
+        return metadata;
+    }
+
+    private AuthTransaction authTransaction() {
+        AuthTransaction tx = new AuthTransaction();
+        tx.setState("state-123");
+        tx.setNonce("nonce-123");
+        tx.setCodeVerifier("verifier-123");
+        tx.setAppId("B2BOOST_BE");
+        tx.setRedirectUri("http://localhost:8080/arthur-core/auth/callback");
+        tx.setPostLoginRedirectUrl("http://localhost:8081/post-login");
+        return tx;
+    }
+
+    private Map<String, Object> validTokenResponse() {
+        return Map.of(
+                "access_token", "access-token",
+                "id_token", "id-token",
+                "refresh_token", "refresh-token"
+        );
+    }
+
+    private UserResponse validUser() {
+        SalesPointResponse salesPoint = new SalesPointResponse();
+        salesPoint.setId("SP001");
+        salesPoint.setLabel("Sales Point 1");
+        salesPoint.setOrgUnitId("ORG001");
+
+        UserResponse user = new UserResponse();
+        user.setUserId("testuser");
+        user.setUsername("testuser");
+        user.setRoles(List.of("SELLER"));
+        user.setSalesPoints(List.of(salesPoint));
+        return user;
+    }
+
+    private UserSession validSession() {
+        SalesPointResponse salesPoint = new SalesPointResponse();
+        salesPoint.setId("SP001");
+        salesPoint.setLabel("Sales Point 1");
+        salesPoint.setOrgUnitId("ORG001");
+
+        UserSession session = new UserSession();
+        session.setSessionId("session-123");
+        session.setAppId("B2BOOST_BE");
+        session.setUserId("testuser");
+        session.setUsername("testuser");
+        session.setRoles(List.of("SELLER"));
+        session.setSalesPoints(List.of(salesPoint));
+        return session;
     }
 }
 ```
 
-Then inject it into `AuthService`:
+One important note: this test expects you added these guards in `completeSalesPointSelection()`:
 
 ```java
-private final OidcTokenService oidcTokenService;
-```
+if (sessionId == null || sessionId.isBlank()) {
+    throw new TechnicalException("Session id must not be blank");
+}
 
-Replace:
+UserSession session = redisSessionService.findBySessionId(sessionId);
 
-```java
-Map<String, Object> tokenResponse = exchangeToken(code, tokenUrl, appConfig, tx);
-```
+if (session == null) {
+    throw new TechnicalException("Session expired");
+}
 
-with:
-
-```java
-Map<String, Object> tokenResponse =
-        oidcTokenService.exchangeToken(code, tokenUrl, appConfig, tx);
-```
-
-Now tests become easy.
-
-## AuthService tests for missing tokens
-
-```java
-@Mock
-private OidcTokenService oidcTokenService;
-```
-
-Then add this dependency in the constructor setup.
-
-### 1. Null token response
-
-```java
-@Test
-void handleCallback_shouldThrowTechnicalException_whenTokenResponseIsNull() {
-    when(redisAuthTransactionService.findByState("state-123"))
-            .thenReturn(authTransaction());
-
-    when(partnerRepositoryClient.getApp("B2BOOST_BE"))
-            .thenReturn(validAppConfig());
-
-    when(oidcDiscoveryClient.loadMetadata("issuer-uri"))
-            .thenReturn(metadata());
-
-    when(oidcTokenService.exchangeToken(
-            "auth-code",
-            "token-uri",
-            validAppConfig(),
-            authTransaction()
-    )).thenReturn(null);
+if (session.getSalesPoints() == null || session.getSalesPoints().isEmpty()) {
+    throw new TechnicalException("No sales points available for user");
 }
 ```
 
-But since you don’t want `eq(...)`, don’t match complex objects. Use:
+And token validation messages:
 
 ```java
-when(oidcTokenService.exchangeToken(
-        anyString(),
-        anyString(),
-        any(AppConfigResponse.class),
-        any(AuthTransaction.class)
-)).thenReturn(null);
+"Token response is null"
+"Missing required token field: access_token"
+"Missing required token field: id_token"
+"Missing required token field: refresh_token"
 ```
-
-Full test:
-
-```java
-@Test
-void handleCallback_shouldThrowTechnicalException_whenTokenResponseIsNull() {
-    when(redisAuthTransactionService.findByState("state-123"))
-            .thenReturn(authTransaction());
-    when(partnerRepositoryClient.getApp("B2BOOST_BE"))
-            .thenReturn(validAppConfig());
-    when(oidcDiscoveryClient.loadMetadata("issuer-uri"))
-            .thenReturn(metadata());
-    when(oidcTokenService.exchangeToken(
-            anyString(),
-            anyString(),
-            any(AppConfigResponse.class),
-            any(AuthTransaction.class)
-    )).thenReturn(null);
-
-    assertThatThrownBy(() -> authService.handleCallback("auth-code", "state-123"))
-            .isInstanceOf(TechnicalException.class)
-            .hasMessage("Token response is null");
-}
-```
-
-### 2. Missing access token
-
-```java
-@Test
-void handleCallback_shouldThrowTechnicalException_whenAccessTokenMissing() {
-    mockCallbackUntilTokenExchange(Map.of(
-            "id_token", "id-token",
-            "refresh_token", "refresh-token"
-    ));
-
-    assertThatThrownBy(() -> authService.handleCallback("auth-code", "state-123"))
-            .isInstanceOf(TechnicalException.class)
-            .hasMessage("Missing required token field: access_token");
-}
-```
-
-### 3. Missing id token
-
-```java
-@Test
-void handleCallback_shouldThrowTechnicalException_whenIdTokenMissing() {
-    mockCallbackUntilTokenExchange(Map.of(
-            "access_token", "access-token",
-            "refresh_token", "refresh-token"
-    ));
-
-    assertThatThrownBy(() -> authService.handleCallback("auth-code", "state-123"))
-            .isInstanceOf(TechnicalException.class)
-            .hasMessage("Missing required token field: id_token");
-}
-```
-
-### 4. Missing refresh token
-
-```java
-@Test
-void handleCallback_shouldThrowTechnicalException_whenRefreshTokenMissing() {
-    mockCallbackUntilTokenExchange(Map.of(
-            "access_token", "access-token",
-            "id_token", "id-token"
-    ));
-
-    assertThatThrownBy(() -> authService.handleCallback("auth-code", "state-123"))
-            .isInstanceOf(TechnicalException.class)
-            .hasMessage("Missing required token field: refresh_token");
-}
-```
-
-Helper:
-
-```java
-private void mockCallbackUntilTokenExchange(Map<String, Object> tokenResponse) {
-    when(redisAuthTransactionService.findByState("state-123"))
-            .thenReturn(authTransaction());
-    when(partnerRepositoryClient.getApp("B2BOOST_BE"))
-            .thenReturn(validAppConfig());
-    when(oidcDiscoveryClient.loadMetadata("issuer-uri"))
-            .thenReturn(metadata());
-    when(oidcTokenService.exchangeToken(
-            anyString(),
-            anyString(),
-            any(AppConfigResponse.class),
-            any(AuthTransaction.class)
-    )).thenReturn(tokenResponse);
-}
-```
-
-Use this if you refactor token exchange out. That will give clean coverage and avoid painful `WebClient` chain mocking.
