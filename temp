@@ -1,223 +1,76 @@
-For these two classes:
+Yes. For `OidcTokenService`, without adding `mockwebserver`, use Mockito to mock the `WebClient` chain.
 
-```text
-JwtService
-OidcTokenService
-```
-
-I would test **JwtService fully**, but for `OidcTokenService`, I’d either use `MockWebServer` or exclude it from unit coverage if your team treats external HTTP clients as integration-tested. Best option is `MockWebServer`.
-
-## 1. JwtServiceTest
+It is uglier, but works.
 
 ```java
-package com.bnpp.pf.arthur.core.service;
-
-import com.bnpp.pf.arthur.core.model.JwtUserClaims;
-import org.junit.jupiter.api.Test;
-import org.springframework.security.oauth2.jwt.Jwt;
-import org.springframework.security.oauth2.jwt.JwtDecoder;
-
-import java.time.Instant;
-import java.util.Map;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-
-class JwtServiceTest {
-
-    private final JwtDecoder jwtDecoder = mock(JwtDecoder.class);
-    private final JwtService jwtService = new JwtService(jwtDecoder);
-
-    @Test
-    void extractClaims_shouldMapJwtClaims() {
-        Jwt jwt = new Jwt(
-                "id-token",
-                Instant.now(),
-                Instant.now().plusSeconds(300),
-                Map.of("alg", "none"),
-                Map.of(
-                        "sub", "subject-123",
-                        "preferred_username", "testuser",
-                        "email", "test@test.com",
-                        "given_name", "Test",
-                        "family_name", "User"
-                )
-        );
-
-        when(jwtDecoder.decode("id-token")).thenReturn(jwt);
-
-        JwtUserClaims claims = jwtService.extractClaims("id-token");
-
-        assertThat(claims.getSub()).isEqualTo("subject-123");
-        assertThat(claims.getPreferredUsername()).isEqualTo("testuser");
-        assertThat(claims.getEmail()).isEqualTo("test@test.com");
-        assertThat(claims.getGivenName()).isEqualTo("Test");
-        assertThat(claims.getFamilyName()).isEqualTo("User");
-    }
-
-    @Test
-    void extractClaims_shouldReturnNullFields_whenOptionalClaimsAreMissing() {
-        Jwt jwt = new Jwt(
-                "id-token",
-                Instant.now(),
-                Instant.now().plusSeconds(300),
-                Map.of("alg", "none"),
-                Map.of("sub", "subject-123")
-        );
-
-        when(jwtDecoder.decode("id-token")).thenReturn(jwt);
-
-        JwtUserClaims claims = jwtService.extractClaims("id-token");
-
-        assertThat(claims.getSub()).isEqualTo("subject-123");
-        assertThat(claims.getPreferredUsername()).isNull();
-        assertThat(claims.getEmail()).isNull();
-        assertThat(claims.getGivenName()).isNull();
-        assertThat(claims.getFamilyName()).isNull();
-    }
-}
-```
-
-## 2. Add null guard improvement in JwtService
-
-Recommended:
-
-```java
-public JwtUserClaims extractClaims(String token) {
-    if (token == null || token.isBlank()) {
-        throw new TechnicalException("JWT token must not be blank");
-    }
-
-    Jwt jwt = jwtDecoder.decode(token);
-    ...
-}
-```
-
-Then add test:
-
-```java
-@Test
-void extractClaims_shouldThrowException_whenTokenBlank() {
-    assertThatThrownBy(() -> jwtService.extractClaims(" "))
-            .isInstanceOf(TechnicalException.class)
-            .hasMessage("JWT token must not be blank");
-}
-```
-
-## 3. OidcTokenServiceTest with MockWebServer
-
-Add test dependency if needed:
-
-```xml
-<dependency>
-    <groupId>com.squareup.okhttp3</groupId>
-    <artifactId>mockwebserver</artifactId>
-    <scope>test</scope>
-</dependency>
-```
-
-Test:
-
-```java
-package com.bnpp.pf.arthur.core.service;
-
-import com.bnpp.pf.arthur.core.exception.TechnicalException;
-import com.bnpp.pf.arthur.core.model.AppConfigResponse;
-import com.bnpp.pf.arthur.core.model.AuthTransaction;
-import okhttp3.mockwebserver.MockResponse;
-import okhttp3.mockwebserver.MockWebServer;
-import okhttp3.mockwebserver.RecordedRequest;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.springframework.web.reactive.function.client.WebClient;
-
-import java.util.Map;
-
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
+@ExtendWith(MockitoExtension.class)
 class OidcTokenServiceTest {
 
-    private MockWebServer mockWebServer;
+    @Mock private WebClient webClient;
+    @Mock private WebClient.RequestBodyUriSpec requestBodyUriSpec;
+    @Mock private WebClient.RequestBodySpec requestBodySpec;
+    @Mock private WebClient.RequestHeadersSpec<?> requestHeadersSpec;
+    @Mock private WebClient.ResponseSpec responseSpec;
+
     private OidcTokenService oidcTokenService;
 
     @BeforeEach
-    void setUp() throws Exception {
-        mockWebServer = new MockWebServer();
-        mockWebServer.start();
-
-        WebClient webClient = WebClient.builder().build();
+    void setUp() {
         oidcTokenService = new OidcTokenService(webClient);
     }
 
-    @AfterEach
-    void tearDown() throws Exception {
-        mockWebServer.shutdown();
+    @Test
+    void exchangeToken_shouldReturnTokenResponse() {
+        when(webClient.post()).thenReturn(requestBodyUriSpec);
+        when(requestBodyUriSpec.uri("token-uri")).thenReturn(requestBodySpec);
+        when(requestBodySpec.contentType(MediaType.APPLICATION_FORM_URLENCODED))
+                .thenReturn(requestBodySpec);
+        when(requestBodySpec.body(any(BodyInserter.class)))
+                .thenReturn(requestHeadersSpec);
+        when(requestHeadersSpec.retrieve()).thenReturn(responseSpec);
+        when(responseSpec.onStatus(any(), any())).thenReturn(responseSpec);
+        when(responseSpec.bodyToMono(any(ParameterizedTypeReference.class)))
+                .thenReturn(Mono.just(Map.of(
+                        "access_token", "access-token",
+                        "id_token", "id-token",
+                        "refresh_token", "refresh-token"
+                )));
+
+        Map<String, Object> result = oidcTokenService.exchangeToken(
+                "auth-code",
+                "token-uri",
+                validAppConfig(),
+                authTransaction()
+        );
+
+        assertThat(result.get("access_token")).isEqualTo("access-token");
+        assertThat(result.get("id_token")).isEqualTo("id-token");
+        assertThat(result.get("refresh_token")).isEqualTo("refresh-token");
+
+        verify(webClient).post();
+        verify(requestBodyUriSpec).uri("token-uri");
+        verify(requestBodySpec).contentType(MediaType.APPLICATION_FORM_URLENCODED);
     }
 
     @Test
-    void exchangeToken_shouldReturnTokenResponse() throws Exception {
-        mockWebServer.enqueue(new MockResponse()
-                .setResponseCode(200)
-                .setHeader("Content-Type", "application/json")
-                .setBody("""
-                        {
-                          "access_token": "access-token",
-                          "id_token": "id-token",
-                          "refresh_token": "refresh-token"
-                        }
-                        """));
+    void exchangeToken_shouldThrowTechnicalException_whenWebClientFails() {
+        when(webClient.post()).thenReturn(requestBodyUriSpec);
+        when(requestBodyUriSpec.uri("token-uri")).thenReturn(requestBodySpec);
+        when(requestBodySpec.contentType(MediaType.APPLICATION_FORM_URLENCODED))
+                .thenReturn(requestBodySpec);
+        when(requestBodySpec.body(any(BodyInserter.class)))
+                .thenReturn(requestHeadersSpec);
+        when(requestHeadersSpec.retrieve()).thenReturn(responseSpec);
+        when(responseSpec.onStatus(any(), any())).thenReturn(responseSpec);
+        when(responseSpec.bodyToMono(any(ParameterizedTypeReference.class)))
+                .thenReturn(Mono.error(new TechnicalException("Token exchange failed: invalid_grant")));
 
-        String tokenUrl = mockWebServer.url("/token").toString();
-
-        Map<String, Object> response =
-                oidcTokenService.exchangeToken(
-                        "auth-code",
-                        tokenUrl,
-                        validAppConfig(),
-                        authTransaction()
-                );
-
-        assertThat(response.get("access_token")).isEqualTo("access-token");
-        assertThat(response.get("id_token")).isEqualTo("id-token");
-        assertThat(response.get("refresh_token")).isEqualTo("refresh-token");
-
-        RecordedRequest request = mockWebServer.takeRequest();
-
-        assertThat(request.getMethod()).isEqualTo("POST");
-        assertThat(request.getPath()).isEqualTo("/token");
-
-        String body = request.getBody().readUtf8();
-        assertThat(body).contains("grant_type=authorization_code");
-        assertThat(body).contains("client_id=client-id");
-        assertThat(body).contains("client_secret=client-secret");
-        assertThat(body).contains("code=auth-code");
-        assertThat(body).contains("redirect_uri=http%3A%2F%2Flocalhost%3A8080%2Farthur-core%2Fauth%2Fcallback");
-        assertThat(body).contains("code_verifier=verifier-123");
-    }
-
-    @Test
-    void exchangeToken_shouldThrowTechnicalException_whenTokenEndpointReturnsError() {
-        mockWebServer.enqueue(new MockResponse()
-                .setResponseCode(400)
-                .setHeader("Content-Type", "application/json")
-                .setBody("""
-                        {
-                          "error": "invalid_grant"
-                        }
-                        """));
-
-        String tokenUrl = mockWebServer.url("/token").toString();
-
-        assertThatThrownBy(() ->
-                oidcTokenService.exchangeToken(
-                        "auth-code",
-                        tokenUrl,
-                        validAppConfig(),
-                        authTransaction()
-                ))
+        assertThatThrownBy(() -> oidcTokenService.exchangeToken(
+                "auth-code",
+                "token-uri",
+                validAppConfig(),
+                authTransaction()
+        ))
                 .isInstanceOf(TechnicalException.class)
                 .hasMessageContaining("Token exchange failed");
     }
@@ -238,4 +91,29 @@ class OidcTokenServiceTest {
 }
 ```
 
-This gives good Sonar coverage without ugly `WebClient` chain mocking.
+Imports:
+
+```java
+import com.bnpp.pf.arthur.core.exception.TechnicalException;
+import com.bnpp.pf.arthur.core.model.AppConfigResponse;
+import com.bnpp.pf.arthur.core.model.AuthTransaction;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.http.MediaType;
+import org.springframework.web.reactive.function.BodyInserter;
+import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Mono;
+
+import java.util.Map;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
+```
+
+This avoids adding any new test dependency.
