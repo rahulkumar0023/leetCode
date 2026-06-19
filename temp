@@ -1,244 +1,157 @@
-For these two services, add separate unit tests:
+For `AuthController`, add `@WebMvcTest` coverage for these 4 flows:
 
 ```text
-RedisLoginHandoffServiceTest
-RedisSessionServiceTest
+/auth/start with APP_ID header
+/auth/start with appId query param
+/auth/start duplicate request reuse
+/auth/callback sets cookie + redirects
+/auth/handoff/exchange returns response
 ```
 
-## 1. RedisLoginHandoffServiceTest
+Use this as the base:
 
 ```java
-@ExtendWith(MockitoExtension.class)
-class RedisLoginHandoffServiceTest {
+@WebMvcTest(AuthController.class)
+class AuthControllerTest {
 
-    @Mock
-    private RedisTemplate<String, Object> redisTemplate;
+    @Autowired
+    private MockMvc mockMvc;
 
-    @Mock
-    private ValueOperations<String, Object> valueOperations;
+    @MockitoBean
+    private AuthService authService;
 
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    @MockitoBean
+    private HandoffService handoffService;
 
-    private RedisLoginHandoffService service;
+    @MockitoBean
+    private PartnerRepositoryClient partnerRepositoryClient;
 
-    @BeforeEach
-    void setUp() {
-        ArthurSecurityProperties properties = new ArthurSecurityProperties();
+    @Test
+    void startAuthentication_shouldRedirect_whenAppIdHeaderPresent() throws Exception {
+        when(authService.startAuthentication("B2BOOST_BE"))
+                .thenReturn("https://ping.example.com/auth");
 
-        service = new RedisLoginHandoffService(
-                redisTemplate,
-                objectMapper,
-                properties
-        );
+        mockMvc.perform(get("/auth/start")
+                        .header("APP_ID", "B2BOOST_BE"))
+                .andExpect(status().isFound())
+                .andExpect(header().string("Location", "https://ping.example.com/auth"));
     }
 
     @Test
-    void save_shouldStoreHandoffWithTtl() {
-        LoginHandoff handoff = handoff();
+    void startAuthentication_shouldRedirect_whenAppIdQueryParamPresent() throws Exception {
+        when(authService.startAuthentication("B2BOOST_BE"))
+                .thenReturn("https://ping.example.com/auth");
 
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-
-        service.save(handoff);
-
-        verify(valueOperations).set(
-                "handoff:code-123",
-                handoff,
-                Duration.ofSeconds(60)
-        );
+        mockMvc.perform(get("/auth/start")
+                        .param("appId", "B2BOOST_BE"))
+                .andExpect(status().isFound())
+                .andExpect(header().string("Location", "https://ping.example.com/auth"));
     }
 
     @Test
-    void findByCode_shouldReturnNull_whenValueIsNull() {
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-        when(valueOperations.get("handoff:code-123")).thenReturn(null);
-
-        LoginHandoff result = service.findByCode("code-123");
-
-        assertThat(result).isNull();
+    void startAuthentication_shouldThrowBadRequest_whenAppIdMissing() throws Exception {
+        mockMvc.perform(get("/auth/start"))
+                .andExpect(status().isBadRequest());
     }
 
     @Test
-    void findByCode_shouldReturnHandoff_whenValueIsLoginHandoff() {
-        LoginHandoff handoff = handoff();
+    void startAuthentication_shouldReusePendingRedirect_whenDuplicateWithinTenSeconds() throws Exception {
+        MockHttpSession session = new MockHttpSession();
+        session.setAttribute("AUTH_PENDING_REDIRECT", "https://ping.example.com/auth");
+        session.setAttribute("AUTH_PENDING_TIME", System.currentTimeMillis());
 
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-        when(valueOperations.get("handoff:code-123")).thenReturn(handoff);
+        mockMvc.perform(get("/auth/start")
+                        .session(session)
+                        .header("APP_ID", "B2BOOST_BE"))
+                .andExpect(status().isFound())
+                .andExpect(header().string("Location", "https://ping.example.com/auth"));
 
-        LoginHandoff result = service.findByCode("code-123");
-
-        assertThat(result).isSameAs(handoff);
+        verifyNoInteractions(authService);
     }
 
     @Test
-    void findByCode_shouldConvertMapToLoginHandoff() {
-        Map<String, Object> value = Map.of(
-                "code", "code-123",
-                "sessionId", "session-123",
-                "appId", "B2BOOST_BE",
-                "redirectUrl", "http://localhost/post-login",
-                "used", false
-        );
+    void callback_shouldSetCookieAndRedirectToSalesPoints() throws Exception {
+        AuthResult authResult = new AuthResult("session-123", "B2BOOST_BE");
 
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-        when(valueOperations.get("handoff:code-123")).thenReturn(value);
+        when(authService.handleCallback("auth-code", "state-123"))
+                .thenReturn(authResult);
 
-        LoginHandoff result = service.findByCode("code-123");
-
-        assertThat(result.getCode()).isEqualTo("code-123");
-        assertThat(result.getSessionId()).isEqualTo("session-123");
-        assertThat(result.getAppId()).isEqualTo("B2BOOST_BE");
-        assertThat(result.getRedirectUrl()).isEqualTo("http://localhost/post-login");
-        assertThat(result.isUsed()).isFalse();
+        mockMvc.perform(get("/auth/callback")
+                        .param("code", "auth-code")
+                        .param("state", "state-123"))
+                .andExpect(status().isFound())
+                .andExpect(header().string(
+                        "Location",
+                        "/arthur-core/sales-points?appId=B2BOOST_BE"
+                ))
+                .andExpect(cookie().value("ARTHUR_SESSION", "session-123"))
+                .andExpect(cookie().httpOnly("ARTHUR_SESSION", true))
+                .andExpect(cookie().secure("ARTHUR_SESSION", true))
+                .andExpect(cookie().path("ARTHUR_SESSION", "/"))
+                .andExpect(cookie().maxAge("ARTHUR_SESSION", 3600));
     }
 
     @Test
-    void delete_shouldDeleteHandoffCode() {
-        service.delete("code-123");
+    void exchange_shouldReturnHandoffExchangeResponse() throws Exception {
+        HandoffExchangeResponse response = new HandoffExchangeResponse();
+        response.setUserId("testuser");
+        response.setUsername("testuser");
+        response.setEmail("test@test.com");
+        response.setRoles(List.of("SELLER"));
+        response.setAppId("B2BOOST_BE");
+        response.setSelectedSalesPointId("SP001");
+        response.setSelectedOrgUnitId("ORG001");
 
-        verify(redisTemplate).delete("handoff:code-123");
-    }
+        when(handoffService.exchange("code-123")).thenReturn(response);
 
-    private LoginHandoff handoff() {
-        LoginHandoff handoff = new LoginHandoff();
-        handoff.setCode("code-123");
-        handoff.setSessionId("session-123");
-        handoff.setAppId("B2BOOST_BE");
-        handoff.setRedirectUrl("http://localhost/post-login");
-        handoff.setExpiresAt(Instant.now().plusSeconds(60));
-        handoff.setUsed(false);
-        return handoff;
+        mockMvc.perform(post("/auth/handoff/exchange")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "code": "code-123"
+                                }
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.userId").value("testuser"))
+                .andExpect(jsonPath("$.username").value("testuser"))
+                .andExpect(jsonPath("$.email").value("test@test.com"))
+                .andExpect(jsonPath("$.roles[0]").value("SELLER"))
+                .andExpect(jsonPath("$.appId").value("B2BOOST_BE"))
+                .andExpect(jsonPath("$.selectedSalesPointId").value("SP001"))
+                .andExpect(jsonPath("$.selectedOrgUnitId").value("ORG001"));
     }
 }
 ```
 
-## 2. RedisSessionServiceTest
+Imports:
 
 ```java
-@ExtendWith(MockitoExtension.class)
-class RedisSessionServiceTest {
-
-    @Mock
-    private RedisTemplate<String, Object> redisTemplate;
-
-    @Mock
-    private ValueOperations<String, Object> valueOperations;
-
-    private final ObjectMapper objectMapper = new ObjectMapper();
-
-    private RedisSessionService service;
-
-    @BeforeEach
-    void setUp() {
-        ArthurSecurityProperties properties = new ArthurSecurityProperties();
-
-        service = new RedisSessionService(
-                redisTemplate,
-                properties,
-                objectMapper
-        );
-    }
-
-    @Test
-    void save_shouldStoreSessionWithTtl() {
-        UserSession session = session();
-
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-
-        service.save(session);
-
-        verify(valueOperations).set(
-                "session:session-123",
-                session,
-                Duration.ofMinutes(60)
-        );
-    }
-
-    @Test
-    void findBySessionId_shouldReturnNull_whenValueIsNull() {
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-        when(valueOperations.get("session:session-123")).thenReturn(null);
-
-        UserSession result = service.findBySessionId("session-123");
-
-        assertThat(result).isNull();
-    }
-
-    @Test
-    void findBySessionId_shouldReturnSession_whenValueIsUserSession() {
-        UserSession session = session();
-
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-        when(valueOperations.get("session:session-123")).thenReturn(session);
-
-        UserSession result = service.findBySessionId("session-123");
-
-        assertThat(result).isSameAs(session);
-    }
-
-    @Test
-    void findBySessionId_shouldConvertMapToUserSession() {
-        Map<String, Object> value = Map.of(
-                "sessionId", "session-123",
-                "appId", "B2BOOST_BE",
-                "userId", "testuser",
-                "username", "testuser",
-                "selectedSalesPointId", "SP001",
-                "selectedOrgUnitId", "ORG001"
-        );
-
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-        when(valueOperations.get("session:session-123")).thenReturn(value);
-
-        UserSession result = service.findBySessionId("session-123");
-
-        assertThat(result.getSessionId()).isEqualTo("session-123");
-        assertThat(result.getAppId()).isEqualTo("B2BOOST_BE");
-        assertThat(result.getUserId()).isEqualTo("testuser");
-        assertThat(result.getUsername()).isEqualTo("testuser");
-        assertThat(result.getSelectedSalesPointId()).isEqualTo("SP001");
-        assertThat(result.getSelectedOrgUnitId()).isEqualTo("ORG001");
-    }
-
-    @Test
-    void delete_shouldDeleteSession() {
-        service.delete("session-123");
-
-        verify(redisTemplate).delete("session:session-123");
-    }
-
-    private UserSession session() {
-        UserSession session = new UserSession();
-        session.setSessionId("session-123");
-        session.setAppId("B2BOOST_BE");
-        session.setUserId("testuser");
-        session.setUsername("testuser");
-        session.setSelectedSalesPointId("SP001");
-        session.setSelectedOrgUnitId("ORG001");
-        return session;
-    }
-}
-```
-
-Imports needed:
-
-```java
-import com.bnpp.pf.arthur.core.config.ArthurSecurityProperties;
-import com.bnpp.pf.arthur.core.model.LoginHandoff;
-import com.bnpp.pf.arthur.core.model.UserSession;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.junit.jupiter.api.BeforeEach;
+import com.bnpp.pf.arthur.core.client.PartnerRepositoryClient;
+import com.bnpp.pf.arthur.core.model.AuthResult;
+import com.bnpp.pf.arthur.core.model.HandoffExchangeResponse;
+import com.bnpp.pf.arthur.core.service.AuthService;
+import com.bnpp.pf.arthur.core.service.HandoffService;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.data.redis.core.ValueOperations;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.http.MediaType;
+import org.springframework.mock.web.MockHttpSession;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.web.servlet.MockMvc;
 
-import java.time.Duration;
-import java.time.Instant;
-import java.util.Map;
+import java.util.List;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
+```
+
+If your JSON is snake_case, change assertions to:
+
+```java
+jsonPath("$.user_id")
+jsonPath("$.selected_sales_point_id")
+jsonPath("$.selected_org_unit_id")
 ```
