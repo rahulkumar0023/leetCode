@@ -1,3 +1,90 @@
+Assuming you're writing a **plain unit test** (not `@WebMvcTest`) for `SalesPointController`, you'll typically need:
+
+```java
+import com.bnpp.pf.arthur.core.controller.SalesPointController;
+import com.bnpp.pf.arthur.core.model.UserSession;
+import com.bnpp.pf.arthur.core.model.SalesPoint;
+import com.bnpp.pf.arthur.core.service.AuthService;
+import com.bnpp.pf.arthur.core.service.RedisSessionService;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import org.springframework.web.servlet.ModelAndView;
+
+import java.util.Collections;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.when;
+```
+
+And at the class level:
+
+```java
+@ExtendWith(MockitoExtension.class)
+class SalesPointControllerTest {
+```
+
+Mocks:
+
+```java
+@Mock
+private AuthService authService;
+
+@Mock
+private RedisSessionService redisSessionService;
+
+@InjectMocks
+private SalesPointController controller;
+```
+
+No `@SpringBootTest`, no `@WebMvcTest`, and no `MockMvc` are needed for the tests I provided because we're calling the controller methods directly.
+
+---
+
+If instead you're creating a **WebMvcTest** similar to your `AuthControllerTest`, then you'll need:
+
+```java
+@WebMvcTest(SalesPointController.class)
+class SalesPointControllerTest {
+```
+
+with
+
+```java
+@Autowired
+private MockMvc mockMvc;
+
+@MockBean
+private AuthService authService;
+
+@MockBean
+private RedisSessionService redisSessionService;
+```
+
+and the imports:
+
+```java
+import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.test.web.servlet.MockMvc;
+
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
+```
+
+For this controller, I would use the **first approach (Mockito + direct method calls)**. It's much simpler because the controller only returns `ModelAndView` and doesn't need Spring MVC plumbing.
+
+--------------
+
 Yes. This controller has quite a few branches worth covering.
 
 ## salesPoints()
