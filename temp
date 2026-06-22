@@ -1,121 +1,43 @@
-Yes, update it. The deprecated class is:
+Yes — in Spring Data Redis 4, `GenericJackson2JsonRedisSerializer` is deprecated. Use:
 
 ```java
-GenericJackson2JsonRedisSerializer
+GenericJacksonJsonRedisSerializer
 ```
 
-You can avoid it by using:
+Spring’s deprecated API list says `GenericJackson2JsonRedisSerializer` is deprecated since 4.0 in favor of `GenericJacksonJsonRedisSerializer`. ([Home][1])
+
+Use this:
 
 ```java
-Jackson2JsonRedisSerializer<Object>
-```
-
-## Updated `RedisConfig`
-
-```java
-@Configuration
-public class RedisConfig {
-
-    @Bean
-    public RedisTemplate<String, Object> redisTemplate(
-            RedisConnectionFactory connectionFactory,
-            ObjectMapper objectMapper) {
-
-        RedisTemplate<String, Object> template = new RedisTemplate<>();
-        template.setConnectionFactory(connectionFactory);
-
-        StringRedisSerializer stringSerializer =
-                new StringRedisSerializer();
-
-        Jackson2JsonRedisSerializer<Object> jsonSerializer =
-                new Jackson2JsonRedisSerializer<>(objectMapper, Object.class);
-
-        template.setKeySerializer(stringSerializer);
-        template.setHashKeySerializer(stringSerializer);
-        template.setValueSerializer(jsonSerializer);
-        template.setHashValueSerializer(jsonSerializer);
-
-        template.afterPropertiesSet();
-
-        return template;
-    }
-
-    @Bean
-    public ObjectMapper objectMapper() {
-        ObjectMapper mapper = new ObjectMapper();
-        mapper.registerModule(new JavaTimeModule());
-        mapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
-        return mapper;
-    }
-}
-```
-
-Imports:
-
-```java
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.data.redis.connection.RedisConnectionFactory;
-import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.data.redis.serializer.Jackson2JsonRedisSerializer;
+import org.springframework.data.redis.serializer.GenericJacksonJsonRedisSerializer;
 import org.springframework.data.redis.serializer.StringRedisSerializer;
 ```
 
-## Test coverage
-
 ```java
-class RedisConfigTest {
+@Bean
+public RedisTemplate<String, Object> redisTemplate(
+        RedisConnectionFactory connectionFactory) {
 
-    private final RedisConfig redisConfig = new RedisConfig();
+    RedisTemplate<String, Object> template = new RedisTemplate<>();
+    template.setConnectionFactory(connectionFactory);
 
-    @Test
-    void objectMapper_shouldSupportJavaTimeAndDisableTimestampSerialization() {
-        ObjectMapper objectMapper = redisConfig.objectMapper();
+    StringRedisSerializer stringSerializer = new StringRedisSerializer();
+    GenericJacksonJsonRedisSerializer jsonSerializer =
+            new GenericJacksonJsonRedisSerializer();
 
-        assertThat(objectMapper.isEnabled(
-                SerializationFeature.WRITE_DATES_AS_TIMESTAMPS))
-                .isFalse();
-    }
+    template.setKeySerializer(stringSerializer);
+    template.setHashKeySerializer(stringSerializer);
+    template.setValueSerializer(jsonSerializer);
+    template.setHashValueSerializer(jsonSerializer);
 
-    @Test
-    void redisTemplate_shouldCreateTemplate() {
-        RedisConnectionFactory connectionFactory =
-                mock(RedisConnectionFactory.class);
+    template.afterPropertiesSet();
 
-        ObjectMapper objectMapper = redisConfig.objectMapper();
-
-        RedisTemplate<String, Object> template =
-                redisConfig.redisTemplate(connectionFactory, objectMapper);
-
-        assertThat(template).isNotNull();
-        assertThat(template.getConnectionFactory()).isSameAs(connectionFactory);
-        assertThat(template.getKeySerializer())
-                .isInstanceOf(StringRedisSerializer.class);
-        assertThat(template.getHashKeySerializer())
-                .isInstanceOf(StringRedisSerializer.class);
-        assertThat(template.getValueSerializer())
-                .isInstanceOf(Jackson2JsonRedisSerializer.class);
-        assertThat(template.getHashValueSerializer())
-                .isInstanceOf(Jackson2JsonRedisSerializer.class);
-    }
+    return template;
 }
 ```
 
-Imports:
+Do **not** pass `com.fasterxml.jackson.databind.ObjectMapper` if your constructor expects `tools.jackson.databind.ObjectMapper`.
 
-```java
-import com.bnpp.pf.arthur.core.config.RedisConfig;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
-import org.junit.jupiter.api.Test;
-import org.springframework.data.redis.connection.RedisConnectionFactory;
-import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.data.redis.serializer.Jackson2JsonRedisSerializer;
-import org.springframework.data.redis.serializer.StringRedisSerializer;
+For now, remove the custom `ObjectMapper` from the Redis serializer and use the no-args constructor.
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.mock;
-```
+[1]: https://docs.spring.io/spring-data-redis/reference/4.0-SNAPSHOT/api/java/deprecated-list.html?utm_source=chatgpt.com "Deprecated List (Spring Data Redis 4.0.7-SNAPSHOT API)"
