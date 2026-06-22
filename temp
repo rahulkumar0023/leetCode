@@ -1,133 +1,51 @@
-Update it like this.
-
-### 1. `ArthurSecurityProperties`
-
-Add `Jwt` inside the existing class:
+Yes, update it. The deprecated class is:
 
 ```java
-private Jwt jwt = new Jwt();
-
-@Data
-public static class Jwt {
-    private String jwkSetUri;
-}
+GenericJackson2JsonRedisSerializer
 ```
 
-Full relevant part:
+You can avoid it by using:
 
 ```java
-@Data
-@Configuration
-@ConfigurationProperties(prefix = "arthur")
-public class ArthurSecurityProperties {
-
-    private Session session = new Session();
-    private Handoff handoff = new Handoff();
-    private AuthTransaction authTransaction = new AuthTransaction();
-    private Jwt jwt = new Jwt();
-
-    @Data
-    public static class Session {
-        private long ttlMinutes = 60;
-    }
-
-    @Data
-    public static class Handoff {
-        private long ttlSeconds = 60;
-    }
-
-    @Data
-    public static class AuthTransaction {
-        private long ttlMinutes = 5;
-    }
-
-    @Data
-    public static class Jwt {
-        private String jwkSetUri;
-    }
-}
+Jackson2JsonRedisSerializer<Object>
 ```
 
-### 2. `application.yml`
-
-```yaml
-arthur:
-  session:
-    ttl-minutes: 30
-  handoff:
-    ttl-seconds: 60
-  auth-transaction:
-    ttl-minutes: 5
-  jwt:
-    jwk-set-uri: http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local/protocol/openid-connect/certs
-```
-
-Later for Ping:
-
-```yaml
-arthur:
-  jwt:
-    jwk-set-uri: https://your-ping-domain/pf/JWKS
-```
-
-### 3. `JwtConfig`
+## Updated `RedisConfig`
 
 ```java
 @Configuration
-@RequiredArgsConstructor
-public class JwtConfig {
-
-    private final ArthurSecurityProperties properties;
+public class RedisConfig {
 
     @Bean
-    public JwtDecoder jwtDecoder() {
-        NimbusJwtDecoder decoder =
-                NimbusJwtDecoder.withJwkSetUri(
-                        properties.getJwt().getJwkSetUri())
-                        .build();
+    public RedisTemplate<String, Object> redisTemplate(
+            RedisConnectionFactory connectionFactory,
+            ObjectMapper objectMapper) {
 
-        decoder.setJwtValidator(
-                jwt -> OAuth2TokenValidatorResult.success());
+        RedisTemplate<String, Object> template = new RedisTemplate<>();
+        template.setConnectionFactory(connectionFactory);
 
-        return decoder;
+        StringRedisSerializer stringSerializer =
+                new StringRedisSerializer();
+
+        Jackson2JsonRedisSerializer<Object> jsonSerializer =
+                new Jackson2JsonRedisSerializer<>(objectMapper, Object.class);
+
+        template.setKeySerializer(stringSerializer);
+        template.setHashKeySerializer(stringSerializer);
+        template.setValueSerializer(jsonSerializer);
+        template.setHashValueSerializer(jsonSerializer);
+
+        template.afterPropertiesSet();
+
+        return template;
     }
-}
-```
 
-### 4. Test coverage
-
-```java
-class ArthurSecurityPropertiesTest {
-
-    @Test
-    void shouldHaveDefaultValues() {
-        ArthurSecurityProperties properties =
-                new ArthurSecurityProperties();
-
-        assertThat(properties.getSession().getTtlMinutes()).isEqualTo(60);
-        assertThat(properties.getHandoff().getTtlSeconds()).isEqualTo(60);
-        assertThat(properties.getAuthTransaction().getTtlMinutes()).isEqualTo(5);
-        assertThat(properties.getJwt()).isNotNull();
-    }
-}
-```
-
-```java
-class JwtConfigTest {
-
-    @Test
-    void jwtDecoder_shouldCreateDecoder() {
-        ArthurSecurityProperties properties =
-                new ArthurSecurityProperties();
-
-        properties.getJwt().setJwkSetUri(
-                "http://localhost/realms/test/protocol/openid-connect/certs");
-
-        JwtConfig config = new JwtConfig(properties);
-
-        JwtDecoder decoder = config.jwtDecoder();
-
-        assertThat(decoder).isNotNull();
+    @Bean
+    public ObjectMapper objectMapper() {
+        ObjectMapper mapper = new ObjectMapper();
+        mapper.registerModule(new JavaTimeModule());
+        mapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+        return mapper;
     }
 }
 ```
@@ -135,8 +53,69 @@ class JwtConfigTest {
 Imports:
 
 ```java
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.serializer.Jackson2JsonRedisSerializer;
+import org.springframework.data.redis.serializer.StringRedisSerializer;
+```
+
+## Test coverage
+
+```java
+class RedisConfigTest {
+
+    private final RedisConfig redisConfig = new RedisConfig();
+
+    @Test
+    void objectMapper_shouldSupportJavaTimeAndDisableTimestampSerialization() {
+        ObjectMapper objectMapper = redisConfig.objectMapper();
+
+        assertThat(objectMapper.isEnabled(
+                SerializationFeature.WRITE_DATES_AS_TIMESTAMPS))
+                .isFalse();
+    }
+
+    @Test
+    void redisTemplate_shouldCreateTemplate() {
+        RedisConnectionFactory connectionFactory =
+                mock(RedisConnectionFactory.class);
+
+        ObjectMapper objectMapper = redisConfig.objectMapper();
+
+        RedisTemplate<String, Object> template =
+                redisConfig.redisTemplate(connectionFactory, objectMapper);
+
+        assertThat(template).isNotNull();
+        assertThat(template.getConnectionFactory()).isSameAs(connectionFactory);
+        assertThat(template.getKeySerializer())
+                .isInstanceOf(StringRedisSerializer.class);
+        assertThat(template.getHashKeySerializer())
+                .isInstanceOf(StringRedisSerializer.class);
+        assertThat(template.getValueSerializer())
+                .isInstanceOf(Jackson2JsonRedisSerializer.class);
+        assertThat(template.getHashValueSerializer())
+                .isInstanceOf(Jackson2JsonRedisSerializer.class);
+    }
+}
+```
+
+Imports:
+
+```java
+import com.bnpp.pf.arthur.core.config.RedisConfig;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import org.junit.jupiter.api.Test;
-import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.serializer.Jackson2JsonRedisSerializer;
+import org.springframework.data.redis.serializer.StringRedisSerializer;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 ```
