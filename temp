@@ -1,7 +1,142 @@
-logging:
-  level:
-    com.bnpp.pf.arthur.core: DEBUG
-    com.bnpp.pf.arthur.core.service: DEBUG
-    com.bnpp.pf.arthur.core.controller: DEBUG
-    org.springframework.security: DEBUG
-    org.springframework.web: INFO
+Update it like this.
+
+### 1. `ArthurSecurityProperties`
+
+Add `Jwt` inside the existing class:
+
+```java
+private Jwt jwt = new Jwt();
+
+@Data
+public static class Jwt {
+    private String jwkSetUri;
+}
+```
+
+Full relevant part:
+
+```java
+@Data
+@Configuration
+@ConfigurationProperties(prefix = "arthur")
+public class ArthurSecurityProperties {
+
+    private Session session = new Session();
+    private Handoff handoff = new Handoff();
+    private AuthTransaction authTransaction = new AuthTransaction();
+    private Jwt jwt = new Jwt();
+
+    @Data
+    public static class Session {
+        private long ttlMinutes = 60;
+    }
+
+    @Data
+    public static class Handoff {
+        private long ttlSeconds = 60;
+    }
+
+    @Data
+    public static class AuthTransaction {
+        private long ttlMinutes = 5;
+    }
+
+    @Data
+    public static class Jwt {
+        private String jwkSetUri;
+    }
+}
+```
+
+### 2. `application.yml`
+
+```yaml
+arthur:
+  session:
+    ttl-minutes: 30
+  handoff:
+    ttl-seconds: 60
+  auth-transaction:
+    ttl-minutes: 5
+  jwt:
+    jwk-set-uri: http://keycloak.ns-keycloak.svc.cluster.local/realms/arthur-local/protocol/openid-connect/certs
+```
+
+Later for Ping:
+
+```yaml
+arthur:
+  jwt:
+    jwk-set-uri: https://your-ping-domain/pf/JWKS
+```
+
+### 3. `JwtConfig`
+
+```java
+@Configuration
+@RequiredArgsConstructor
+public class JwtConfig {
+
+    private final ArthurSecurityProperties properties;
+
+    @Bean
+    public JwtDecoder jwtDecoder() {
+        NimbusJwtDecoder decoder =
+                NimbusJwtDecoder.withJwkSetUri(
+                        properties.getJwt().getJwkSetUri())
+                        .build();
+
+        decoder.setJwtValidator(
+                jwt -> OAuth2TokenValidatorResult.success());
+
+        return decoder;
+    }
+}
+```
+
+### 4. Test coverage
+
+```java
+class ArthurSecurityPropertiesTest {
+
+    @Test
+    void shouldHaveDefaultValues() {
+        ArthurSecurityProperties properties =
+                new ArthurSecurityProperties();
+
+        assertThat(properties.getSession().getTtlMinutes()).isEqualTo(60);
+        assertThat(properties.getHandoff().getTtlSeconds()).isEqualTo(60);
+        assertThat(properties.getAuthTransaction().getTtlMinutes()).isEqualTo(5);
+        assertThat(properties.getJwt()).isNotNull();
+    }
+}
+```
+
+```java
+class JwtConfigTest {
+
+    @Test
+    void jwtDecoder_shouldCreateDecoder() {
+        ArthurSecurityProperties properties =
+                new ArthurSecurityProperties();
+
+        properties.getJwt().setJwkSetUri(
+                "http://localhost/realms/test/protocol/openid-connect/certs");
+
+        JwtConfig config = new JwtConfig(properties);
+
+        JwtDecoder decoder = config.jwtDecoder();
+
+        assertThat(decoder).isNotNull();
+    }
+}
+```
+
+Imports:
+
+```java
+import org.junit.jupiter.api.Test;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+
+import static org.assertj.core.api.Assertions.assertThat;
+```
