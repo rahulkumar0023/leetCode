@@ -1,8 +1,7 @@
-log.info("Session TTL={}",
-        properties.getSession().getTtlMinutes());
-
-log.info("Handoff TTL={}",
-        properties.getHandoff().getTtlSeconds());
-
-log.info("Auth Tx TTL={}",
-        properties.getAuthTransaction().getTtlMinutes());
+logging:
+  level:
+    com.bnpp.pf.arthur.core: DEBUG
+    com.bnpp.pf.arthur.core.service: DEBUG
+    com.bnpp.pf.arthur.core.controller: DEBUG
+    org.springframework.security: DEBUG
+    org.springframework.web: INFO
