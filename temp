@@ -1,43 +1,71 @@
-Yes — in Spring Data Redis 4, `GenericJackson2JsonRedisSerializer` is deprecated. Use:
+Sonar is likely reporting duplicated test setup because both exception tests repeat the same WebClient mock chain.
+
+Keep only **one exception test** for `OidcTokenService`, as in your screenshot, and remove the other similar exception test.
+
+To reduce duplication further, move the common setup into a helper method:
 
 ```java
-GenericJacksonJsonRedisSerializer
-```
-
-Spring’s deprecated API list says `GenericJackson2JsonRedisSerializer` is deprecated since 4.0 in favor of `GenericJacksonJsonRedisSerializer`. ([Home][1])
-
-Use this:
-
-```java
-import org.springframework.data.redis.serializer.GenericJacksonJsonRedisSerializer;
-import org.springframework.data.redis.serializer.StringRedisSerializer;
-```
-
-```java
-@Bean
-public RedisTemplate<String, Object> redisTemplate(
-        RedisConnectionFactory connectionFactory) {
-
-    RedisTemplate<String, Object> template = new RedisTemplate<>();
-    template.setConnectionFactory(connectionFactory);
-
-    StringRedisSerializer stringSerializer = new StringRedisSerializer();
-    GenericJacksonJsonRedisSerializer jsonSerializer =
-            new GenericJacksonJsonRedisSerializer();
-
-    template.setKeySerializer(stringSerializer);
-    template.setHashKeySerializer(stringSerializer);
-    template.setValueSerializer(jsonSerializer);
-    template.setHashValueSerializer(jsonSerializer);
-
-    template.afterPropertiesSet();
-
-    return template;
+private void mockTokenExchangeChain() {
+    when(webClient.post()).thenReturn(requestBodyUriSpec);
+    when(requestBodyUriSpec.uri("token-uri"))
+            .thenReturn(requestBodySpec);
+    when(requestBodySpec.contentType(
+            MediaType.APPLICATION_FORM_URLENCODED))
+            .thenReturn(requestBodySpec);
+    when(requestBodySpec.body(any(BodyInserter.class)))
+            .thenReturn(requestHeadersSpec);
+    when(requestHeadersSpec.retrieve())
+            .thenReturn(responseSpec);
+    when(responseSpec.onStatus(any(), any()))
+            .thenReturn(responseSpec);
 }
 ```
 
-Do **not** pass `com.fasterxml.jackson.databind.ObjectMapper` if your constructor expects `tools.jackson.databind.ObjectMapper`.
+Then your single exception test becomes:
 
-For now, remove the custom `ObjectMapper` from the Redis serializer and use the no-args constructor.
+```java
+@Test
+void exchangeToken_shouldThrowTechnicalException_whenWebClientFails() {
+    mockTokenExchangeChain();
 
-[1]: https://docs.spring.io/spring-data-redis/reference/4.0-SNAPSHOT/api/java/deprecated-list.html?utm_source=chatgpt.com "Deprecated List (Spring Data Redis 4.0.7-SNAPSHOT API)"
+    when(responseSpec.bodyToMono(any(ParameterizedTypeReference.class)))
+            .thenReturn(Mono.error(
+                    new TechnicalException(
+                            "Token exchange failed: invalid_grant")));
+
+    assertThatThrownBy(() -> oidcTokenService.exchangeToken(
+            "auth-code",
+            "token-uri",
+            validAppConfig(),
+            authTransaction()))
+            .isInstanceOf(TechnicalException.class)
+            .hasMessageContaining("Token exchange failed");
+}
+```
+
+Keep your success test separately, but also reuse the same helper:
+
+```java
+@Test
+void exchangeToken_shouldReturnTokens_whenRequestSucceeds() {
+    mockTokenExchangeChain();
+
+    Map<String, Object> tokenResponse = Map.of(
+            "access_token", "access-token",
+            "id_token", "id-token"
+    );
+
+    when(responseSpec.bodyToMono(any(ParameterizedTypeReference.class)))
+            .thenReturn(Mono.just(tokenResponse));
+
+    Map<String, Object> result = oidcTokenService.exchangeToken(
+            "auth-code",
+            "token-uri",
+            validAppConfig(),
+            authTransaction());
+
+    assertThat(result).isEqualTo(tokenResponse);
+}
+```
+
+This gives Sonar one common mock setup and only one exception-flow test.
