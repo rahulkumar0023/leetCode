@@ -1,8 +1,20 @@
-Yes, but handle them differently based on who calls them.
+They are failing because your tests still expect the **old behavior** (`500 Internal Server Error`), but you now want browser endpoints to redirect to your error UI.
 
-### `startAuthentication(...)`
+The visible failing test is this one:
 
-This is browser-facing. You should catch unexpected errors and redirect to your UI error page, just like callback.
+```java
+startAuthentication_shouldThrowInternalServerError_whenAppIdMissing
+```
+
+It currently expects:
+
+```java
+.andExpect(status().isInternalServerError());
+```
+
+Change it to a redirect expectation.
+
+First ensure the `try` starts **before** the appId validation in `startAuthentication()`. Otherwise the `IllegalArgumentException` escapes and the PF handler returns XML again.
 
 ```java
 @GetMapping("/start")
@@ -17,36 +29,11 @@ public ResponseEntity<Void> startAuthentication(
                 : queryAppId;
 
         if (appId == null || appId.isBlank()) {
-            return ResponseEntity.status(HttpStatus.FOUND)
-                    .location(URI.create("/arthur-core/error/technical"))
-                    .build();
+            throw new IllegalArgumentException(
+                    "APP_ID header or appId query param is empty");
         }
 
-        HttpSession session = request.getSession(true);
-
-        String pendingRedirect =
-                (String) session.getAttribute("AUTH_PENDING_REDIRECT");
-        Long pendingTime =
-                (Long) session.getAttribute("AUTH_PENDING_TIME");
-
-        if (pendingRedirect != null && pendingTime != null) {
-            long age = System.currentTimeMillis() - pendingTime;
-
-            if (age < 10_000) {
-                return ResponseEntity.status(HttpStatus.FOUND)
-                        .location(URI.create(pendingRedirect))
-                        .build();
-            }
-        }
-
-        String redirectUrl = authService.startAuthentication(appId);
-
-        session.setAttribute("AUTH_PENDING_REDIRECT", redirectUrl);
-        session.setAttribute("AUTH_PENDING_TIME", System.currentTimeMillis());
-
-        return ResponseEntity.status(HttpStatus.FOUND)
-                .location(URI.create(redirectUrl))
-                .build();
+        // keep your current duplicate-request and redirect logic here
 
     } catch (Exception exception) {
         log.error("Authentication start failed", exception);
@@ -58,51 +45,22 @@ public ResponseEntity<Void> startAuthentication(
 }
 ```
 
-Do not expose technical exception messages to the browser here.
-
-### `exchange(...)`
-
-Do **not** redirect this one. It is a backend-to-backend JSON API called by B2Boost. B2Boost needs an HTTP error response, not an HTML page.
-
-Keep it simple:
+Then replace that test with:
 
 ```java
-@PostMapping("/handoff/exchange")
-public ResponseEntity<HandoffExchangeResponse> exchange(
-        @RequestBody HandoffExchangeRequest request) {
+@Test
+void startAuthentication_shouldRedirectToTechnicalError_whenAppIdIsMissing()
+        throws Exception {
 
-    if (request == null || request.getCode() == null
-            || request.getCode().isBlank()) {
-        throw new IllegalArgumentException("Handoff code must not be blank");
-    }
-
-    return ResponseEntity.ok(handoffService.exchange(request.getCode()));
+    mockMvc.perform(get("/auth/start"))
+            .andExpect(status().is3xxRedirection())
+            .andExpect(header().string(
+                    "Location",
+                    "/arthur-core/error/technical"));
 }
 ```
 
-Then handle handoff exceptions in your existing API exception handler, returning JSON. For example:
-
-```java
-@ExceptionHandler(TechnicalException.class)
-public ResponseEntity<Map<String, Object>> handleTechnicalException(
-        TechnicalException exception) {
-
-    return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-            .body(Map.of(
-                    "status", HttpStatus.BAD_REQUEST.value(),
-                    "error", "HANDOFF_EXCHANGE_FAILED",
-                    "message", exception.getMessage()
-            ));
-}
-```
-
-For expired/used/invalid handoff code, `400 Bad Request` is acceptable for now. Later you may distinguish:
-
-* `400` invalid or expired code
-* `409` already-used code
-* `503` Redis or Arthur infrastructure failure
-
-### Coverage to add
+For service failure:
 
 ```java
 @Test
@@ -115,39 +73,39 @@ void startAuthentication_shouldRedirectToTechnicalError_whenServiceFails()
     mockMvc.perform(get("/auth/start")
                     .param("appId", "B2BOOST_BE"))
             .andExpect(status().is3xxRedirection())
-            .andExpect(redirectedUrl("/arthur-core/error/technical"));
+            .andExpect(header().string(
+                    "Location",
+                    "/arthur-core/error/technical"));
 }
 ```
+
+For callback failure:
 
 ```java
 @Test
-void exchange_shouldReturnBadRequest_whenCodeIsBlank()
+void callback_shouldRedirectToTechnicalError_whenAuthenticationFails()
         throws Exception {
 
-    mockMvc.perform(post("/auth/handoff/exchange")
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .content("""
-                            {"code": " "}
-                            """))
-            .andExpect(status().isBadRequest());
+    when(authService.handleCallback(anyString(), anyString()))
+            .thenThrow(new TechnicalException("Token exchange failed"));
+
+    mockMvc.perform(get("/auth/callback")
+                    .param("code", "invalid-code")
+                    .param("state", "invalid-state"))
+            .andExpect(status().is3xxRedirection())
+            .andExpect(header().string(
+                    "Location",
+                    "/arthur-core/error/technical"));
 }
 ```
+
+Your existing success test should still expect:
 
 ```java
-@Test
-void exchange_shouldReturnErrorResponse_whenHandoffFails()
-        throws Exception {
-
-    when(handoffService.exchange("expired-code"))
-            .thenThrow(new TechnicalException("Invalid or expired handoff code"));
-
-    mockMvc.perform(post("/auth/handoff/exchange")
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .content("""
-                            {"code": "expired-code"}
-                            """))
-            .andExpect(status().isBadRequest());
-}
+.andExpect(status().isFound())
+.andExpect(header().string(
+        "Location",
+        "https://ping.example.com/auth"));
 ```
 
-For `start` and `callback`, redirect to your UI error page. For `handoff/exchange`, return JSON and let B2Boost decide whether to retry, restart login, or show its own error page.
+The key change is: browser-facing errors now return **302 to `/arthur-core/error/technical`**, not `500`.
