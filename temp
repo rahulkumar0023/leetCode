@@ -1,153 +1,153 @@
-Your `ErrorController` is fine. The reason you see the XML error page is that an exception happens inside `/auth/callback` **before** your code redirects to `/error/technical`. The platform `PfExceptionHandler` catches it first and returns its own XML response.
+Yes, but handle them differently based on who calls them.
 
-Handle callback errors inside `AuthController` and redirect explicitly to your UI error page.
+### `startAuthentication(...)`
+
+This is browser-facing. You should catch unexpected errors and redirect to your UI error page, just like callback.
 
 ```java
-@GetMapping("/callback")
-public void callback(
-        @RequestParam String code,
-        @RequestParam String state,
-        HttpServletResponse response) throws IOException {
+@GetMapping("/start")
+public ResponseEntity<Void> startAuthentication(
+        @RequestHeader(value = "APP_ID", required = false) String headerAppId,
+        @RequestParam(value = "appId", required = false) String queryAppId,
+        HttpServletRequest request) {
 
     try {
-        AuthResult authResult = authService.handleCallback(code, state);
+        String appId = headerAppId != null && !headerAppId.isBlank()
+                ? headerAppId
+                : queryAppId;
 
-        Cookie cookie = new Cookie(
-                "ARTHUR_SESSION",
-                authResult.getSessionId());
+        if (appId == null || appId.isBlank()) {
+            return ResponseEntity.status(HttpStatus.FOUND)
+                    .location(URI.create("/arthur-core/error/technical"))
+                    .build();
+        }
 
-        cookie.setHttpOnly(true);
-        cookie.setSecure(true);
-        cookie.setPath("/");
-        cookie.setDomain("kubernetes.localhost");
-        cookie.setMaxAge(3600);
+        HttpSession session = request.getSession(true);
 
-        response.addCookie(cookie);
+        String pendingRedirect =
+                (String) session.getAttribute("AUTH_PENDING_REDIRECT");
+        Long pendingTime =
+                (Long) session.getAttribute("AUTH_PENDING_TIME");
 
-        String redirectUrl = "/arthur-core/sales-points?appId="
-                + URLEncoder.encode(
-                        authResult.getAppId(),
-                        StandardCharsets.UTF_8);
+        if (pendingRedirect != null && pendingTime != null) {
+            long age = System.currentTimeMillis() - pendingTime;
 
-        response.sendRedirect(redirectUrl);
+            if (age < 10_000) {
+                return ResponseEntity.status(HttpStatus.FOUND)
+                        .location(URI.create(pendingRedirect))
+                        .build();
+            }
+        }
+
+        String redirectUrl = authService.startAuthentication(appId);
+
+        session.setAttribute("AUTH_PENDING_REDIRECT", redirectUrl);
+        session.setAttribute("AUTH_PENDING_TIME", System.currentTimeMillis());
+
+        return ResponseEntity.status(HttpStatus.FOUND)
+                .location(URI.create(redirectUrl))
+                .build();
 
     } catch (Exception exception) {
-        log.error("Authentication callback failed", exception);
-        response.sendRedirect("/arthur-core/error/technical");
+        log.error("Authentication start failed", exception);
+
+        return ResponseEntity.status(HttpStatus.FOUND)
+                .location(URI.create("/arthur-core/error/technical"))
+                .build();
     }
 }
 ```
 
-Use your actual context path consistently. Your screenshots show the app is under:
+Do not expose technical exception messages to the browser here.
 
-```text
-/arthur-core
-```
+### `exchange(...)`
 
-So this is important:
+Do **not** redirect this one. It is a backend-to-backend JSON API called by B2Boost. B2Boost needs an HTTP error response, not an HTML page.
 
-```java
-response.sendRedirect("/arthur-core/error/technical");
-```
-
-not just:
+Keep it simple:
 
 ```java
-response.sendRedirect("/error/technical");
-```
+@PostMapping("/handoff/exchange")
+public ResponseEntity<HandoffExchangeResponse> exchange(
+        @RequestBody HandoffExchangeRequest request) {
 
-That lets the browser reach:
-
-```text
-https://arthur-core.kubernetes.localhost/arthur-core/error/technical
-```
-
-and render `views/ui-error`.
-
-## `ErrorController` coverage
-
-A direct unit test is enough. No need for MockMvc.
-
-```java
-@ExtendWith(MockitoExtension.class)
-class ErrorControllerTest {
-
-    private final ErrorController errorController =
-            new ErrorController();
-
-    @Test
-    void technicalError_shouldReturnTechnicalErrorPage() {
-        ModelAndView result = errorController.technicalError();
-
-        assertThat(result.getViewName()).isEqualTo("views/ui-error");
-        assertThat(result.getModel())
-                .containsEntry("pageTitle", "Erreur technique")
-                .containsEntry("iconPath", "/images/icons/tools.svg")
-                .containsEntry(
-                        "title",
-                        "Oups, un problème<br>technique est survenu.")
-                .containsEntry(
-                        "message",
-                        "Nous n’avons pas pu charger les données nécessaires pour le moment.")
-                .containsEntry(
-                        "strongMessage",
-                        "Réessayez dans quelques minutes. Si le problème persiste, contactez votre Zone Manager pour obtenir de l’aide.");
+    if (request == null || request.getCode() == null
+            || request.getCode().isBlank()) {
+        throw new IllegalArgumentException("Handoff code must not be blank");
     }
 
-    @Test
-    void noSalesPoint_shouldReturnNoSalesPointErrorPage() {
-        ModelAndView result = errorController.noSalesPoint();
-
-        assertThat(result.getViewName()).isEqualTo("views/ui-error");
-        assertThat(result.getModel())
-                .containsEntry("pageTitle", "Point de vente non défini")
-                .containsEntry("iconPath", "/images/icons/warning.svg")
-                .containsEntry(
-                        "title",
-                        "Oups, votre point de vente<br>n’est pas encore défini")
-                .containsEntry(
-                        "message",
-                        "Votre compte n’est pas associé à un point de vente. Vous ne pouvez donc pas accéder à la plateforme partenaire Cetelem.")
-                .containsEntry(
-                        "strongMessage",
-                        "Veuillez contacter votre Zone Manager pour recevoir de l’aide.");
-    }
+    return ResponseEntity.ok(handoffService.exchange(request.getCode()));
 }
 ```
 
-Imports:
+Then handle handoff exceptions in your existing API exception handler, returning JSON. For example:
 
 ```java
-import org.junit.jupiter.api.Test;
-import org.springframework.web.servlet.ModelAndView;
+@ExceptionHandler(TechnicalException.class)
+public ResponseEntity<Map<String, Object>> handleTechnicalException(
+        TechnicalException exception) {
 
-import static org.assertj.core.api.Assertions.assertThat;
+    return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+            .body(Map.of(
+                    "status", HttpStatus.BAD_REQUEST.value(),
+                    "error", "HANDOFF_EXCHANGE_FAILED",
+                    "message", exception.getMessage()
+            ));
+}
 ```
 
-You can remove this annotation because the test has no mocks:
+For expired/used/invalid handoff code, `400 Bad Request` is acceptable for now. Later you may distinguish:
 
-```java
-@ExtendWith(MockitoExtension.class)
-```
+* `400` invalid or expired code
+* `409` already-used code
+* `503` Redis or Arthur infrastructure failure
 
-## Add coverage for callback failure
-
-In `AuthControllerTest`, add:
+### Coverage to add
 
 ```java
 @Test
-void callback_shouldRedirectToTechnicalErrorPage_whenAuthenticationFails()
+void startAuthentication_shouldRedirectToTechnicalError_whenServiceFails()
         throws Exception {
 
-    when(authService.handleCallback(anyString(), anyString()))
-            .thenThrow(new TechnicalException("Token exchange failed"));
+    when(authService.startAuthentication("B2BOOST_BE"))
+            .thenThrow(new TechnicalException("Partner Repository unavailable"));
 
-    mockMvc.perform(get("/auth/callback")
-                    .param("code", "invalid-code")
-                    .param("state", "invalid-state"))
+    mockMvc.perform(get("/auth/start")
+                    .param("appId", "B2BOOST_BE"))
             .andExpect(status().is3xxRedirection())
             .andExpect(redirectedUrl("/arthur-core/error/technical"));
 }
 ```
 
-This test proves the user sees your French UI error page instead of the PF XML error response.
+```java
+@Test
+void exchange_shouldReturnBadRequest_whenCodeIsBlank()
+        throws Exception {
+
+    mockMvc.perform(post("/auth/handoff/exchange")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content("""
+                            {"code": " "}
+                            """))
+            .andExpect(status().isBadRequest());
+}
+```
+
+```java
+@Test
+void exchange_shouldReturnErrorResponse_whenHandoffFails()
+        throws Exception {
+
+    when(handoffService.exchange("expired-code"))
+            .thenThrow(new TechnicalException("Invalid or expired handoff code"));
+
+    mockMvc.perform(post("/auth/handoff/exchange")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content("""
+                            {"code": "expired-code"}
+                            """))
+            .andExpect(status().isBadRequest());
+}
+```
+
+For `start` and `callback`, redirect to your UI error page. For `handoff/exchange`, return JSON and let B2Boost decide whether to retry, restart login, or show its own error page.
