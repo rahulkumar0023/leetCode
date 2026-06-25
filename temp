@@ -1,71 +1,153 @@
-Sonar is likely reporting duplicated test setup because both exception tests repeat the same WebClient mock chain.
+Your `ErrorController` is fine. The reason you see the XML error page is that an exception happens inside `/auth/callback` **before** your code redirects to `/error/technical`. The platform `PfExceptionHandler` catches it first and returns its own XML response.
 
-Keep only **one exception test** for `OidcTokenService`, as in your screenshot, and remove the other similar exception test.
-
-To reduce duplication further, move the common setup into a helper method:
+Handle callback errors inside `AuthController` and redirect explicitly to your UI error page.
 
 ```java
-private void mockTokenExchangeChain() {
-    when(webClient.post()).thenReturn(requestBodyUriSpec);
-    when(requestBodyUriSpec.uri("token-uri"))
-            .thenReturn(requestBodySpec);
-    when(requestBodySpec.contentType(
-            MediaType.APPLICATION_FORM_URLENCODED))
-            .thenReturn(requestBodySpec);
-    when(requestBodySpec.body(any(BodyInserter.class)))
-            .thenReturn(requestHeadersSpec);
-    when(requestHeadersSpec.retrieve())
-            .thenReturn(responseSpec);
-    when(responseSpec.onStatus(any(), any()))
-            .thenReturn(responseSpec);
+@GetMapping("/callback")
+public void callback(
+        @RequestParam String code,
+        @RequestParam String state,
+        HttpServletResponse response) throws IOException {
+
+    try {
+        AuthResult authResult = authService.handleCallback(code, state);
+
+        Cookie cookie = new Cookie(
+                "ARTHUR_SESSION",
+                authResult.getSessionId());
+
+        cookie.setHttpOnly(true);
+        cookie.setSecure(true);
+        cookie.setPath("/");
+        cookie.setDomain("kubernetes.localhost");
+        cookie.setMaxAge(3600);
+
+        response.addCookie(cookie);
+
+        String redirectUrl = "/arthur-core/sales-points?appId="
+                + URLEncoder.encode(
+                        authResult.getAppId(),
+                        StandardCharsets.UTF_8);
+
+        response.sendRedirect(redirectUrl);
+
+    } catch (Exception exception) {
+        log.error("Authentication callback failed", exception);
+        response.sendRedirect("/arthur-core/error/technical");
+    }
 }
 ```
 
-Then your single exception test becomes:
+Use your actual context path consistently. Your screenshots show the app is under:
+
+```text
+/arthur-core
+```
+
+So this is important:
+
+```java
+response.sendRedirect("/arthur-core/error/technical");
+```
+
+not just:
+
+```java
+response.sendRedirect("/error/technical");
+```
+
+That lets the browser reach:
+
+```text
+https://arthur-core.kubernetes.localhost/arthur-core/error/technical
+```
+
+and render `views/ui-error`.
+
+## `ErrorController` coverage
+
+A direct unit test is enough. No need for MockMvc.
+
+```java
+@ExtendWith(MockitoExtension.class)
+class ErrorControllerTest {
+
+    private final ErrorController errorController =
+            new ErrorController();
+
+    @Test
+    void technicalError_shouldReturnTechnicalErrorPage() {
+        ModelAndView result = errorController.technicalError();
+
+        assertThat(result.getViewName()).isEqualTo("views/ui-error");
+        assertThat(result.getModel())
+                .containsEntry("pageTitle", "Erreur technique")
+                .containsEntry("iconPath", "/images/icons/tools.svg")
+                .containsEntry(
+                        "title",
+                        "Oups, un problème<br>technique est survenu.")
+                .containsEntry(
+                        "message",
+                        "Nous n’avons pas pu charger les données nécessaires pour le moment.")
+                .containsEntry(
+                        "strongMessage",
+                        "Réessayez dans quelques minutes. Si le problème persiste, contactez votre Zone Manager pour obtenir de l’aide.");
+    }
+
+    @Test
+    void noSalesPoint_shouldReturnNoSalesPointErrorPage() {
+        ModelAndView result = errorController.noSalesPoint();
+
+        assertThat(result.getViewName()).isEqualTo("views/ui-error");
+        assertThat(result.getModel())
+                .containsEntry("pageTitle", "Point de vente non défini")
+                .containsEntry("iconPath", "/images/icons/warning.svg")
+                .containsEntry(
+                        "title",
+                        "Oups, votre point de vente<br>n’est pas encore défini")
+                .containsEntry(
+                        "message",
+                        "Votre compte n’est pas associé à un point de vente. Vous ne pouvez donc pas accéder à la plateforme partenaire Cetelem.")
+                .containsEntry(
+                        "strongMessage",
+                        "Veuillez contacter votre Zone Manager pour recevoir de l’aide.");
+    }
+}
+```
+
+Imports:
+
+```java
+import org.junit.jupiter.api.Test;
+import org.springframework.web.servlet.ModelAndView;
+
+import static org.assertj.core.api.Assertions.assertThat;
+```
+
+You can remove this annotation because the test has no mocks:
+
+```java
+@ExtendWith(MockitoExtension.class)
+```
+
+## Add coverage for callback failure
+
+In `AuthControllerTest`, add:
 
 ```java
 @Test
-void exchangeToken_shouldThrowTechnicalException_whenWebClientFails() {
-    mockTokenExchangeChain();
+void callback_shouldRedirectToTechnicalErrorPage_whenAuthenticationFails()
+        throws Exception {
 
-    when(responseSpec.bodyToMono(any(ParameterizedTypeReference.class)))
-            .thenReturn(Mono.error(
-                    new TechnicalException(
-                            "Token exchange failed: invalid_grant")));
+    when(authService.handleCallback(anyString(), anyString()))
+            .thenThrow(new TechnicalException("Token exchange failed"));
 
-    assertThatThrownBy(() -> oidcTokenService.exchangeToken(
-            "auth-code",
-            "token-uri",
-            validAppConfig(),
-            authTransaction()))
-            .isInstanceOf(TechnicalException.class)
-            .hasMessageContaining("Token exchange failed");
+    mockMvc.perform(get("/auth/callback")
+                    .param("code", "invalid-code")
+                    .param("state", "invalid-state"))
+            .andExpect(status().is3xxRedirection())
+            .andExpect(redirectedUrl("/arthur-core/error/technical"));
 }
 ```
 
-Keep your success test separately, but also reuse the same helper:
-
-```java
-@Test
-void exchangeToken_shouldReturnTokens_whenRequestSucceeds() {
-    mockTokenExchangeChain();
-
-    Map<String, Object> tokenResponse = Map.of(
-            "access_token", "access-token",
-            "id_token", "id-token"
-    );
-
-    when(responseSpec.bodyToMono(any(ParameterizedTypeReference.class)))
-            .thenReturn(Mono.just(tokenResponse));
-
-    Map<String, Object> result = oidcTokenService.exchangeToken(
-            "auth-code",
-            "token-uri",
-            validAppConfig(),
-            authTransaction());
-
-    assertThat(result).isEqualTo(tokenResponse);
-}
-```
-
-This gives Sonar one common mock setup and only one exception-flow test.
+This test proves the user sees your French UI error page instead of the PF XML error response.
