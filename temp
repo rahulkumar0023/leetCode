@@ -1,3 +1,169 @@
+Add Swagger annotations to the Partner Repository controller methods.
+
+```java
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import io.swagger.v3.oas.annotations.tags.Tag;
+```
+
+At controller level:
+
+```java
+@RestController
+@RequestMapping("/partner-repository")
+@RequiredArgsConstructor
+@Tag(
+        name = "Partner Repository",
+        description = "Endpoints used by Arthur Core to retrieve application and user configuration."
+)
+public class PartnerRepositoryController {
+```
+
+For `/apps/{appId}`:
+
+```java
+@Operation(
+        summary = "Get application configuration",
+        description = """
+                Returns the application configuration used by Arthur Core
+                to start authentication and redirect the user after login.
+                """
+)
+@ApiResponses({
+        @ApiResponse(
+                responseCode = "200",
+                description = "Application configuration found",
+                content = @Content(
+                        mediaType = "application/json",
+                        schema = @Schema(implementation = AppConfigResponse.class)
+                )
+        ),
+        @ApiResponse(
+                responseCode = "404",
+                description = "Application not found",
+                content = @Content
+        ),
+        @ApiResponse(
+                responseCode = "400",
+                description = "Application identifier is blank or invalid",
+                content = @Content
+        )
+})
+@GetMapping("/apps/{appId}")
+public ResponseEntity<AppConfigResponse> getApp(
+        @Parameter(
+                description = "Application identifier",
+                example = "B2BOOST_BE",
+                required = true
+        )
+        @PathVariable String appId) {
+
+    return ResponseEntity.ok(appConfigService.getApp(appId));
+}
+```
+
+For `/users/{userId}`:
+
+```java
+@Operation(
+        summary = "Get user security context",
+        description = """
+                Returns the user profile, roles, and available sales points.
+                Used by Arthur Core after successful identity-provider authentication.
+                """
+)
+@ApiResponses({
+        @ApiResponse(
+                responseCode = "200",
+                description = "User found",
+                content = @Content(
+                        mediaType = "application/json",
+                        schema = @Schema(implementation = UserResponse.class)
+                )
+        ),
+        @ApiResponse(
+                responseCode = "404",
+                description = "User not found",
+                content = @Content
+        ),
+        @ApiResponse(
+                responseCode = "400",
+                description = "User identifier is blank or invalid",
+                content = @Content
+        )
+})
+@GetMapping("/users/{userId}")
+public ResponseEntity<UserResponse> getUser(
+        @Parameter(
+                description = "Partner Repository user identifier",
+                example = "testuser",
+                required = true
+        )
+        @PathVariable String userId) {
+
+    return ResponseEntity.ok(userService.getUser(userId));
+}
+```
+
+Then add basic DTO annotations so Swagger shows useful examples.
+
+```java
+@Schema(description = "Application configuration used by Arthur Core.")
+public class AppConfigResponse {
+
+    @Schema(example = "B2BOOST_BE")
+    private String appId;
+
+    @Schema(example = "b2boost-client")
+    private String clientId;
+
+    @Schema(example = "https://ping.example.com")
+    private String issuerUri;
+
+    @Schema(example = "https://arthur-core.example.com/auth/callback")
+    private String redirectUri;
+
+    @Schema(example = "https://b2boost.example.com/post-login")
+    private String postLoginRedirectUri;
+
+    @Schema(example = "true")
+    private boolean enabled;
+}
+```
+
+```java
+@Schema(description = "User profile, roles, and sales point context.")
+public class UserResponse {
+
+    @Schema(example = "testuser")
+    private String userId;
+
+    @Schema(example = "test.user@example.com")
+    private String email;
+
+    @Schema(example = "[\"SALES_ADVISOR\"]")
+    private List<String> roles;
+
+    @Schema(description = "Sales points available to the user")
+    private List<SalesPointResponse> salesPoints;
+}
+```
+
+This will make the generated Partner Repository Swagger clearly document:
+
+```text
+GET /apps/{appId}
+GET /users/{userId}
+```
+
+For Arthur Core consumption, those two endpoints are the important contract.
+
+
+------------------------
 Add OpenAPI documentation for the callback too. It is browser-facing, not a B2Boost backend API.
 
 ```java
