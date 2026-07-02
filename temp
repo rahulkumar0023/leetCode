@@ -1,5 +1,87 @@
+Add OpenAPI documentation for the callback too. It is browser-facing, not a B2Boost backend API.
+
+```java
+@Operation(
+        summary = "OIDC authentication callback",
+        description = """
+                Callback endpoint invoked by the identity provider after user authentication.
+
+                Arthur validates the authorization code and state, creates an Arthur session,
+                and redirects the browser to the sales-point selection page.
+
+                In case of an authentication failure, the browser is redirected to the
+                Arthur technical error page.
+                """
+)
+@ApiResponses({
+        @ApiResponse(
+                responseCode = "302",
+                description = "Browser redirected to sales-point selection or technical error page"
+        ),
+        @ApiResponse(
+                responseCode = "400",
+                description = "Missing or invalid callback parameters",
+                content = @Content
+        )
+})
+@GetMapping("/callback")
+public void callback(
+        @Parameter(
+                description = "Authorization code returned by the identity provider",
+                required = true,
+                example = "authorization-code-from-ping"
+        )
+        @RequestParam String code,
+
+        @Parameter(
+                description = "State value returned by the identity provider",
+                required = true,
+                example = "state-uuid"
+        )
+        @RequestParam String state,
+
+        HttpServletResponse response) throws IOException {
+
+    try {
+        AuthResult authResult = authService.handleCallback(code, state);
+
+        // existing cookie and redirect logic
+
+    } catch (Exception exception) {
+        log.error("Authentication callback failed", exception);
+        response.sendRedirect("/arthur-core/error/technical");
+    }
+}
+```
+
+Then your B2Boost grouped API should include:
+
+```java
+.pathsToMatch(
+        "/auth/start",
+        "/auth/callback",
+        "/auth/handoff/exchange"
+)
+```
+
+So the shared flow becomes visible in Swagger:
+
+```text
+GET  /auth/start
+GET  /auth/callback
+POST /auth/handoff/exchange
+```
+
+For B2Boost, clarify that they should call only:
+
+```text
+POST /auth/handoff/exchange
+```
+
+`/auth/start` and `/auth/callback` are browser redirect endpoints in the authentication journey.
 
 
+-----------------------
 Yes—add annotations to both, but for different reasons:
 
 * `/auth/handoff/exchange`: this is the **B2Boost contract**, so document it fully.
