@@ -1,3 +1,55 @@
+Yes. Create a dedicated Springdoc group that only includes the B2Boost handoff endpoint.
+
+Add a small config class:
+
+```java
+package com.bnpp.pf.arthur.core.config;
+
+import org.springdoc.core.models.GroupedOpenApi;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class OpenApiConfig {
+
+    @Bean
+    public GroupedOpenApi b2BoostApi() {
+        return GroupedOpenApi.builder()
+                .group("b2boost")
+                .pathsToMatch("/auth/handoff/exchange")
+                .build();
+    }
+}
+```
+
+Then use:
+
+```text
+https://arthur-core.kubernetes.localhost/arthur-core/v3/api-docs/b2boost
+```
+
+For YAML:
+
+```text
+https://arthur-core.kubernetes.localhost/arthur-core/v3/api-docs/b2boost.yaml
+```
+
+That generated file should contain only:
+
+```text
+POST /auth/handoff/exchange
+```
+
+You can still keep the normal `/v3/api-docs` endpoint for the full Arthur Core API. Springdoc supports grouped OpenAPI definitions filtered by path, and exposes each group under `/v3/api-docs/{groupName}`. ([springdoc.org][1])
+
+For B2Boost, this is the clean file to share.
+
+[1]: https://springdoc.org/faq.html?utm_source=chatgpt.com "F.A.Q"
+
+
+
+
+--------------------
 You can share an OpenAPI/Swagger contract in two ways.
 
 Since your app is on Spring Boot 4, first check whether your project already has a Swagger/OpenAPI dependency. If it does, start Arthur Core and try:
