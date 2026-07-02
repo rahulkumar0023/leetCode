@@ -1,3 +1,192 @@
+
+
+Yes—add annotations to both, but for different reasons:
+
+* `/auth/handoff/exchange`: this is the **B2Boost contract**, so document it fully.
+* `/auth/start`: document it mainly so B2Boost understands how login starts and where the browser is redirected.
+
+Use Swagger/OpenAPI 3 annotations from:
+
+```java
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.tags.Tag;
+```
+
+Add this on the controller:
+
+```java
+@Tag(
+        name = "B2Boost handoff",
+        description = "Endpoints used to start Arthur authentication and exchange the one-time handoff code."
+)
+@RestController
+@RequestMapping("/auth")
+@RequiredArgsConstructor
+public class AuthController {
+```
+
+For `/auth/start`:
+
+```java
+@Operation(
+        summary = "Start authentication",
+        description = """
+                Starts the Arthur authentication flow for an application.
+                The browser is redirected to the configured identity provider.
+                APP_ID can be sent either as a request header or as an appId query parameter.
+                """
+)
+@ApiResponses({
+        @ApiResponse(
+                responseCode = "302",
+                description = "Browser redirected to the identity provider or to a technical error page"
+        ),
+        @ApiResponse(
+                responseCode = "400",
+                description = "Application identifier is missing",
+                content = @Content
+        )
+})
+@GetMapping("/start")
+public ResponseEntity<Void> startAuthentication(
+        @Parameter(
+                description = "Target application identifier",
+                example = "B2BOOST_BE"
+        )
+        @RequestHeader(value = "APP_ID", required = false)
+        String headerAppId,
+
+        @Parameter(
+                description = "Alternative target application identifier",
+                example = "B2BOOST_BE"
+        )
+        @RequestParam(value = "appId", required = false)
+        String queryAppId,
+
+        HttpServletRequest request) {
+```
+
+For `/auth/handoff/exchange`, this is the important one:
+
+```java
+@Operation(
+        summary = "Exchange Arthur handoff code",
+        description = """
+                Called server-to-server by B2Boost after the browser is redirected
+                to B2Boost with a one-time handoff code.
+
+                The code is short-lived and can only be used once.
+                Arthur validates the code and returns the user security context.
+                """
+)
+@ApiResponses({
+        @ApiResponse(
+                responseCode = "200",
+                description = "Handoff exchanged successfully",
+                content = @Content(
+                        mediaType = "application/json",
+                        schema = @Schema(
+                                implementation = HandoffExchangeResponse.class)
+                )
+        ),
+        @ApiResponse(
+                responseCode = "400",
+                description = "Handoff code is invalid, expired, or already used",
+                content = @Content
+        ),
+        @ApiResponse(
+                responseCode = "500",
+                description = "Technical error while processing handoff exchange",
+                content = @Content
+        )
+})
+@PostMapping("/handoff/exchange")
+public ResponseEntity<HandoffExchangeResponse> exchange(
+        @io.swagger.v3.oas.annotations.parameters.RequestBody(
+                required = true,
+                description = "One-time handoff code received by B2Boost in the redirect URL",
+                content = @Content(
+                        schema = @Schema(
+                                implementation = HandoffExchangeRequest.class)
+                )
+        )
+        @RequestBody HandoffExchangeRequest request) {
+
+    return ResponseEntity.ok(
+            handoffService.exchange(request.getCode()));
+}
+```
+
+Also annotate the request DTO:
+
+```java
+@Data
+@Schema(description = "Request used by B2Boost to exchange a one-time Arthur handoff code.")
+public class HandoffExchangeRequest {
+
+    @Schema(
+            description = "Short-lived one-time handoff code received in the B2Boost redirect URL",
+            example = "5c39f269-3f29-4cf4-b08d-28b343d07c84",
+            requiredMode = Schema.RequiredMode.REQUIRED
+    )
+    private String code;
+}
+```
+
+And the response DTO:
+
+```java
+@Data
+@Schema(description = "Security context returned to B2Boost after a successful handoff exchange.")
+public class HandoffExchangeResponse {
+
+    @Schema(example = "12345678")
+    private String userId;
+
+    @Schema(example = "testuser")
+    private String username;
+
+    @Schema(example = "test.user@example.com")
+    private String email;
+
+    @Schema(example = "Test")
+    private String firstName;
+
+    @Schema(example = "User")
+    private String lastName;
+
+    @Schema(example = "B2BOOST_BE")
+    private String appId;
+
+    @Schema(example = "SP001")
+    private String selectedSalesPointId;
+
+    @Schema(example = "OU001")
+    private String selectedOrgUnitId;
+
+    @Schema(example = "[\"SALES_ADVISOR\"]")
+    private List<String> roles;
+}
+```
+
+After this, your grouped B2Boost Swagger endpoint should clearly show both:
+
+```text
+GET  /auth/start
+POST /auth/handoff/exchange
+```
+
+Springdoc supports OpenAPI annotations such as `@Operation`, `@Parameter`, `@ApiResponse`, and `@Schema`, and grouped APIs can be filtered by paths. ([OpenAPI 3 Library for spring-boot][1])
+
+[1]: https://springdoc.org/?utm_source=chatgpt.com "OpenAPI 3 Library for spring-boot"
+
+---
+
 Yes. Create a dedicated Springdoc group that only includes the B2Boost handoff endpoint.
 
 Add a small config class:
