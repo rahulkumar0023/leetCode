@@ -1,129 +1,14 @@
-Good — Vault is up now. The Terraform error is:
+Hi Sana,
 
-```text
-Error: failed to lookup token, error making API request:
-GET http://host.docker.internal:30433/v1/auth/token/lookup-self
-Code: 403
-permission denied
-```
+Good morning.
 
-This means Terraform can reach Vault, but the token it is using is **not allowed to call**:
+I reached out to Bogdan yesterday regarding this issue. It seems to be more complex than a straightforward application-level problem, as the network setup between CET and BE appears to be different.
 
-```text
-auth/token/lookup-self
-```
+He mentioned that he has already created a ticket and is also in touch with the DevOps team. We may still need additional support from the network/firewall team to investigate further.
 
-Usually this happens because `VAULT_TOKEN` is missing, wrong, expired, or is a limited token without self-lookup permission.
+I have redirected Bogdan to [Maria-Nione@alphacredit.be](mailto:Maria-Nione@alphacredit.be), as she is leading the CITX deco project from the COE ADM side.
 
-### First check which token Terraform is using
+I am also currently involved in another critical IAM Arthur development, so my bandwidth is limited at the moment. However, I will do my best to support and investigate further where possible.
 
-```bash
-echo $VAULT_TOKEN
-```
-
-Then test it manually:
-
-```bash
-export VAULT_ADDR="http://host.docker.internal:30433"
-
-vault token lookup
-```
-
-If that also gives `403 permission denied`, Terraform is not the problem—the token is.
-
-### For local development, use the root token
-
-Get the Vault root token from the init/unseal output or from your init job logs.
-
-Try:
-
-```bash
-kubectl logs job/init-vault-job -n vault
-```
-
-Or inspect Vault logs:
-
-```bash
-kubectl logs vault-0 -n vault
-```
-
-Look for something like:
-
-```text
-Initial Root Token: ...
-```
-
-Then set it:
-
-```bash
-export VAULT_ADDR="http://host.docker.internal:30433"
-export VAULT_TOKEN="<root-token>"
-```
-
-Test:
-
-```bash
-vault status
-vault token lookup
-```
-
-After that run Terraform again:
-
-```bash
-terraform apply
-```
-
-### Better approach: create a Terraform token
-
-Do not use the root token long term. Create a local Terraform policy.
-
-Create `terraform-policy.hcl`:
-
-```hcl
-path "secret/*" {
-  capabilities = ["create", "read", "update", "delete", "list"]
-}
-
-path "auth/token/lookup-self" {
-  capabilities = ["read"]
-}
-```
-
-Apply it using the root token:
-
-```bash
-vault policy write terraform terraform-policy.hcl
-```
-
-Create a token for Terraform:
-
-```bash
-vault token create -policy=terraform -ttl=24h
-```
-
-Copy the generated token and export it:
-
-```bash
-export VAULT_TOKEN="<new-terraform-token>"
-```
-
-Then rerun Terraform.
-
-### Your Terraform provider should look similar to this
-
-```hcl
-provider "vault" {
-  address = "http://host.docker.internal:30433"
-}
-```
-
-You do not need to put the token in Terraform code if `VAULT_TOKEN` is exported in your terminal.
-
-### The warnings in the screenshot
-
-These are not causing the failure:
-
-* undeclared Terraform variables
-* experimental `module_variable_optional_attrs`
-
-The actual blocking error is only the `403 permission denied` on `auth/token/lookup-self`.
+Best regards,
+Rahul
