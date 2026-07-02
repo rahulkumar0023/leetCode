@@ -1,3 +1,104 @@
+You can share an OpenAPI/Swagger contract in two ways.
+
+Since your app is on Spring Boot 4, first check whether your project already has a Swagger/OpenAPI dependency. If it does, start Arthur Core and try:
+
+```text
+https://arthur-core.kubernetes.localhost/arthur-core/v3/api-docs
+```
+
+That returns the generated OpenAPI JSON file. You can download/save that JSON and share it with the B2Boost team.
+
+For a browser UI, try:
+
+```text
+https://arthur-core.kubernetes.localhost/arthur-core/swagger-ui/index.html
+```
+
+Some newer Springdoc setups also expose Scalar instead of Swagger UI:
+
+```text
+https://arthur-core.kubernetes.localhost/arthur-core/scalar
+```
+
+Springdoc generates the OpenAPI description at `/v3/api-docs` from your controllers and DTOs. ([OpenAPI 3 Library for spring-boot][1])
+
+For B2Boost, the important endpoint is:
+
+```text
+POST /arthur-core/auth/handoff/exchange
+```
+
+with request:
+
+```json
+{
+  "code": "one-time-handoff-code"
+}
+```
+
+and response based on your `HandoffExchangeResponse`.
+
+Because you are using Spring Boot 4, be careful before adding an older `springdoc-openapi` dependency. Springdoc 2.x is documented for Spring Boot 3, while Springdoc 3.x added Boot 4 / Jackson 3 support. ([OpenAPI 3 Library for spring-boot][2])
+
+The cleanest immediate approach is:
+
+1. Add OpenAPI annotations to `exchange(...)` and the request/response DTOs.
+2. Generate `/v3/api-docs`.
+3. Download the JSON.
+4. Share that JSON file with B2Boost.
+
+For example:
+
+```java
+@Operation(
+        summary = "Exchange a one-time Arthur handoff code",
+        description = """
+                Called server-to-server by B2Boost after browser redirection.
+                The handoff code is short-lived and can be used only once.
+                """
+)
+@ApiResponses({
+        @ApiResponse(
+                responseCode = "200",
+                description = "Handoff exchanged successfully"
+        ),
+        @ApiResponse(
+                responseCode = "400",
+                description = "Invalid, expired, or already-used handoff code"
+        )
+})
+@PostMapping("/handoff/exchange")
+public ResponseEntity<HandoffExchangeResponse> exchange(
+        @RequestBody HandoffExchangeRequest request) {
+
+    return ResponseEntity.ok(
+            handoffService.exchange(request.getCode()));
+}
+```
+
+And document the request DTO:
+
+```java
+@Data
+public class HandoffExchangeRequest {
+
+    @Schema(
+            description = "Short-lived one-time code received in the B2Boost redirect URL",
+            example = "8a54e13c-7341-4cbd-a87a-2b6ec8d4e021",
+            requiredMode = Schema.RequiredMode.REQUIRED
+    )
+    private String code;
+}
+```
+
+Then B2Boost gets a proper machine-readable Swagger file instead of screenshots or manually maintained Word documentation.
+
+[1]: https://springdoc.org/?utm_source=chatgpt.com "OpenAPI 3 Library for spring-boot"
+[2]: https://springdoc.org/faq.html?utm_source=chatgpt.com "F.A.Q"
+
+
+
+------------------------------------
 Yes. Your current response has only:
 
 ```text
