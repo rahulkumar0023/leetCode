@@ -1,58 +1,118 @@
-Yes. The user is **not reaching the API successfully because of proxy / authentication issues**.
+Yes. Your current response has only:
 
-What the logs show:
-
-1. Direct call to:
-
-`https://ubo-proxy-benelux.dev.echonet/ubo/api/ubo`
-
-fails with:
-
-`curl: (35) Recv failure: Connection was reset`
-
-and:
-
-`schannel: failed to receive handshake, SSL/TLS connection failed`
-
-So the TLS connection to the API host is being reset.
-
-2. Then curl tries using the corporate proxy:
-
-`http://nwbccproxy.be.fortis.bank:8080`
-
-but the proxy replies:
-
-`HTTP/1.1 407 authenticationrequired`
-
-This means the proxy requires authentication, and curl is not authenticated against it.
-
-Main issue:
-
-`407 Proxy Authentication Required`
-
-So the user cannot connect because their request is going through the bank proxy, but proxy authentication is missing or not being passed correctly.
-
-They can try:
-
-```bash
-curl --proxy http://USERNAME:PASSWORD@nwbccproxy.be.fortis.bank:8080 \
-  --request POST \
-  --url https://ubo-proxy-benelux.dev.echonet/ubo/api/ubo \
-  --header "Content-Type: application/json" \
-  --data '{"kvkNumber":"81408269"}' \
-  -vvv
+```text
+user_id, username, email, roles, app_id
 ```
 
-Or, if they are on Windows/BNP environment, try NTLM:
+To match the expected B2Boost context, extend it with the fields Arthur already knows.
 
-```bash
-curl --proxy http://nwbccproxy.be.fortis.bank:8080 \
-  --proxy-ntlm \
-  --proxy-user DOMAIN\USERNAME:PASSWORD \
-  --url https://ubo-proxy-benelux.dev.echonet/ubo/api/ubo \
-  --header "Content-Type: application/json" \
-  --data '{"kvkNumber":"81408269"}' \
-  -vvv
+```java
+@Data
+@JsonIgnoreProperties(ignoreUnknown = true)
+public class HandoffExchangeResponse {
+
+    @JsonProperty("user_id")
+    private String userId;          // GPS number / internal user identifier
+
+    @JsonProperty("username")
+    private String username;        // Login IS
+
+    @JsonProperty("email")
+    private String email;
+
+    @JsonProperty("first_name")
+    private String firstName;
+
+    @JsonProperty("last_name")
+    private String lastName;
+
+    @JsonProperty("brand_context")
+    private String brandContext;    // for example ORANGE / CETELEM
+
+    @JsonProperty("app_id")
+    private String appId;
+
+    @JsonProperty("selected_sales_point_id")
+    private String selectedSalesPointId;
+
+    @JsonProperty("selected_org_unit_id")
+    private String selectedOrgUnitId;
+
+    @JsonProperty("roles")
+    private List<String> roles;
+
+    @JsonProperty("session_expires_at")
+    private Instant sessionExpiresAt;
+
+    @JsonProperty("token_expires_at")
+    private Instant tokenExpiresAt;
+}
 ```
 
-Also check this: the screenshot shows `Content-Type: application/x-www-form-urlencoded`, not JSON, so the header may not be passed correctly. Use double quotes around headers/data.
+Then update `HandoffService.exchange(...)` where you build the response:
+
+```java
+HandoffExchangeResponse response = new HandoffExchangeResponse();
+
+response.setUserId(session.getUserId());
+response.setUsername(session.getUsername());
+response.setEmail(session.getEmail());
+response.setFirstName(session.getFirstName());
+response.setLastName(session.getLastName());
+
+response.setBrandContext(session.getBrandContext());
+response.setAppId(session.getAppId());
+
+response.setSelectedSalesPointId(session.getSelectedSalesPointId());
+response.setSelectedOrgUnitId(session.getSelectedOrgUnitId());
+
+response.setRoles(session.getRoles());
+
+response.setSessionExpiresAt(session.getExpiresAt());
+response.setTokenExpiresAt(session.getTokenExpiresAt());
+
+return response;
+```
+
+Use the exact getter names from your `UserSession`; they may differ slightly.
+
+A likely returned payload becomes:
+
+```json
+{
+  "user_id": "12345678",
+  "username": "testuser",
+  "email": "test.user@example.com",
+  "first_name": "Test",
+  "last_name": "User",
+  "brand_context": "CETELEM",
+  "app_id": "B2BOOST_BE",
+  "selected_sales_point_id": "SP001",
+  "selected_org_unit_id": "OU001",
+  "roles": ["SALES_ADVISOR"],
+  "session_expires_at": "2026-06-25T17:00:00Z",
+  "token_expires_at": "2026-06-25T16:30:00Z"
+}
+```
+
+Two important points:
+
+* Do **not** return the Ping access token, ID token, refresh token, Arthur session ID, or handoff code.
+* Only add `session_expires_at` and `token_expires_at` if B2Boost confirms it needs them. B2Boost should create and manage its own session after successful exchange.
+
+Update your handoff success test too:
+
+```java
+assertThat(result.getUserId()).isEqualTo("testuser");
+assertThat(result.getUsername()).isEqualTo("testuser");
+assertThat(result.getEmail()).isEqualTo("test.user@example.com");
+assertThat(result.getFirstName()).isEqualTo("Test");
+assertThat(result.getLastName()).isEqualTo("User");
+assertThat(result.getBrandContext()).isEqualTo("CETELEM");
+assertThat(result.getAppId()).isEqualTo("B2BOOST_BE");
+assertThat(result.getSelectedSalesPointId()).isEqualTo("SP001");
+assertThat(result.getSelectedOrgUnitId()).isEqualTo("OU001");
+assertThat(result.getRoles()).containsExactly("SALES_ADVISOR");
+```
+
+Before finalizing, B2Boost should confirm the exact names and whether `user_id` truly means GPS number or another identifier.
