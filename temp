@@ -12,3 +12,14 @@ I am also currently involved in another critical IAM Arthur development, so my b
 
 Best regards,
 Rahul
+`
+
+I needed some help with a user connecting to the UBO proxy from the CET VDI.
+
+I redirected him to you. The firewall seems to be open, but he is facing an issue with this host:
+
+`ubo-proxy-benelux.dev.sctonet (55.72.199.29)`
+Port: `443`
+
+Could you please help check or troubleshoot this from your side?
+
