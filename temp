@@ -1,4 +1,99 @@
+Yes. From your terminal, use:
 
+```bash
+curl -i -X POST "http://localhost:8080/internal/users/snapshots" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "metadata": {
+      "sourceSystem": "AS400",
+      "correlationId": "AS400-20260703-000001",
+      "snapshotTimestamp": "2026-07-03T10:30:00Z",
+      "payloadVersion": "1.0"
+    },
+    "source": {
+      "entity": "ORANGE",
+      "sourceRecordType": "SELLER",
+      "sourcePersonalId": "PSN001",
+      "gpsGroupNumber": "GPS000001",
+      "sourcePointOfSalesId": "BOU001"
+    },
+    "person": {
+      "firstName": "John",
+      "surname": "Doe",
+      "email": "john.doe@orange.example.com",
+      "phoneNumber": "+32470000000",
+      "language": "FR",
+      "status": "ACTIVE"
+    },
+    "pointOfSales": {
+      "id": "POS001",
+      "name": "Orange Shop Brussels"
+    },
+    "workingRelationship": {
+      "relationshipType": "SELLER",
+      "parentDealerId": "DEALER001",
+      "status": "ACTIVE"
+    }
+  }'
+```
+
+Adjust the URL if your application uses a context path, for example:
+
+```bash
+http://localhost:8080/partner-repository/internal/users/snapshots
+```
+
+Expected first response:
+
+```json
+{
+  "status": "ACCEPTED",
+  "code": "RECORD_CREATED",
+  "message": "User snapshot created successfully.",
+  "correlationId": "AS400-20260703-000001",
+  "partnerRepositoryRecordId": "GPS000001"
+}
+```
+
+Run the same command again. It should return:
+
+```json
+{
+  "status": "ACCEPTED",
+  "code": "NO_CHANGE"
+}
+```
+
+For an update test, change the phone number and correlation ID:
+
+```bash
+--data '{
+  ...
+  "metadata": {
+    "sourceSystem": "AS400",
+    "correlationId": "AS400-20260703-000002",
+    "snapshotTimestamp": "2026-07-03T10:35:00Z",
+    "payloadVersion": "1.0"
+  },
+  ...
+  "person": {
+    ...
+    "phoneNumber": "+32471111111",
+    ...
+  }
+}'
+```
+
+For deactivation, change:
+
+```json
+"status": "INACTIVE"
+```
+
+inside `workingRelationship` first.
+
+
+========
 
 Yes. Create a new Liquibase YAML changelog rather than running the SQL manually.
 
