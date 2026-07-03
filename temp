@@ -1,3 +1,122 @@
+You can reply with the information below. It matches the Arthur Core flow you have built.
+
+**Client type**
+Confidential OAuth 2.0 / OpenID Connect web client using Authorization Code Flow with PKCE.
+
+**Requested client ID**
+`arthur-core`
+Or, if they prefer environment-specific naming:
+
+```text
+arthur-core-qualification
+```
+
+**Redirect URI**
+Use the exact externally reachable callback URL:
+
+```text
+https://arthur-core.kubernetes.localhost/arthur-core/auth/callback
+```
+
+They must register it exactly, including `/arthur-core` and `/auth/callback`.
+
+**Requested scopes**
+
+```text
+openid profile email offline_access
+```
+
+* `openid` is required for OIDC and an ID token.
+* `profile` supplies standard identity attributes.
+* `email` supplies email.
+* `offline_access` is needed because they said refresh tokens will be enabled.
+
+**Requested ID-token claims**
+
+```text
+sub
+preferred_username
+email
+given_name
+family_name
+```
+
+For your current Arthur Core implementation, these are the important ones:
+
+```text
+sub                → Ping unique user identifier
+preferred_username → Arthur user lookup / Login IS
+email              → user email
+given_name         → first name
+family_name        → last name
+```
+
+You may also ask them to include:
+
+```text
+acr
+```
+
+because they mention `acr_values` for onboarding/authentication flow. It helps Arthur know which authentication level was used.
+
+**Access token**
+
+A signed JWT is acceptable. Arthur should validate its signature and expiry using Ping’s JWKS URI from the well-known configuration.
+
+**Refresh token**
+
+Please enable refresh-token issuance for the `offline_access` scope.
+
+**Other OAuth grants**
+
+No additional grants are needed at this stage.
+
+```text
+Required:
+authorization_code
+
+Not requested:
+client_credentials
+password
+implicit
+device_code
+```
+
+**Information you need back from Ping**
+
+Ask them to provide:
+
+```text
+- OpenID Connect discovery / well-known URL
+- Client ID
+- Client secret or approved client-authentication method
+- Exact token endpoint
+- Exact authorization endpoint
+- JWKS URI
+- Issuer value
+- Required acr_values
+- Expected audience, if applicable
+- Token lifetime and refresh-token lifetime
+```
+
+A concise response you can send:
+
+> Arthur Core is a confidential OpenID Connect web client. We request Authorization Code Flow with PKCE.
+>
+> Proposed client ID: `arthur-core-qualification`
+> Redirect URI: `https://arthur-core.kubernetes.localhost/arthur-core/auth/callback`
+> Requested scopes: `openid profile email offline_access`
+>
+> Please include the following ID-token claims: `sub`, `preferred_username`, `email`, `given_name`, `family_name`, and `acr`.
+>
+> A signed JWT access token and signed JWT ID token are suitable. Please enable refresh tokens for `offline_access`.
+>
+> We do not require additional grant types at this stage; `authorization_code` is sufficient.
+>
+> Please provide the OIDC discovery URL, client ID, client authentication/secret details, issuer, JWKS URI, expected audience, token lifetimes, and required `acr_values`.
+
+
+------------------------------
 Add Swagger annotations to the Partner Repository controller methods.
 
 ```java
