@@ -1,3 +1,100 @@
+
+
+Yes. Create a new Liquibase YAML changelog rather than running the SQL manually.
+
+For example:
+
+```text
+src/main/resources/db/changelog/changes/002-add-as400-sync-fields.yaml
+```
+
+```yaml
+databaseChangeLog:
+  - changeSet:
+      id: 002-add-as400-sync-fields
+      author: rahul.kumar
+      changes:
+
+        - addColumn:
+            tableName: users
+            columns:
+              - column:
+                  name: gps_group_number
+                  type: varchar(255)
+              - column:
+                  name: source_personal_id
+                  type: varchar(255)
+              - column:
+                  name: entity
+                  type: varchar(100)
+              - column:
+                  name: language
+                  type: varchar(20)
+              - column:
+                  name: status
+                  type: varchar(20)
+                  defaultValue: ACTIVE
+                  constraints:
+                    nullable: false
+
+        - addUniqueConstraint:
+            tableName: users
+            columnNames: gps_group_number
+            constraintName: uk_users_gps_group_number
+
+        - addColumn:
+            tableName: sales_points
+            columns:
+              - column:
+                  name: org_unit_id
+                  type: varchar(255)
+              - column:
+                  name: entity
+                  type: varchar(100)
+
+        - addColumn:
+            tableName: person_sales_point_relationships
+            columns:
+              - column:
+                  name: status
+                  type: varchar(20)
+                  defaultValue: ACTIVE
+                  constraints:
+                    nullable: false
+              - column:
+                  name: parent_dealer_id
+                  type: varchar(255)
+
+        - addUniqueConstraint:
+            tableName: person_sales_point_relationships
+            columnNames: person_user_id, sales_point_id, relationship_type
+            constraintName: uk_person_sales_point_relationship
+```
+
+Then include it in your master changelog, for example:
+
+```yaml
+databaseChangeLog:
+  - include:
+      file: db/changelog/changes/002-add-as400-sync-fields.yaml
+```
+
+Use the path format already used by your current Liquibase master file.
+
+Before adding the unique relationship constraint, check whether your database already has duplicates. If it does, Liquibase will fail at that step. For your local database, you can inspect with:
+
+```sql
+SELECT person_user_id, sales_point_id, relationship_type, COUNT(*)
+FROM person_sales_point_relationships
+GROUP BY person_user_id, sales_point_id, relationship_type
+HAVING COUNT(*) > 1;
+```
+
+One correction to the earlier entity suggestion: `gps_group_number` should probably be nullable initially if you already have existing users created manually. Once AS400 becomes the only source and all old records are migrated, you can make it non-null in a later Liquibase changeset.
+
+
+---
+
 Below is a complete first version for the **AS400 → Partner Repository → PostgreSQL** flow.
 
 This version handles:
