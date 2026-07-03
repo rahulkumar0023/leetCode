@@ -1,3 +1,11 @@
+Please include the following ID token claims:
+- sub
+- preferred_username
+- email
+- given_name
+- family_name
+- acr
+
 Hello Latif,
 
 Please find below the requested information.
