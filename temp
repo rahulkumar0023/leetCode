@@ -1,168 +1,136 @@
-Yes. Since AS400’s contract may use either camelCase or snake_case, you can support both without changing the global Jackson configuration.
+Use `curl` with **both formats** to confirm your `@JsonProperty` + `@JsonAlias` changes work.
 
-For each field where the incoming name may differ, use `@JsonProperty` for the preferred API name and `@JsonAlias` for the alternative.
+First test the official snake_case contract:
 
-Example for the root request:
-
-```java
-import com.fasterxml.jackson.annotation.JsonAlias;
-import com.fasterxml.jackson.annotation.JsonProperty;
-import jakarta.validation.Valid;
-import jakarta.validation.constraints.NotNull;
-import lombok.Getter;
-import lombok.Setter;
-
-@Getter
-@Setter
-public class As400UserSnapshotRequest {
-
-    @Valid
-    @NotNull
-    @JsonProperty("metadata")
-    private As400MetadataRequest metadata;
-
-    @Valid
-    @NotNull
-    @JsonProperty("source")
-    private As400SourceRequest source;
-
-    @Valid
-    @NotNull
-    @JsonProperty("person")
-    private As400PersonRequest person;
-
-    @Valid
-    @NotNull
-    @JsonProperty("point_of_sales")
-    @JsonAlias("pointOfSales")
-    private As400PointOfSalesRequest pointOfSales;
-
-    @Valid
-    @NotNull
-    @JsonProperty("working_relationship")
-    @JsonAlias("workingRelationship")
-    private As400WorkingRelationshipRequest workingRelationship;
+```bash
+curl -i -X POST "http://localhost:8080/internal/users/snapshots" \
+  -H "Content-Type: application/json" \
+  --data-binary @- <<'EOF'
+{
+  "metadata": {
+    "source_system": "AS400",
+    "correlation_id": "AS400-20260703-000001",
+    "snapshot_timestamp": "2026-07-03T10:30:00Z",
+    "payload_version": "1.0"
+  },
+  "source": {
+    "entity": "ORANGE",
+    "source_record_type": "SELLER",
+    "source_personal_id": "PSN001",
+    "gps_group_number": "GPS000001",
+    "source_point_of_sales_id": "BOU001"
+  },
+  "person": {
+    "first_name": "John",
+    "surname": "Doe",
+    "email": "john.doe@orange.example.com",
+    "phone_number": "+32470000000",
+    "language": "FR",
+    "status": "ACTIVE"
+  },
+  "point_of_sales": {
+    "id": "POS001",
+    "name": "Orange Shop Brussels"
+  },
+  "working_relationship": {
+    "relationship_type": "SELLER",
+    "parent_dealer_id": "DEALER001",
+    "status": "ACTIVE"
+  }
 }
+EOF
 ```
 
-For nested DTOs, do the same.
-
-```java
-@Getter
-@Setter
-public class As400MetadataRequest {
-
-    @NotBlank
-    @JsonProperty("source_system")
-    @JsonAlias("sourceSystem")
-    private String sourceSystem;
-
-    @NotBlank
-    @JsonProperty("correlation_id")
-    @JsonAlias("correlationId")
-    private String correlationId;
-
-    @NotNull
-    @JsonProperty("snapshot_timestamp")
-    @JsonAlias("snapshotTimestamp")
-    private Instant snapshotTimestamp;
-
-    @NotBlank
-    @JsonProperty("payload_version")
-    @JsonAlias("payloadVersion")
-    private String payloadVersion;
-}
-```
-
-```java
-@Getter
-@Setter
-public class As400SourceRequest {
-
-    @NotBlank
-    private String entity;
-
-    @NotBlank
-    @JsonProperty("source_record_type")
-    @JsonAlias("sourceRecordType")
-    private String sourceRecordType;
-
-    @JsonProperty("source_personal_id")
-    @JsonAlias("sourcePersonalId")
-    private String sourcePersonalId;
-
-    @NotBlank
-    @JsonProperty("gps_group_number")
-    @JsonAlias("gpsGroupNumber")
-    private String gpsGroupNumber;
-
-    @NotBlank
-    @JsonProperty("source_point_of_sales_id")
-    @JsonAlias("sourcePointOfSalesId")
-    private String sourcePointOfSalesId;
-}
-```
-
-```java
-@Getter
-@Setter
-public class As400PersonRequest {
-
-    @NotBlank
-    @JsonProperty("first_name")
-    @JsonAlias("firstName")
-    private String firstName;
-
-    @NotBlank
-    private String surname;
-
-    @Email
-    @NotBlank
-    private String email;
-
-    @JsonProperty("phone_number")
-    @JsonAlias("phoneNumber")
-    private String phoneNumber;
-
-    @NotBlank
-    private String language;
-
-    @NotBlank
-    private String status;
-}
-```
-
-```java
-@Getter
-@Setter
-public class As400WorkingRelationshipRequest {
-
-    @NotBlank
-    @JsonProperty("relationship_type")
-    @JsonAlias("relationshipType")
-    private String relationshipType;
-
-    @JsonProperty("parent_dealer_id")
-    @JsonAlias("parentDealerId")
-    private String parentDealerId;
-
-    @NotBlank
-    private String status;
-}
-```
-
-For `As400PointOfSalesRequest`, `id` and `name` do not need aliases because both styles are the same.
-
-Use **snake_case as the official AS400 contract** in Swagger/OpenAPI, because it matches the rest of your Partner Repository API. `@JsonAlias` simply makes local testing and future integrations more forgiving.
-
-Then both payload styles will work:
+Expected first response:
 
 ```json
-{ "point_of_sales": { "id": "POS001", "name": "Orange Shop Brussels" } }
+{
+  "status": "ACCEPTED",
+  "code": "RECORD_CREATED",
+  "correlationId": "AS400-20260703-000001",
+  "partnerRepositoryRecordId": "GPS000001"
+}
 ```
 
-and:
+Then send the exact same request again. Expected:
 
 ```json
-{ "pointOfSales": { "id": "POS001", "name": "Orange Shop Brussels" } }
+{
+  "status": "ACCEPTED",
+  "code": "NO_CHANGE"
+}
 ```
+
+Now test camelCase aliases:
+
+```bash
+curl -i -X POST "http://localhost:8080/internal/users/snapshots" \
+  -H "Content-Type: application/json" \
+  --data-binary @- <<'EOF'
+{
+  "metadata": {
+    "sourceSystem": "AS400",
+    "correlationId": "AS400-20260703-000002",
+    "snapshotTimestamp": "2026-07-03T10:35:00Z",
+    "payloadVersion": "1.0"
+  },
+  "source": {
+    "entity": "ORANGE",
+    "sourceRecordType": "SELLER",
+    "sourcePersonalId": "PSN001",
+    "gpsGroupNumber": "GPS000002",
+    "sourcePointOfSalesId": "BOU001"
+  },
+  "person": {
+    "firstName": "Jane",
+    "surname": "Doe",
+    "email": "jane.doe@orange.example.com",
+    "phoneNumber": "+32471111111",
+    "language": "FR",
+    "status": "ACTIVE"
+  },
+  "pointOfSales": {
+    "id": "POS001",
+    "name": "Orange Shop Brussels"
+  },
+  "workingRelationship": {
+    "relationshipType": "SELLER",
+    "parentDealerId": "DEALER001",
+    "status": "ACTIVE"
+  }
+}
+EOF
+```
+
+Expected again:
+
+```json
+{
+  "status": "ACCEPTED",
+  "code": "RECORD_CREATED"
+}
+```
+
+Then verify PostgreSQL:
+
+```sql
+SELECT user_id, username, first_name, last_name, email,
+       gps_group_number, entity, language, status
+FROM users
+WHERE gps_group_number IN ('GPS000001', 'GPS000002');
+```
+
+```sql
+SELECT person_user_id, sales_point_id, relationship_type,
+       org_unit_id, parent_dealer_id, status
+FROM person_sales_point_relationships
+WHERE person_user_id IN ('GPS000001', 'GPS000002');
+```
+
+Finally, test validation by removing `email` or sending:
+
+```json
+"email": "not-an-email"
+```
+
+You should get `400 Bad Request`.
