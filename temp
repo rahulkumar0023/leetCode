@@ -1,136 +1,73 @@
-Use `curl` with **both formats** to confirm your `@JsonProperty` + `@JsonAlias` changes work.
+That is fine. In your current design, `userId` is already the stable shared identifier:
 
-First test the official snake_case contract:
-
-```bash
-curl -i -X POST "http://localhost:8080/internal/users/snapshots" \
-  -H "Content-Type: application/json" \
-  --data-binary @- <<'EOF'
-{
-  "metadata": {
-    "source_system": "AS400",
-    "correlation_id": "AS400-20260703-000001",
-    "snapshot_timestamp": "2026-07-03T10:30:00Z",
-    "payload_version": "1.0"
-  },
-  "source": {
-    "entity": "ORANGE",
-    "source_record_type": "SELLER",
-    "source_personal_id": "PSN001",
-    "gps_group_number": "GPS000001",
-    "source_point_of_sales_id": "BOU001"
-  },
-  "person": {
-    "first_name": "John",
-    "surname": "Doe",
-    "email": "john.doe@orange.example.com",
-    "phone_number": "+32470000000",
-    "language": "FR",
-    "status": "ACTIVE"
-  },
-  "point_of_sales": {
-    "id": "POS001",
-    "name": "Orange Shop Brussels"
-  },
-  "working_relationship": {
-    "relationship_type": "SELLER",
-    "parent_dealer_id": "DEALER001",
-    "status": "ACTIVE"
-  }
-}
-EOF
+```text
+AS400 GPS number:   GPS000001
+Partner Repository: user_id = GPS000001
+Ping/Keycloak user: preferred_username = gps000001
+Arthur lookup:      findByUserId("gps000001")
 ```
 
-Expected first response:
+The case difference is the only thing to watch:
 
-```json
-{
-  "status": "ACCEPTED",
-  "code": "RECORD_CREATED",
-  "correlationId": "AS400-20260703-000001",
-  "partnerRepositoryRecordId": "GPS000001"
+```text
+GPS000001
+gps000001
+```
+
+PostgreSQL string equality is normally case-sensitive, so:
+
+```java
+findByUserId("gps000001")
+```
+
+will not find:
+
+```text
+GPS000001
+```
+
+unless your stored value is also lowercase.
+
+Best fix: normalize the identifier consistently when receiving it from AS400 and when looking it up after authentication.
+
+For example, use lowercase everywhere:
+
+```java
+private String normalizeUserId(String userId) {
+    return userId == null ? null : userId.trim().toLowerCase(Locale.ROOT);
 }
 ```
 
-Then send the exact same request again. Expected:
+When saving AS400 data:
 
-```json
-{
-  "status": "ACCEPTED",
-  "code": "NO_CHANGE"
-}
+```java
+String userId = normalizeUserId(
+        request.getSource().getGpsGroupNumber());
+
+user.setUserId(userId);
+user.setUsername(userId);
 ```
 
-Now test camelCase aliases:
+When Arthur receives `preferred_username` from Ping:
 
-```bash
-curl -i -X POST "http://localhost:8080/internal/users/snapshots" \
-  -H "Content-Type: application/json" \
-  --data-binary @- <<'EOF'
-{
-  "metadata": {
-    "sourceSystem": "AS400",
-    "correlationId": "AS400-20260703-000002",
-    "snapshotTimestamp": "2026-07-03T10:35:00Z",
-    "payloadVersion": "1.0"
-  },
-  "source": {
-    "entity": "ORANGE",
-    "sourceRecordType": "SELLER",
-    "sourcePersonalId": "PSN001",
-    "gpsGroupNumber": "GPS000002",
-    "sourcePointOfSalesId": "BOU001"
-  },
-  "person": {
-    "firstName": "Jane",
-    "surname": "Doe",
-    "email": "jane.doe@orange.example.com",
-    "phoneNumber": "+32471111111",
-    "language": "FR",
-    "status": "ACTIVE"
-  },
-  "pointOfSales": {
-    "id": "POS001",
-    "name": "Orange Shop Brussels"
-  },
-  "workingRelationship": {
-    "relationshipType": "SELLER",
-    "parentDealerId": "DEALER001",
-    "status": "ACTIVE"
-  }
-}
-EOF
+```java
+String userId = normalizeUserId(claims.getPreferredUsername());
+
+UserResponse user = partnerRepositoryClient.getUser(userId);
 ```
 
-Expected again:
+Then your database contains:
 
-```json
-{
-  "status": "ACCEPTED",
-  "code": "RECORD_CREATED"
-}
+```text
+gps000001
 ```
 
-Then verify PostgreSQL:
+and Ping also returns:
 
-```sql
-SELECT user_id, username, first_name, last_name, email,
-       gps_group_number, entity, language, status
-FROM users
-WHERE gps_group_number IN ('GPS000001', 'GPS000002');
+```text
+gps000001
 ```
 
-```sql
-SELECT person_user_id, sales_point_id, relationship_type,
-       org_unit_id, parent_dealer_id, status
-FROM person_sales_point_relationships
-WHERE person_user_id IN ('GPS000001', 'GPS000002');
-```
+So `findByUserId(...)` works consistently.
 
-Finally, test validation by removing `email` or sending:
-
-```json
-"email": "not-an-email"
-```
-
-You should get `400 Bad Request`.
+Because you are already using `findByUserId`, you do not need `gpsGroupNumber` as a separate lookup key unless AS400 sends a different external identifier in the future. In that case, keeping `gpsGroupNumber` can still be useful for traceability, but it should contain the same normalized value.
