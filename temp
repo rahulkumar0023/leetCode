@@ -1,365 +1,12 @@
-Yes. From your terminal, use:
+Yes. Since AS400’s contract may use either camelCase or snake_case, you can support both without changing the global Jackson configuration.
 
-```bash
-curl -i -X POST "http://localhost:8080/internal/users/snapshots" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "metadata": {
-      "sourceSystem": "AS400",
-      "correlationId": "AS400-20260703-000001",
-      "snapshotTimestamp": "2026-07-03T10:30:00Z",
-      "payloadVersion": "1.0"
-    },
-    "source": {
-      "entity": "ORANGE",
-      "sourceRecordType": "SELLER",
-      "sourcePersonalId": "PSN001",
-      "gpsGroupNumber": "GPS000001",
-      "sourcePointOfSalesId": "BOU001"
-    },
-    "person": {
-      "firstName": "John",
-      "surname": "Doe",
-      "email": "john.doe@orange.example.com",
-      "phoneNumber": "+32470000000",
-      "language": "FR",
-      "status": "ACTIVE"
-    },
-    "pointOfSales": {
-      "id": "POS001",
-      "name": "Orange Shop Brussels"
-    },
-    "workingRelationship": {
-      "relationshipType": "SELLER",
-      "parentDealerId": "DEALER001",
-      "status": "ACTIVE"
-    }
-  }'
-```
+For each field where the incoming name may differ, use `@JsonProperty` for the preferred API name and `@JsonAlias` for the alternative.
 
-Adjust the URL if your application uses a context path, for example:
-
-```bash
-http://localhost:8080/partner-repository/internal/users/snapshots
-```
-
-Expected first response:
-
-```json
-{
-  "status": "ACCEPTED",
-  "code": "RECORD_CREATED",
-  "message": "User snapshot created successfully.",
-  "correlationId": "AS400-20260703-000001",
-  "partnerRepositoryRecordId": "GPS000001"
-}
-```
-
-Run the same command again. It should return:
-
-```json
-{
-  "status": "ACCEPTED",
-  "code": "NO_CHANGE"
-}
-```
-
-For an update test, change the phone number and correlation ID:
-
-```bash
---data '{
-  ...
-  "metadata": {
-    "sourceSystem": "AS400",
-    "correlationId": "AS400-20260703-000002",
-    "snapshotTimestamp": "2026-07-03T10:35:00Z",
-    "payloadVersion": "1.0"
-  },
-  ...
-  "person": {
-    ...
-    "phoneNumber": "+32471111111",
-    ...
-  }
-}'
-```
-
-For deactivation, change:
-
-```json
-"status": "INACTIVE"
-```
-
-inside `workingRelationship` first.
-
-
-========
-
-Yes. Create a new Liquibase YAML changelog rather than running the SQL manually.
-
-For example:
-
-```text
-src/main/resources/db/changelog/changes/002-add-as400-sync-fields.yaml
-```
-
-```yaml
-databaseChangeLog:
-  - changeSet:
-      id: 002-add-as400-sync-fields
-      author: rahul.kumar
-      changes:
-
-        - addColumn:
-            tableName: users
-            columns:
-              - column:
-                  name: gps_group_number
-                  type: varchar(255)
-              - column:
-                  name: source_personal_id
-                  type: varchar(255)
-              - column:
-                  name: entity
-                  type: varchar(100)
-              - column:
-                  name: language
-                  type: varchar(20)
-              - column:
-                  name: status
-                  type: varchar(20)
-                  defaultValue: ACTIVE
-                  constraints:
-                    nullable: false
-
-        - addUniqueConstraint:
-            tableName: users
-            columnNames: gps_group_number
-            constraintName: uk_users_gps_group_number
-
-        - addColumn:
-            tableName: sales_points
-            columns:
-              - column:
-                  name: org_unit_id
-                  type: varchar(255)
-              - column:
-                  name: entity
-                  type: varchar(100)
-
-        - addColumn:
-            tableName: person_sales_point_relationships
-            columns:
-              - column:
-                  name: status
-                  type: varchar(20)
-                  defaultValue: ACTIVE
-                  constraints:
-                    nullable: false
-              - column:
-                  name: parent_dealer_id
-                  type: varchar(255)
-
-        - addUniqueConstraint:
-            tableName: person_sales_point_relationships
-            columnNames: person_user_id, sales_point_id, relationship_type
-            constraintName: uk_person_sales_point_relationship
-```
-
-Then include it in your master changelog, for example:
-
-```yaml
-databaseChangeLog:
-  - include:
-      file: db/changelog/changes/002-add-as400-sync-fields.yaml
-```
-
-Use the path format already used by your current Liquibase master file.
-
-Before adding the unique relationship constraint, check whether your database already has duplicates. If it does, Liquibase will fail at that step. For your local database, you can inspect with:
-
-```sql
-SELECT person_user_id, sales_point_id, relationship_type, COUNT(*)
-FROM person_sales_point_relationships
-GROUP BY person_user_id, sales_point_id, relationship_type
-HAVING COUNT(*) > 1;
-```
-
-One correction to the earlier entity suggestion: `gps_group_number` should probably be nullable initially if you already have existing users created manually. Once AS400 becomes the only source and all old records are migrated, you can make it non-null in a later Liquibase changeset.
-
-
----
-
-Below is a complete first version for the **AS400 → Partner Repository → PostgreSQL** flow.
-
-This version handles:
-
-* create user
-* update user
-* deactivate relationship/user
-* no-change detection
-* AS400 response codes
-* user, sales point, and relationship persistence
-
-It does **not** call Ping yet. Add Ping after this database flow works reliably.
-
----
-
-## 1. Update `UserEntity`
+Example for the root request:
 
 ```java
-package com.bnpp.pf.partner.repository.entity;
-
-import jakarta.persistence.*;
-import lombok.Getter;
-import lombok.Setter;
-
-@Entity
-@Table(name = "users")
-@Getter
-@Setter
-public class UserEntity {
-
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
-
-    @Column(name = "user_id", nullable = false, unique = true)
-    private String userId;
-
-    @Column(name = "username", nullable = false, unique = true)
-    private String username;
-
-    @Column(name = "first_name")
-    private String firstName;
-
-    @Column(name = "last_name")
-    private String lastName;
-
-    @Column(name = "email")
-    private String email;
-
-    @Column(name = "phone_number")
-    private String phoneNumber;
-
-    @Column(name = "gps_group_number", nullable = false, unique = true)
-    private String gpsGroupNumber;
-
-    @Column(name = "source_personal_id")
-    private String sourcePersonalId;
-
-    @Column(name = "entity")
-    private String entity;
-
-    @Column(name = "language")
-    private String language;
-
-    @Column(name = "status", nullable = false)
-    private String status;
-}
-```
-
----
-
-## 2. Update `SalesPointEntity`
-
-```java
-package com.bnpp.pf.partner.repository.entity;
-
-import jakarta.persistence.*;
-import lombok.Getter;
-import lombok.Setter;
-
-@Entity
-@Table(name = "sales_points")
-@Getter
-@Setter
-public class SalesPointEntity {
-
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
-
-    @Column(name = "sales_point_id", nullable = false, unique = true)
-    private String salesPointId;
-
-    @Column(name = "label", nullable = false)
-    private String label;
-
-    @Column(name = "org_unit_id")
-    private String orgUnitId;
-
-    @Column(name = "entity")
-    private String entity;
-}
-```
-
----
-
-## 3. Update `PersonSalesPointRelationshipEntity`
-
-```java
-package com.bnpp.pf.partner.repository.entity;
-
-import jakarta.persistence.*;
-import lombok.Getter;
-import lombok.Setter;
-
-@Entity
-@Table(
-        name = "person_sales_point_relationships",
-        uniqueConstraints = @UniqueConstraint(
-                name = "uk_person_sales_point_relationship",
-                columnNames = {
-                        "person_user_id",
-                        "sales_point_id",
-                        "relationship_type"
-                }
-        )
-)
-@Getter
-@Setter
-public class PersonSalesPointRelationshipEntity {
-
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
-
-    @Column(name = "person_user_id", nullable = false)
-    private String personUserId;
-
-    @Column(name = "sales_point_id", nullable = false)
-    private String salesPointId;
-
-    @Column(name = "relationship_type", nullable = false)
-    private String relationshipType;
-
-    @Column(name = "org_unit_id", nullable = false)
-    private String orgUnitId;
-
-    @Column(name = "status", nullable = false)
-    private String status;
-
-    @Column(name = "parent_dealer_id")
-    private String parentDealerId;
-}
-```
-
----
-
-# 4. AS400 request DTOs
-
-Create package:
-
-```text
-dto/as400
-```
-
-### `As400UserSnapshotRequest`
-
-```java
-package com.bnpp.pf.partner.repository.dto.as400;
-
+import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotNull;
 import lombok.Getter;
@@ -371,66 +18,63 @@ public class As400UserSnapshotRequest {
 
     @Valid
     @NotNull
+    @JsonProperty("metadata")
     private As400MetadataRequest metadata;
 
     @Valid
     @NotNull
+    @JsonProperty("source")
     private As400SourceRequest source;
 
     @Valid
     @NotNull
+    @JsonProperty("person")
     private As400PersonRequest person;
 
     @Valid
     @NotNull
+    @JsonProperty("point_of_sales")
+    @JsonAlias("pointOfSales")
     private As400PointOfSalesRequest pointOfSales;
 
     @Valid
     @NotNull
+    @JsonProperty("working_relationship")
+    @JsonAlias("workingRelationship")
     private As400WorkingRelationshipRequest workingRelationship;
 }
 ```
 
-### `As400MetadataRequest`
+For nested DTOs, do the same.
 
 ```java
-package com.bnpp.pf.partner.repository.dto.as400;
-
-import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.NotNull;
-import lombok.Getter;
-import lombok.Setter;
-
-import java.time.Instant;
-
 @Getter
 @Setter
 public class As400MetadataRequest {
 
     @NotBlank
+    @JsonProperty("source_system")
+    @JsonAlias("sourceSystem")
     private String sourceSystem;
 
     @NotBlank
+    @JsonProperty("correlation_id")
+    @JsonAlias("correlationId")
     private String correlationId;
 
     @NotNull
+    @JsonProperty("snapshot_timestamp")
+    @JsonAlias("snapshotTimestamp")
     private Instant snapshotTimestamp;
 
     @NotBlank
+    @JsonProperty("payload_version")
+    @JsonAlias("payloadVersion")
     private String payloadVersion;
 }
 ```
 
-### `As400SourceRequest`
-
 ```java
-package com.bnpp.pf.partner.repository.dto.as400;
-
-import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.Pattern;
-import lombok.Getter;
-import lombok.Setter;
-
 @Getter
 @Setter
 public class As400SourceRequest {
@@ -439,35 +83,34 @@ public class As400SourceRequest {
     private String entity;
 
     @NotBlank
-    @Pattern(regexp = "SELLER|DEALER")
+    @JsonProperty("source_record_type")
+    @JsonAlias("sourceRecordType")
     private String sourceRecordType;
 
+    @JsonProperty("source_personal_id")
+    @JsonAlias("sourcePersonalId")
     private String sourcePersonalId;
 
     @NotBlank
+    @JsonProperty("gps_group_number")
+    @JsonAlias("gpsGroupNumber")
     private String gpsGroupNumber;
 
     @NotBlank
+    @JsonProperty("source_point_of_sales_id")
+    @JsonAlias("sourcePointOfSalesId")
     private String sourcePointOfSalesId;
 }
 ```
 
-### `As400PersonRequest`
-
 ```java
-package com.bnpp.pf.partner.repository.dto.as400;
-
-import jakarta.validation.constraints.Email;
-import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.Pattern;
-import lombok.Getter;
-import lombok.Setter;
-
 @Getter
 @Setter
 public class As400PersonRequest {
 
     @NotBlank
+    @JsonProperty("first_name")
+    @JsonAlias("firstName")
     private String firstName;
 
     @NotBlank
@@ -477,605 +120,49 @@ public class As400PersonRequest {
     @NotBlank
     private String email;
 
+    @JsonProperty("phone_number")
+    @JsonAlias("phoneNumber")
     private String phoneNumber;
 
     @NotBlank
     private String language;
 
     @NotBlank
-    @Pattern(regexp = "ACTIVE|INACTIVE")
     private String status;
 }
 ```
 
-### `As400PointOfSalesRequest`
-
 ```java
-package com.bnpp.pf.partner.repository.dto.as400;
-
-import jakarta.validation.constraints.NotBlank;
-import lombok.Getter;
-import lombok.Setter;
-
-@Getter
-@Setter
-public class As400PointOfSalesRequest {
-
-    @NotBlank
-    private String id;
-
-    @NotBlank
-    private String name;
-}
-```
-
-### `As400WorkingRelationshipRequest`
-
-```java
-package com.bnpp.pf.partner.repository.dto.as400;
-
-import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.Pattern;
-import lombok.Getter;
-import lombok.Setter;
-
 @Getter
 @Setter
 public class As400WorkingRelationshipRequest {
 
     @NotBlank
-    @Pattern(regexp = "SELLER|DEALER")
+    @JsonProperty("relationship_type")
+    @JsonAlias("relationshipType")
     private String relationshipType;
 
+    @JsonProperty("parent_dealer_id")
+    @JsonAlias("parentDealerId")
     private String parentDealerId;
 
     @NotBlank
-    @Pattern(regexp = "ACTIVE|INACTIVE")
     private String status;
 }
 ```
 
----
+For `As400PointOfSalesRequest`, `id` and `name` do not need aliases because both styles are the same.
 
-# 5. Response DTO and codes
+Use **snake_case as the official AS400 contract** in Swagger/OpenAPI, because it matches the rest of your Partner Repository API. `@JsonAlias` simply makes local testing and future integrations more forgiving.
 
-### `As400SyncCode`
-
-```java
-package com.bnpp.pf.partner.repository.dto.as400;
-
-public enum As400SyncCode {
-
-    SNAPSHOT_ACCEPTED,
-    RECORD_CREATED,
-    RECORD_UPDATED,
-    RECORD_DEACTIVATED,
-    NO_CHANGE,
-
-    MISSING_MANDATORY_FIELD,
-    INVALID_FIELD_FORMAT,
-    UNKNOWN_STATUS_VALUE,
-    UNKNOWN_RELATIONSHIP_TYPE,
-    UNKNOWN_ENTITY,
-    DUPLICATE_CONFLICT,
-    TEMPORARY_TECHNICAL_FAILURE,
-    SERVICE_UNAVAILABLE,
-    UNAUTHORIZED,
-    INVALID_PAYLOAD_STRUCTURE
-}
-```
-
-### `As400SyncResponse`
-
-```java
-package com.bnpp.pf.partner.repository.dto.as400;
-
-import lombok.Builder;
-import lombok.Getter;
-
-@Getter
-@Builder
-public class As400SyncResponse {
-
-    private final String status;
-    private final As400SyncCode code;
-    private final String message;
-    private final String correlationId;
-    private final String partnerRepositoryRecordId;
-}
-```
-
----
-
-# 6. Repository updates
-
-### `UserRepository`
-
-```java
-package com.bnpp.pf.partner.repository.repository;
-
-import com.bnpp.pf.partner.repository.entity.UserEntity;
-import org.springframework.data.jpa.repository.JpaRepository;
-
-import java.util.Optional;
-
-public interface UserRepository extends JpaRepository<UserEntity, Long> {
-
-    Optional<UserEntity> findByUserId(String userId);
-
-    Optional<UserEntity> findByGpsGroupNumber(String gpsGroupNumber);
-}
-```
-
-### `SalesPointRepository`
-
-```java
-package com.bnpp.pf.partner.repository.repository;
-
-import com.bnpp.pf.partner.repository.entity.SalesPointEntity;
-import org.springframework.data.jpa.repository.JpaRepository;
-
-import java.util.Optional;
-
-public interface SalesPointRepository
-        extends JpaRepository<SalesPointEntity, Long> {
-
-    Optional<SalesPointEntity> findBySalesPointId(String salesPointId);
-}
-```
-
-### `PersonSalesPointRelationshipRepository`
-
-```java
-package com.bnpp.pf.partner.repository.repository;
-
-import com.bnpp.pf.partner.repository.entity.PersonSalesPointRelationshipEntity;
-import org.springframework.data.jpa.repository.JpaRepository;
-
-import java.util.Optional;
-
-public interface PersonSalesPointRelationshipRepository
-        extends JpaRepository<PersonSalesPointRelationshipEntity, Long> {
-
-    Optional<PersonSalesPointRelationshipEntity>
-    findByPersonUserIdAndSalesPointIdAndRelationshipType(
-            String personUserId,
-            String salesPointId,
-            String relationshipType
-    );
-}
-```
-
----
-
-# 7. Synchronization service
-
-```java
-package com.bnpp.pf.partner.repository.service;
-
-import com.bnpp.pf.partner.repository.dto.as400.*;
-import com.bnpp.pf.partner.repository.entity.PersonSalesPointRelationshipEntity;
-import com.bnpp.pf.partner.repository.entity.SalesPointEntity;
-import com.bnpp.pf.partner.repository.entity.UserEntity;
-import com.bnpp.pf.partner.repository.repository.PersonSalesPointRelationshipRepository;
-import com.bnpp.pf.partner.repository.repository.SalesPointRepository;
-import com.bnpp.pf.partner.repository.repository.UserRepository;
-import lombok.RequiredArgsConstructor;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-
-import java.util.Objects;
-import java.util.Optional;
-
-@Service
-@RequiredArgsConstructor
-public class UserSynchronizationService {
-
-    private final UserRepository userRepository;
-    private final SalesPointRepository salesPointRepository;
-    private final PersonSalesPointRelationshipRepository relationshipRepository;
-
-    @Transactional
-    public As400SyncResponse synchronize(As400UserSnapshotRequest request) {
-
-        String correlationId = request.getMetadata().getCorrelationId();
-
-        Optional<UserEntity> existingUser =
-                userRepository.findByGpsGroupNumber(
-                        request.getSource().getGpsGroupNumber());
-
-        boolean userCreated = existingUser.isEmpty();
-
-        UserEntity user = existingUser.orElseGet(UserEntity::new);
-
-        if (userCreated) {
-            populateNewUser(user, request);
-        } else {
-            updateUser(user, request);
-        }
-
-        user = userRepository.save(user);
-
-        SalesPointEntity salesPoint = salesPointRepository
-                .findBySalesPointId(request.getPointOfSales().getId())
-                .orElseGet(SalesPointEntity::new);
-
-        boolean salesPointChanged = updateSalesPoint(salesPoint, request);
-        salesPointRepository.save(salesPoint);
-
-        Optional<PersonSalesPointRelationshipEntity> existingRelationship =
-                relationshipRepository
-                        .findByPersonUserIdAndSalesPointIdAndRelationshipType(
-                                user.getUserId(),
-                                salesPoint.getSalesPointId(),
-                                request.getWorkingRelationship()
-                                        .getRelationshipType()
-                        );
-
-        boolean relationshipCreated = existingRelationship.isEmpty();
-
-        PersonSalesPointRelationshipEntity relationship =
-                existingRelationship.orElseGet(
-                        PersonSalesPointRelationshipEntity::new);
-
-        boolean relationshipChanged =
-                updateRelationship(relationship, user, salesPoint, request);
-
-        relationshipRepository.save(relationship);
-
-        if (isInactive(request)) {
-            return As400SyncResponse.builder()
-                    .status("ACCEPTED")
-                    .code(As400SyncCode.RECORD_DEACTIVATED)
-                    .message("User relationship was deactivated.")
-                    .correlationId(correlationId)
-                    .partnerRepositoryRecordId(user.getUserId())
-                    .build();
-        }
-
-        if (userCreated || relationshipCreated) {
-            return As400SyncResponse.builder()
-                    .status("ACCEPTED")
-                    .code(As400SyncCode.RECORD_CREATED)
-                    .message("User snapshot created successfully.")
-                    .correlationId(correlationId)
-                    .partnerRepositoryRecordId(user.getUserId())
-                    .build();
-        }
-
-        if (salesPointChanged || relationshipChanged) {
-            return As400SyncResponse.builder()
-                    .status("ACCEPTED")
-                    .code(As400SyncCode.RECORD_UPDATED)
-                    .message("User snapshot updated successfully.")
-                    .correlationId(correlationId)
-                    .partnerRepositoryRecordId(user.getUserId())
-                    .build();
-        }
-
-        return As400SyncResponse.builder()
-                .status("ACCEPTED")
-                .code(As400SyncCode.NO_CHANGE)
-                .message("Snapshot received but no effective change was detected.")
-                .correlationId(correlationId)
-                .partnerRepositoryRecordId(user.getUserId())
-                .build();
-    }
-
-    private void populateNewUser(
-            UserEntity user,
-            As400UserSnapshotRequest request) {
-
-        String gpsGroupNumber = request.getSource().getGpsGroupNumber();
-
-        /*
-         * For now gpsGroupNumber is used as the internal user ID and username.
-         * Replace this later if Ping provides a dedicated Login ID.
-         */
-        user.setUserId(gpsGroupNumber);
-        user.setUsername(gpsGroupNumber);
-
-        updateUser(user, request);
-    }
-
-    private void updateUser(
-            UserEntity user,
-            As400UserSnapshotRequest request) {
-
-        user.setGpsGroupNumber(request.getSource().getGpsGroupNumber());
-        user.setSourcePersonalId(request.getSource().getSourcePersonalId());
-        user.setEntity(request.getSource().getEntity());
-
-        user.setFirstName(request.getPerson().getFirstName());
-        user.setLastName(request.getPerson().getSurname());
-        user.setEmail(request.getPerson().getEmail());
-        user.setPhoneNumber(request.getPerson().getPhoneNumber());
-        user.setLanguage(request.getPerson().getLanguage());
-        user.setStatus(request.getPerson().getStatus());
-    }
-
-    private boolean updateSalesPoint(
-            SalesPointEntity salesPoint,
-            As400UserSnapshotRequest request) {
-
-        boolean changed =
-                !Objects.equals(
-                        salesPoint.getSalesPointId(),
-                        request.getPointOfSales().getId())
-                        || !Objects.equals(
-                        salesPoint.getLabel(),
-                        request.getPointOfSales().getName())
-                        || !Objects.equals(
-                        salesPoint.getOrgUnitId(),
-                        request.getSource().getSourcePointOfSalesId())
-                        || !Objects.equals(
-                        salesPoint.getEntity(),
-                        request.getSource().getEntity());
-
-        salesPoint.setSalesPointId(request.getPointOfSales().getId());
-        salesPoint.setLabel(request.getPointOfSales().getName());
-        salesPoint.setOrgUnitId(
-                request.getSource().getSourcePointOfSalesId());
-        salesPoint.setEntity(request.getSource().getEntity());
-
-        return changed;
-    }
-
-    private boolean updateRelationship(
-            PersonSalesPointRelationshipEntity relationship,
-            UserEntity user,
-            SalesPointEntity salesPoint,
-            As400UserSnapshotRequest request) {
-
-        boolean changed =
-                !Objects.equals(
-                        relationship.getPersonUserId(),
-                        user.getUserId())
-                        || !Objects.equals(
-                        relationship.getSalesPointId(),
-                        salesPoint.getSalesPointId())
-                        || !Objects.equals(
-                        relationship.getRelationshipType(),
-                        request.getWorkingRelationship()
-                                .getRelationshipType())
-                        || !Objects.equals(
-                        relationship.getOrgUnitId(),
-                        request.getSource().getSourcePointOfSalesId())
-                        || !Objects.equals(
-                        relationship.getStatus(),
-                        request.getWorkingRelationship().getStatus())
-                        || !Objects.equals(
-                        relationship.getParentDealerId(),
-                        request.getWorkingRelationship()
-                                .getParentDealerId());
-
-        relationship.setPersonUserId(user.getUserId());
-        relationship.setSalesPointId(salesPoint.getSalesPointId());
-        relationship.setRelationshipType(
-                request.getWorkingRelationship().getRelationshipType());
-        relationship.setOrgUnitId(
-                request.getSource().getSourcePointOfSalesId());
-        relationship.setStatus(
-                request.getWorkingRelationship().getStatus());
-        relationship.setParentDealerId(
-                request.getWorkingRelationship().getParentDealerId());
-
-        return changed;
-    }
-
-    private boolean isInactive(As400UserSnapshotRequest request) {
-        return "INACTIVE".equals(request.getPerson().getStatus())
-                || "INACTIVE".equals(
-                        request.getWorkingRelationship().getStatus());
-    }
-}
-```
-
----
-
-# 8. AS400 controller
-
-```java
-package com.bnpp.pf.partner.repository.controller;
-
-import com.bnpp.pf.partner.repository.dto.as400.As400SyncResponse;
-import com.bnpp.pf.partner.repository.dto.as400.As400UserSnapshotRequest;
-import com.bnpp.pf.partner.repository.service.UserSynchronizationService;
-import io.swagger.v3.oas.annotations.Operation;
-import io.swagger.v3.oas.annotations.responses.ApiResponse;
-import io.swagger.v3.oas.annotations.responses.ApiResponses;
-import jakarta.validation.Valid;
-import lombok.RequiredArgsConstructor;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
-
-@RestController
-@RequestMapping("/internal/users")
-@RequiredArgsConstructor
-public class As400UserSyncController {
-
-    private final UserSynchronizationService userSynchronizationService;
-
-    @Operation(
-            summary = "Create, update, or deactivate a user snapshot from AS400",
-            description = """
-                    Receives an AS400 person, point-of-sale, and working-relationship snapshot.
-                    Partner Repository determines whether the record must be created,
-                    updated, deactivated, or ignored because no change exists.
-                    """
-    )
-    @ApiResponses({
-            @ApiResponse(responseCode = "200", description = "Snapshot processed"),
-            @ApiResponse(responseCode = "400", description = "Invalid snapshot payload"),
-            @ApiResponse(responseCode = "500", description = "Technical processing error")
-    })
-    @PostMapping("/snapshots")
-    public ResponseEntity<As400SyncResponse> synchronizeUser(
-            @Valid @RequestBody As400UserSnapshotRequest request) {
-
-        return ResponseEntity.ok(
-                userSynchronizationService.synchronize(request));
-    }
-}
-```
-
----
-
-# 9. Sample AS400 request
+Then both payload styles will work:
 
 ```json
-{
-  "metadata": {
-    "sourceSystem": "AS400",
-    "correlationId": "AS400-20260607-000010",
-    "snapshotTimestamp": "2026-06-07T10:30:00Z",
-    "payloadVersion": "1.0"
-  },
-  "source": {
-    "entity": "ORANGE",
-    "sourceRecordType": "SELLER",
-    "sourcePersonalId": "PSN_NR_PERSON",
-    "gpsGroupNumber": "GPS_GROUPNUM",
-    "sourcePointOfSalesId": "BOU_NRORGUNIT"
-  },
-  "person": {
-    "firstName": "John",
-    "surname": "Doe",
-    "email": "john.doe@orange.example.com",
-    "phoneNumber": "+32470000000",
-    "language": "FR",
-    "status": "ACTIVE"
-  },
-  "pointOfSales": {
-    "id": "POS001",
-    "name": "Orange Shop Brussels"
-  },
-  "workingRelationship": {
-    "relationshipType": "SELLER",
-    "parentDealerId": "DEALER001",
-    "status": "ACTIVE"
-  }
-}
+{ "point_of_sales": { "id": "POS001", "name": "Orange Shop Brussels" } }
 ```
 
-Before running this, create a database migration for the new columns and unique relationship constraint.
-
-------------------------------------
-Yes. Your current response has only:
-
-```text
-user_id, username, email, roles, app_id
-```
-
-To match the expected B2Boost context, extend it with the fields Arthur already knows.
-
-```java
-@Data
-@JsonIgnoreProperties(ignoreUnknown = true)
-public class HandoffExchangeResponse {
-
-    @JsonProperty("user_id")
-    private String userId;          // GPS number / internal user identifier
-
-    @JsonProperty("username")
-    private String username;        // Login IS
-
-    @JsonProperty("email")
-    private String email;
-
-    @JsonProperty("first_name")
-    private String firstName;
-
-    @JsonProperty("last_name")
-    private String lastName;
-
-    @JsonProperty("brand_context")
-    private String brandContext;    // for example ORANGE / CETELEM
-
-    @JsonProperty("app_id")
-    private String appId;
-
-    @JsonProperty("selected_sales_point_id")
-    private String selectedSalesPointId;
-
-    @JsonProperty("selected_org_unit_id")
-    private String selectedOrgUnitId;
-
-    @JsonProperty("roles")
-    private List<String> roles;
-
-    @JsonProperty("session_expires_at")
-    private Instant sessionExpiresAt;
-
-    @JsonProperty("token_expires_at")
-    private Instant tokenExpiresAt;
-}
-```
-
-Then update `HandoffService.exchange(...)` where you build the response:
-
-```java
-HandoffExchangeResponse response = new HandoffExchangeResponse();
-
-response.setUserId(session.getUserId());
-response.setUsername(session.getUsername());
-response.setEmail(session.getEmail());
-response.setFirstName(session.getFirstName());
-response.setLastName(session.getLastName());
-
-response.setBrandContext(session.getBrandContext());
-response.setAppId(session.getAppId());
-
-response.setSelectedSalesPointId(session.getSelectedSalesPointId());
-response.setSelectedOrgUnitId(session.getSelectedOrgUnitId());
-
-response.setRoles(session.getRoles());
-
-response.setSessionExpiresAt(session.getExpiresAt());
-response.setTokenExpiresAt(session.getTokenExpiresAt());
-
-return response;
-```
-
-Use the exact getter names from your `UserSession`; they may differ slightly.
-
-A likely returned payload becomes:
+and:
 
 ```json
-{
-  "user_id": "12345678",
-  "username": "testuser",
-  "email": "test.user@example.com",
-  "first_name": "Test",
-  "last_name": "User",
-  "brand_context": "CETELEM",
-  "app_id": "B2BOOST_BE",
-  "selected_sales_point_id": "SP001",
-  "selected_org_unit_id": "OU001",
-  "roles": ["SALES_ADVISOR"],
-  "session_expires_at": "2026-06-25T17:00:00Z",
-  "token_expires_at": "2026-06-25T16:30:00Z"
-}
+{ "pointOfSales": { "id": "POS001", "name": "Orange Shop Brussels" } }
 ```
-
-Two important points:
-
-* Do **not** return the Ping access token, ID token, refresh token, Arthur session ID, or handoff code.
-* Only add `session_expires_at` and `token_expires_at` if B2Boost confirms it needs them. B2Boost should create and manage its own session after successful exchange.
-
-Update your handoff success test too:
-
-```java
-assertThat(result.getUserId()).isEqualTo("testuser");
-assertThat(result.getUsername()).isEqualTo("testuser");
-assertThat(result.getEmail()).isEqualTo("test.user@example.com");
-assertThat(result.getFirstName()).isEqualTo("Test");
-assertThat(result.getLastName()).isEqualTo("User");
-assertThat(result.getBrandContext()).isEqualTo("CETELEM");
-assertThat(result.getAppId()).isEqualTo("B2BOOST_BE");
-assertThat(result.getSelectedSalesPointId()).isEqualTo("SP001");
-assertThat(result.getSelectedOrgUnitId()).isEqualTo("OU001");
-assertThat(result.getRoles()).containsExactly("SALES_ADVISOR");
-```
-
-Before finalizing, B2Boost should confirm the exact names and whether `user_id` truly means GPS number or another identifier.
