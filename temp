@@ -1,17 +1,17 @@
-Yes — but they come from **two different places**:
+Your current `UserSession` already has the token-expiry fields:
 
-* **Token expiry** comes from Ping’s token response / JWT `exp` claim.
-* **Arthur session expiry** comes from your own Arthur session TTL configuration, not Ping.
+```java
+private Instant accessTokenExpiresAt;
+private Instant refreshTokenExpiresAt;
+```
 
-## 1. Add session expiry to `UserSession`
-
-Your class currently has token expiries but no Arthur session expiry.
+What is missing is only Arthur’s own session expiry:
 
 ```java
 private Instant sessionExpiresAt;
 ```
 
-Place it near `sessionId`:
+Add it near `sessionId`:
 
 ```java
 private String sessionId;
@@ -19,133 +19,50 @@ private Instant sessionExpiresAt;
 private String appId;
 ```
 
-## 2. Set Arthur session expiry in `AuthService.handleCallback(...)`
-
-You already have:
-
-```java
-private final ArthurSecurityProperties arthurSecurityProperties;
-```
-
-When creating the session:
+Then populate all three values when creating the session in `AuthService.handleCallback(...)`.
 
 ```java
 Instant now = Instant.now();
 
 session.setSessionId(UUID.randomUUID().toString());
+
 session.setSessionExpiresAt(
-        now.plus(
-                arthurSecurityProperties.getSession().getTtlMinutes(),
-                ChronoUnit.MINUTES
+        now.plusMinutes(
+                arthurSecurityProperties.getSession().getTtlMinutes()
         )
 );
+
+Object expiresIn = tokenResponse.get("expires_in");
+if (expiresIn instanceof Number value) {
+    session.setAccessTokenExpiresAt(
+            now.plusSeconds(value.longValue())
+    );
+}
+
+Object refreshExpiresIn = tokenResponse.get("refresh_expires_in");
+if (refreshExpiresIn instanceof Number value) {
+    session.setRefreshTokenExpiresAt(
+            now.plusSeconds(value.longValue())
+    );
+}
 ```
 
-Imports:
+Use this import if needed:
 
 ```java
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.util.UUID;
 ```
 
-This should match your Redis TTL. For example, if your session TTL is 30 minutes:
-
-```text
-session_expires_at = now + 30 minutes
-```
-
-## 3. Get access-token expiry from Ping
-
-The standard OAuth token response normally contains:
-
-```json
-{
-  "access_token": "...",
-  "expires_in": 300,
-  "refresh_token": "..."
-}
-```
-
-So after token exchange:
-
-```java
-Object expiresInValue = tokenResponse.get("expires_in");
-
-if (expiresInValue instanceof Number expiresIn) {
-    session.setAccessTokenExpiresAt(
-            Instant.now().plusSeconds(expiresIn.longValue())
-    );
-}
-```
-
-This works with Ping as long as it returns standard `expires_in`.
-
-## 4. Refresh-token expiry
-
-Do not assume Ping will return refresh-token expiry.
-
-Keycloak often returns:
-
-```text
-refresh_expires_in
-```
-
-but that is not a universal OAuth field. Ping may:
-
-* return a refresh token without expiry information
-* expose expiry in the refresh JWT itself
-* define refresh-token lifetime in client policy/configuration
-
-So keep this nullable for now:
-
-```java
-private Instant refreshTokenExpiresAt;
-```
-
-Only set it when Ping confirms how refresh expiry is returned.
-
-For your current Keycloak local setup, you can support it conditionally:
-
-```java
-Object refreshExpiresInValue = tokenResponse.get("refresh_expires_in");
-
-if (refreshExpiresInValue instanceof Number refreshExpiresIn) {
-    session.setRefreshTokenExpiresAt(
-            Instant.now().plusSeconds(refreshExpiresIn.longValue())
-    );
-}
-```
-
-## 5. Return values during handoff
-
-In `HandoffService.exchange(...)`:
+Then in `HandoffService.exchange(...)`:
 
 ```java
 response.setSessionExpiresAt(session.getSessionExpiresAt());
 response.setTokenExpiresAt(session.getAccessTokenExpiresAt());
 ```
 
-Your response then becomes conceptually:
+Important:
 
-```json
-{
-  "session_expires_at": "2026-07-07T12:30:00Z",
-  "token_expires_at": "2026-07-07T12:05:00Z"
-}
-```
-
-## Important distinction
-
-```text
-Arthur session expiry
-→ controlled by Arthur Redis TTL
-
-Ping access-token expiry
-→ controlled by Ping token policy
-
-Ping refresh-token expiry
-→ controlled by Ping refresh-token policy
-```
-
-For B2Boost, `session_expires_at` is the more useful field. It tells B2Boost when Arthur’s authenticated session context will no longer be valid.
+* `accessTokenExpiresAt` should come from Ping’s standard `expires_in` token-response field.
+* `refreshTokenExpiresAt` may remain `null` with PingFederate unless they return a refresh-expiry field or provide it in their token policy.
+* `sessionExpiresAt` is owned by Arthur and should match the Redis session TTL.
