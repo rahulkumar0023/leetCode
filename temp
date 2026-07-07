@@ -1,73 +1,177 @@
-That is fine. In your current design, `userId` is already the stable shared identifier:
+The new user is working end-to-end: Partner Repository finds `gps000001`, Arthur creates the session, and B2Boost successfully exchanges the handoff.
+
+The missing values are visible in the Stub Server log:
 
 ```text
-AS400 GPS number:   GPS000001
-Partner Repository: user_id = GPS000001
-Ping/Keycloak user: preferred_username = gps000001
-Arthur lookup:      findByUserId("gps000001")
+email=null
+firstName=null
+lastName=null
+brandContext=null
 ```
 
-The case difference is the only thing to watch:
+But Partner Repository is returning those values correctly. Its log shows:
 
 ```text
-GPS000001
-gps000001
+userInfo=UserInfoResponse(
+  firstName=John,
+  lastName=Doe,
+  phoneNumbers=[...],
+  emails=[john.doe@orange.example.com]
+)
 ```
 
-PostgreSQL string equality is normally case-sensitive, so:
+So the issue is in **Arthur Core mapping Partner Repository `UserResponse` into `UserSession`**.
+
+## What is happening
+
+Your Partner Repository response structure is likely:
 
 ```java
-findByUserId("gps000001")
+UserResponse
+    userId
+    username
+    userInfo
+        firstName
+        lastName
+        emails
+        phoneNumbers
+    salesPoints
+    roles
 ```
 
-will not find:
-
-```text
-GPS000001
-```
-
-unless your stored value is also lowercase.
-
-Best fix: normalize the identifier consistently when receiving it from AS400 and when looking it up after authentication.
-
-For example, use lowercase everywhere:
+But Arthur is probably doing only:
 
 ```java
-private String normalizeUserId(String userId) {
-    return userId == null ? null : userId.trim().toLowerCase(Locale.ROOT);
+session.setUserId(userResponse.getUserId());
+session.setUsername(userResponse.getUsername());
+session.setRoles(userResponse.getRoles());
+session.setSalesPoints(userResponse.getSalesPoints());
+```
+
+It needs to map the nested `userInfo`.
+
+## Update `AuthService.handleCallback(...)`
+
+Where you create `UserSession`, add:
+
+```java
+UserInfoResponse userInfo = userResponse.getUserInfo();
+
+session.setUserId(userResponse.getUserId());
+session.setUsername(userResponse.getUsername());
+session.setRoles(userResponse.getRoles());
+session.setSalesPoints(userResponse.getSalesPoints());
+
+if (userInfo != null) {
+    session.setFirstName(userInfo.getFirstName());
+    session.setLastName(userInfo.getLastName());
+
+    if (userInfo.getEmails() != null && !userInfo.getEmails().isEmpty()) {
+        session.setEmail(userInfo.getEmails().getFirst());
+    }
+
+    if (userInfo.getPhoneNumbers() != null
+            && !userInfo.getPhoneNumbers().isEmpty()) {
+        session.setPhoneNumber(userInfo.getPhoneNumbers().getFirst());
+    }
 }
 ```
 
-When saving AS400 data:
+Use `get(0)` instead of `getFirst()` if your Java version does not support `List.getFirst()`:
 
 ```java
-String userId = normalizeUserId(
-        request.getSource().getGpsGroupNumber());
-
-user.setUserId(userId);
-user.setUsername(userId);
+session.setEmail(userInfo.getEmails().get(0));
+session.setPhoneNumber(userInfo.getPhoneNumbers().get(0));
 ```
 
-When Arthur receives `preferred_username` from Ping:
+## Ensure `UserSession` has these fields
 
 ```java
-String userId = normalizeUserId(claims.getPreferredUsername());
-
-UserResponse user = partnerRepositoryClient.getUser(userId);
+private String email;
+private String firstName;
+private String lastName;
+private String phoneNumber;
+private String brandContext;
 ```
 
-Then your database contains:
+You likely already added some of them for `HandoffExchangeResponse`, but they must exist and be saved in the Redis `UserSession` too.
+
+## Update `HandoffService.exchange(...)`
+
+Ensure it copies them from the session:
+
+```java
+response.setUserId(session.getUserId());
+response.setUsername(session.getUsername());
+response.setEmail(session.getEmail());
+response.setFirstName(session.getFirstName());
+response.setLastName(session.getLastName());
+response.setPhoneNumber(session.getPhoneNumber());
+response.setBrandContext(session.getBrandContext());
+
+response.setRoles(session.getRoles());
+response.setAppId(session.getAppId());
+response.setSelectedSalesPointId(session.getSelectedSalesPointId());
+response.setSelectedOrgUnitId(session.getSelectedOrgUnitId());
+```
+
+## Why `brandContext` is still null
+
+Partner Repository currently returns no brand/entity field in `UserResponse`. Your logs show user details including name, email, phone, language, and status, but no `entity`.
+
+You need to add it through the full chain:
 
 ```text
-gps000001
+UserEntity.entity
+  -> UserInfoResponse or UserResponse.entity
+  -> Arthur Core Partner Repository DTO
+  -> UserSession.brandContext
+  -> HandoffExchangeResponse.brandContext
 ```
 
-and Ping also returns:
+The simplest structure is to add it directly to `UserResponse`:
+
+```java
+private String entity;
+```
+
+Then map:
+
+```java
+response.setEntity(user.getEntity());
+```
+
+In Arthur:
+
+```java
+session.setBrandContext(userResponse.getEntity());
+```
+
+Then during handoff:
+
+```java
+response.setBrandContext(session.getBrandContext());
+```
+
+After this, the Stub Server should log something like:
 
 ```text
-gps000001
+email=john.doe@orange.example.com
+firstName=John
+lastName=Doe
+brandContext=ORANGE
 ```
 
-So `findByUserId(...)` works consistently.
+You should log the Arthur session immediately before saving it once to verify all values are present:
 
-Because you are already using `findByUserId`, you do not need `gpsGroupNumber` as a separate lookup key unless AS400 sends a different external identifier in the future. In that case, keeping `gpsGroupNumber` can still be useful for traceability, but it should contain the same normalized value.
+```java
+log.info(
+        "Saving Arthur session userId={}, username={}, email={}, firstName={}, lastName={}, brandContext={}",
+        session.getUserId(),
+        session.getUsername(),
+        session.getEmail(),
+        session.getFirstName(),
+        session.getLastName(),
+        session.getBrandContext()
+);
+```
