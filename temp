@@ -1,236 +1,151 @@
-You already have email, so you only need to make sure it is populated from Partner Repository before saving the session.
+Yes — but they come from **two different places**:
 
-Your UserSession is missing:
+* **Token expiry** comes from Ping’s token response / JWT `exp` claim.
+* **Arthur session expiry** comes from your own Arthur session TTL configuration, not Ping.
 
-private String firstName;
-private String lastName;
-private String phoneNumber;
-private String brandContext;
+## 1. Add session expiry to `UserSession`
 
-Add them after email:
-
-private String email;
-private String firstName;
-private String lastName;
-private String phoneNumber;
-private String brandContext;
-
-Then in AuthService.handleCallback(...), when you build the session, map the nested userInfo values:
-
-UserInfoResponse userInfo = userResponse.getUserInfo();
-session.setUserId(userResponse.getUserId());
-session.setUsername(userResponse.getUsername());
-session.setRoles(userResponse.getRoles());
-session.setSalesPoints(userResponse.getSalesPoints());
-if (userInfo != null) {
-    session.setFirstName(userInfo.getFirstName());
-    session.setLastName(userInfo.getLastName());
-    if (userInfo.getEmails() != null && !userInfo.getEmails().isEmpty()) {
-        session.setEmail(userInfo.getEmails().get(0));
-    }
-    if (userInfo.getPhoneNumbers() != null
-            && !userInfo.getPhoneNumbers().isEmpty()) {
-        session.setPhoneNumber(userInfo.getPhoneNumbers().get(0));
-    }
-}
-session.setBrandContext(userResponse.getEntity());
-
-For brandContext, Partner Repository must expose entity in its UserResponse. Your current Partner Repository entity already has an entity field, but it is not yet visible in the response log.
-
-In Partner Repository:
-
-response.setEntity(user.getEntity());
-
-Then in Arthur’s Partner Repository DTO add:
-
-private String entity;
-
-Finally in HandoffService.exchange(...):
-
-response.setEmail(session.getEmail());
-response.setFirstName(session.getFirstName());
-response.setLastName(session.getLastName());
-response.setPhoneNumber(session.getPhoneNumber());
-response.setBrandContext(session.getBrandContext());
-
-Your currently missing values are not lost by Redis; they were never copied into UserSession before it was saved.
-
-
---------------------
-The new user is working end-to-end: Partner Repository finds `gps000001`, Arthur creates the session, and B2Boost successfully exchanges the handoff.
-
-The missing values are visible in the Stub Server log:
-
-```text
-email=null
-firstName=null
-lastName=null
-brandContext=null
-```
-
-But Partner Repository is returning those values correctly. Its log shows:
-
-```text
-userInfo=UserInfoResponse(
-  firstName=John,
-  lastName=Doe,
-  phoneNumbers=[...],
-  emails=[john.doe@orange.example.com]
-)
-```
-
-So the issue is in **Arthur Core mapping Partner Repository `UserResponse` into `UserSession`**.
-
-## What is happening
-
-Your Partner Repository response structure is likely:
+Your class currently has token expiries but no Arthur session expiry.
 
 ```java
-UserResponse
-    userId
-    username
-    userInfo
-        firstName
-        lastName
-        emails
-        phoneNumbers
-    salesPoints
-    roles
+private Instant sessionExpiresAt;
 ```
 
-But Arthur is probably doing only:
+Place it near `sessionId`:
 
 ```java
-session.setUserId(userResponse.getUserId());
-session.setUsername(userResponse.getUsername());
-session.setRoles(userResponse.getRoles());
-session.setSalesPoints(userResponse.getSalesPoints());
+private String sessionId;
+private Instant sessionExpiresAt;
+private String appId;
 ```
 
-It needs to map the nested `userInfo`.
+## 2. Set Arthur session expiry in `AuthService.handleCallback(...)`
 
-## Update `AuthService.handleCallback(...)`
-
-Where you create `UserSession`, add:
+You already have:
 
 ```java
-UserInfoResponse userInfo = userResponse.getUserInfo();
-
-session.setUserId(userResponse.getUserId());
-session.setUsername(userResponse.getUsername());
-session.setRoles(userResponse.getRoles());
-session.setSalesPoints(userResponse.getSalesPoints());
-
-if (userInfo != null) {
-    session.setFirstName(userInfo.getFirstName());
-    session.setLastName(userInfo.getLastName());
-
-    if (userInfo.getEmails() != null && !userInfo.getEmails().isEmpty()) {
-        session.setEmail(userInfo.getEmails().getFirst());
-    }
-
-    if (userInfo.getPhoneNumbers() != null
-            && !userInfo.getPhoneNumbers().isEmpty()) {
-        session.setPhoneNumber(userInfo.getPhoneNumbers().getFirst());
-    }
-}
+private final ArthurSecurityProperties arthurSecurityProperties;
 ```
 
-Use `get(0)` instead of `getFirst()` if your Java version does not support `List.getFirst()`:
+When creating the session:
 
 ```java
-session.setEmail(userInfo.getEmails().get(0));
-session.setPhoneNumber(userInfo.getPhoneNumbers().get(0));
-```
+Instant now = Instant.now();
 
-## Ensure `UserSession` has these fields
-
-```java
-private String email;
-private String firstName;
-private String lastName;
-private String phoneNumber;
-private String brandContext;
-```
-
-You likely already added some of them for `HandoffExchangeResponse`, but they must exist and be saved in the Redis `UserSession` too.
-
-## Update `HandoffService.exchange(...)`
-
-Ensure it copies them from the session:
-
-```java
-response.setUserId(session.getUserId());
-response.setUsername(session.getUsername());
-response.setEmail(session.getEmail());
-response.setFirstName(session.getFirstName());
-response.setLastName(session.getLastName());
-response.setPhoneNumber(session.getPhoneNumber());
-response.setBrandContext(session.getBrandContext());
-
-response.setRoles(session.getRoles());
-response.setAppId(session.getAppId());
-response.setSelectedSalesPointId(session.getSelectedSalesPointId());
-response.setSelectedOrgUnitId(session.getSelectedOrgUnitId());
-```
-
-## Why `brandContext` is still null
-
-Partner Repository currently returns no brand/entity field in `UserResponse`. Your logs show user details including name, email, phone, language, and status, but no `entity`.
-
-You need to add it through the full chain:
-
-```text
-UserEntity.entity
-  -> UserInfoResponse or UserResponse.entity
-  -> Arthur Core Partner Repository DTO
-  -> UserSession.brandContext
-  -> HandoffExchangeResponse.brandContext
-```
-
-The simplest structure is to add it directly to `UserResponse`:
-
-```java
-private String entity;
-```
-
-Then map:
-
-```java
-response.setEntity(user.getEntity());
-```
-
-In Arthur:
-
-```java
-session.setBrandContext(userResponse.getEntity());
-```
-
-Then during handoff:
-
-```java
-response.setBrandContext(session.getBrandContext());
-```
-
-After this, the Stub Server should log something like:
-
-```text
-email=john.doe@orange.example.com
-firstName=John
-lastName=Doe
-brandContext=ORANGE
-```
-
-You should log the Arthur session immediately before saving it once to verify all values are present:
-
-```java
-log.info(
-        "Saving Arthur session userId={}, username={}, email={}, firstName={}, lastName={}, brandContext={}",
-        session.getUserId(),
-        session.getUsername(),
-        session.getEmail(),
-        session.getFirstName(),
-        session.getLastName(),
-        session.getBrandContext()
+session.setSessionId(UUID.randomUUID().toString());
+session.setSessionExpiresAt(
+        now.plus(
+                arthurSecurityProperties.getSession().getTtlMinutes(),
+                ChronoUnit.MINUTES
+        )
 );
 ```
+
+Imports:
+
+```java
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.UUID;
+```
+
+This should match your Redis TTL. For example, if your session TTL is 30 minutes:
+
+```text
+session_expires_at = now + 30 minutes
+```
+
+## 3. Get access-token expiry from Ping
+
+The standard OAuth token response normally contains:
+
+```json
+{
+  "access_token": "...",
+  "expires_in": 300,
+  "refresh_token": "..."
+}
+```
+
+So after token exchange:
+
+```java
+Object expiresInValue = tokenResponse.get("expires_in");
+
+if (expiresInValue instanceof Number expiresIn) {
+    session.setAccessTokenExpiresAt(
+            Instant.now().plusSeconds(expiresIn.longValue())
+    );
+}
+```
+
+This works with Ping as long as it returns standard `expires_in`.
+
+## 4. Refresh-token expiry
+
+Do not assume Ping will return refresh-token expiry.
+
+Keycloak often returns:
+
+```text
+refresh_expires_in
+```
+
+but that is not a universal OAuth field. Ping may:
+
+* return a refresh token without expiry information
+* expose expiry in the refresh JWT itself
+* define refresh-token lifetime in client policy/configuration
+
+So keep this nullable for now:
+
+```java
+private Instant refreshTokenExpiresAt;
+```
+
+Only set it when Ping confirms how refresh expiry is returned.
+
+For your current Keycloak local setup, you can support it conditionally:
+
+```java
+Object refreshExpiresInValue = tokenResponse.get("refresh_expires_in");
+
+if (refreshExpiresInValue instanceof Number refreshExpiresIn) {
+    session.setRefreshTokenExpiresAt(
+            Instant.now().plusSeconds(refreshExpiresIn.longValue())
+    );
+}
+```
+
+## 5. Return values during handoff
+
+In `HandoffService.exchange(...)`:
+
+```java
+response.setSessionExpiresAt(session.getSessionExpiresAt());
+response.setTokenExpiresAt(session.getAccessTokenExpiresAt());
+```
+
+Your response then becomes conceptually:
+
+```json
+{
+  "session_expires_at": "2026-07-07T12:30:00Z",
+  "token_expires_at": "2026-07-07T12:05:00Z"
+}
+```
+
+## Important distinction
+
+```text
+Arthur session expiry
+→ controlled by Arthur Redis TTL
+
+Ping access-token expiry
+→ controlled by Ping token policy
+
+Ping refresh-token expiry
+→ controlled by Ping refresh-token policy
+```
+
+For B2Boost, `session_expires_at` is the more useful field. It tells B2Boost when Arthur’s authenticated session context will no longer be valid.
