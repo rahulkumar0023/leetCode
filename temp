@@ -1,3 +1,62 @@
+You already have email, so you only need to make sure it is populated from Partner Repository before saving the session.
+
+Your UserSession is missing:
+
+private String firstName;
+private String lastName;
+private String phoneNumber;
+private String brandContext;
+
+Add them after email:
+
+private String email;
+private String firstName;
+private String lastName;
+private String phoneNumber;
+private String brandContext;
+
+Then in AuthService.handleCallback(...), when you build the session, map the nested userInfo values:
+
+UserInfoResponse userInfo = userResponse.getUserInfo();
+session.setUserId(userResponse.getUserId());
+session.setUsername(userResponse.getUsername());
+session.setRoles(userResponse.getRoles());
+session.setSalesPoints(userResponse.getSalesPoints());
+if (userInfo != null) {
+    session.setFirstName(userInfo.getFirstName());
+    session.setLastName(userInfo.getLastName());
+    if (userInfo.getEmails() != null && !userInfo.getEmails().isEmpty()) {
+        session.setEmail(userInfo.getEmails().get(0));
+    }
+    if (userInfo.getPhoneNumbers() != null
+            && !userInfo.getPhoneNumbers().isEmpty()) {
+        session.setPhoneNumber(userInfo.getPhoneNumbers().get(0));
+    }
+}
+session.setBrandContext(userResponse.getEntity());
+
+For brandContext, Partner Repository must expose entity in its UserResponse. Your current Partner Repository entity already has an entity field, but it is not yet visible in the response log.
+
+In Partner Repository:
+
+response.setEntity(user.getEntity());
+
+Then in Arthur’s Partner Repository DTO add:
+
+private String entity;
+
+Finally in HandoffService.exchange(...):
+
+response.setEmail(session.getEmail());
+response.setFirstName(session.getFirstName());
+response.setLastName(session.getLastName());
+response.setPhoneNumber(session.getPhoneNumber());
+response.setBrandContext(session.getBrandContext());
+
+Your currently missing values are not lost by Redis; they were never copied into UserSession before it was saved.
+
+
+--------------------
 The new user is working end-to-end: Partner Repository finds `gps000001`, Arthur creates the session, and B2Boost successfully exchanges the handoff.
 
 The missing values are visible in the Stub Server log:
