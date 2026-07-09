@@ -1,68 +1,180 @@
-Your current `UserSession` already has the token-expiry fields:
+Yes — you can update the sales point screen with NL translations and custom title fonts. The clean way is to handle these separately:
 
-```java
-private Instant accessTokenExpiresAt;
-private Instant refreshTokenExpiresAt;
+1. **Translations** through `messages.properties` / `messages_nl.properties`
+2. **Fonts** through static assets + CSS `@font-face`
+3. **Screen text** through Thymeleaf `#{...}` message keys
+
+## 1. Add NL translations
+
+If you already have English/French messages, add Dutch in:
+
+```text
+src/main/resources/messages_nl.properties
 ```
 
-What is missing is only Arthur’s own session expiry:
+Example:
 
-```java
-private Instant sessionExpiresAt;
+```properties
+salespoint.title=Selecteer uw verkooppunt
+salespoint.subtitle=Kies het verkooppunt waarmee u wilt doorgaan
+salespoint.continue=Doorgaan
+salespoint.noSalesPoints=Er zijn geen verkooppunten beschikbaar voor uw gebruiker.
+salespoint.error.title=Er is iets misgegaan
+salespoint.error.message=We konden uw verkooppunten niet ophalen. Probeer het later opnieuw.
 ```
 
-Add it near `sessionId`:
+Then in your Thymeleaf page:
 
-```java
-private String sessionId;
-private Instant sessionExpiresAt;
-private String appId;
+```html
+<h1 th:text="#{salespoint.title}">Select your sales point</h1>
+
+<p th:text="#{salespoint.subtitle}">
+  Choose the sales point you want to continue with
+</p>
+
+<button type="submit" th:text="#{salespoint.continue}">
+  Continue
+</button>
 ```
 
-Then populate all three values when creating the session in `AuthService.handleCallback(...)`.
+Spring will pick `messages_nl.properties` automatically when the user locale is `nl`.
+
+## 2. Where to put the fonts
+
+Put the provided font files here:
+
+```text
+src/main/resources/static/fonts/
+```
+
+Example:
+
+```text
+src/main/resources/static/fonts/MyTitleFont.woff2
+src/main/resources/static/fonts/MyTitleFont.woff
+```
+
+Prefer `.woff2` if available. You can keep `.woff` as fallback.
+
+## 3. Register the font in CSS
+
+In your CSS file, for example:
+
+```text
+src/main/resources/static/css/sales-point.css
+```
+
+Add:
+
+```css
+@font-face {
+  font-family: 'SalesPointTitleFont';
+  src: url('/fonts/MyTitleFont.woff2') format('woff2'),
+       url('/fonts/MyTitleFont.woff') format('woff');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+```
+
+Then use it only for the title:
+
+```css
+.sales-point-title {
+  font-family: 'SalesPointTitleFont', Arial, sans-serif;
+  font-size: 32px;
+  font-weight: 400;
+  line-height: 1.2;
+}
+```
+
+And in HTML:
+
+```html
+<h1 class="sales-point-title" th:text="#{salespoint.title}">
+  Select your sales point
+</h1>
+```
+
+## 4. Include the CSS in the Thymeleaf page
+
+In your sales point page:
+
+```html
+<link rel="stylesheet" th:href="@{/css/sales-point.css}">
+```
+
+## 5. Locale switching / NL detection
+
+If your app already uses Spring locale resolution, then Dutch should work when the request has:
+
+```http
+Accept-Language: nl
+```
+
+or if you pass a language parameter like:
+
+```text
+?salesPointLang=nl
+```
+
+depending on your current setup.
+
+For Spring Boot, a simple config usually looks like:
 
 ```java
-Instant now = Instant.now();
-
-session.setSessionId(UUID.randomUUID().toString());
-
-session.setSessionExpiresAt(
-        now.plusMinutes(
-                arthurSecurityProperties.getSession().getTtlMinutes()
-        )
-);
-
-Object expiresIn = tokenResponse.get("expires_in");
-if (expiresIn instanceof Number value) {
-    session.setAccessTokenExpiresAt(
-            now.plusSeconds(value.longValue())
-    );
+@Bean
+public LocaleResolver localeResolver() {
+    SessionLocaleResolver resolver = new SessionLocaleResolver();
+    resolver.setDefaultLocale(Locale.ENGLISH);
+    return resolver;
 }
 
-Object refreshExpiresIn = tokenResponse.get("refresh_expires_in");
-if (refreshExpiresIn instanceof Number value) {
-    session.setRefreshTokenExpiresAt(
-            now.plusSeconds(value.longValue())
-    );
+@Bean
+public LocaleChangeInterceptor localeChangeInterceptor() {
+    LocaleChangeInterceptor interceptor = new LocaleChangeInterceptor();
+    interceptor.setParamName("lang");
+    return interceptor;
 }
 ```
 
-Use this import if needed:
+Then URLs like this work:
 
-```java
-import java.time.Instant;
-import java.util.UUID;
+```text
+/sales-points?lang=nl
 ```
 
-Then in `HandoffService.exchange(...)`:
+## 6. Important note about fonts
 
-```java
-response.setSessionExpiresAt(session.getSessionExpiresAt());
-response.setTokenExpiresAt(session.getAccessTokenExpiresAt());
+Do not hardcode fonts from your local machine like this:
+
+```css
+font-family: "Some Installed Font";
 ```
 
-Important:
+That only works if the user also has that font installed. Since the font files were shared with you, include them as static assets and load them using `@font-face`.
 
-* `accessTokenExpiresAt` should come from Ping’s standard `expires_in` token-response field.
-* `refreshTokenExpiresAt` may remain `null` with PingFederate unless they return a refresh-expiry field or provide it in their token policy.
-* `sessionExpiresAt` is owned by Arthur and should match the Redis session TTL.
+## Recommended structure
+
+```text
+src/main/resources/
+├── messages.properties
+├── messages_fr.properties
+├── messages_nl.properties
+└── static/
+    ├── css/
+    │   └── sales-point.css
+    ├── fonts/
+    │   ├── MyTitleFont.woff2
+    │   └── MyTitleFont.woff
+    └── images/
+        └── continue-icon.svg
+```
+
+For your case, the next code change is likely:
+
+```html
+<h1 class="sales-point-title" th:text="#{salespoint.title}">
+```
+
+plus the `@font-face` block in CSS.
