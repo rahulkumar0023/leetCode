@@ -178,3 +178,180 @@ For your case, the next code change is likely:
 ```
 
 plus the `@font-face` block in CSS.
+-----------
+
+
+
+
+
+Yes, right now this page is **hardcoded in French**, except the `<title>` already uses:
+
+```html
+<title th:text="#{pageTitle}">Choix point de vente</title>
+```
+
+So the browser title can translate, but the visible screen content cannot because these are plain French strings:
+
+```html
+<h1>Connexion à<br>votre espace partenaire</h1>
+<h2>Votre point de vente</h2>
+<p>Vous devez choisir le point de vente dans lequel vous vous trouvez actuellement.</p>
+<button>Confirmer ...</button>
+```
+
+Update them to message keys like this:
+
+```html
+<h1 th:utext="#{salesPoints.heading}">
+    Connexion à<br>votre espace partenaire
+</h1>
+
+<h2 th:text="#{salesPoints.title}">
+    Votre point de vente
+</h2>
+
+<p th:text="#{salesPoints.description}">
+    Vous devez choisir le point de vente dans lequel vous vous trouvez actuellement.
+</p>
+
+<button class="confirm-btn" type="submit">
+    <span th:text="#{salesPoints.confirm}">Confirmer</span>
+    <img th:src="@{/images/icons/arrow-forward.svg}"
+         th:alt="#{salesPoints.confirm}"
+         class="btn-icon">
+</button>
+```
+
+For the language buttons, also make them dynamic:
+
+```html
+<div class="language-selector">
+    <a th:href="@{/sales-points(appId=${appId}, lang='fr')}"
+       th:classappend="${#locale.language == 'fr'} ? ' active' : ''"
+       class="language-btn">FR</a>
+
+    <a th:href="@{/sales-points(appId=${appId}, lang='nl')}"
+       th:classappend="${#locale.language == 'nl'} ? ' active' : ''"
+       class="language-btn">NL</a>
+</div>
+```
+
+Then add/update your message files.
+
+`messages_fr.properties`:
+
+```properties
+pageTitle=Choix point de vente
+
+salesPoints.heading=Connexion à<br>votre espace partenaire
+salesPoints.title=Votre point de vente
+salesPoints.description=Vous devez choisir le point de vente dans lequel vous vous trouvez actuellement.
+salesPoints.confirm=Confirmer
+```
+
+`messages_nl.properties`:
+
+```properties
+pageTitle=Keuze verkooppunt
+
+salesPoints.heading=Verbinding met<br>uw partneromgeving
+salesPoints.title=Uw verkooppunt
+salesPoints.description=U moet het verkooppunt kiezen waar u zich momenteel bevindt.
+salesPoints.confirm=Bevestigen
+```
+
+Because `salesPoints.heading` contains `<br>`, use `th:utext` only for that one. For the rest, use `th:text`.
+
+For your custom title font, put the font file here:
+
+```text
+src/main/resources/static/fonts/
+```
+
+Example:
+
+```text
+src/main/resources/static/fonts/title-font.woff2
+```
+
+Then add this at the top of `sales-points.css`:
+
+```css
+@font-face {
+  font-family: 'SalesPointTitle';
+  src: url('/fonts/title-font.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+```
+
+And apply it to your main title:
+
+```css
+.left-content h1 {
+  font-family: 'SalesPointTitle', Arial, sans-serif;
+}
+```
+
+One important thing: your `<button type="button">FR</button>` and `<button type="button">NL</button>` currently do nothing unless JavaScript is attached. Using `<a th:href=...>` is easier and works immediately with Spring locale switching.
+------------
+
+
+
+Yes, but with one important distinction:
+
+**For normal Spring Boot configuration**, YAML works:
+
+```yaml
+# application.yml
+spring:
+  messages:
+    basename: messages
+    encoding: UTF-8
+```
+
+But for **i18n translation message bundles**, Spring Boot expects `.properties` files by default:
+
+```text
+messages.properties
+messages_fr.properties
+messages_nl.properties
+```
+
+So for this sales point text, the recommended setup is still:
+
+```text
+src/main/resources/messages_fr.properties
+src/main/resources/messages_nl.properties
+```
+
+Example:
+
+```properties
+pageTitle=Choix point de vente
+salesPoints.heading=Connexion à<br>votre espace partenaire
+salesPoints.title=Votre point de vente
+salesPoints.description=Vous devez choisir le point de vente dans lequel vous vous trouvez actuellement.
+salesPoints.confirm=Confirmer
+```
+
+```properties
+pageTitle=Keuze verkooppunt
+salesPoints.heading=Verbinding met<br>uw partneromgeving
+salesPoints.title=Uw verkooppunt
+salesPoints.description=U moet het verkooppunt kiezen waar u zich momenteel bevindt.
+salesPoints.confirm=Bevestigen
+```
+
+You **can** use YAML for translations, but not out of the box cleanly. You would need a custom `MessageSource` / YAML message bundle loader. I would avoid that unless your project already has one.
+
+Best approach:
+
+```text
+application.yml          ✅ app config
+messages_fr.properties   ✅ translations
+messages_nl.properties   ✅ translations
+```
+
+So yes for app properties/config, but for `#{salesPoints.title}` translations, use `.properties`.
