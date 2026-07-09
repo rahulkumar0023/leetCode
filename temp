@@ -1,219 +1,220 @@
-Yes — you can update the sales point screen with NL translations and custom title fonts. The clean way is to handle these separately:
+Yes. You now need to update **both** screens:
 
-1. **Translations** through `messages.properties` / `messages_nl.properties`
-2. **Fonts** through static assets + CSS `@font-face`
-3. **Screen text** through Thymeleaf `#{...}` message keys
+1. `sales-points.html` / `sales-points.css`
+2. `sales-points-failure.html` / `sales-points-failure.css`
 
-## 1. Add NL translations
-
-If you already have English/French messages, add Dutch in:
+The design specs are:
 
 ```text
-src/main/resources/messages_nl.properties
+Green dark: #154734
+Green hover: #237656
+Green light: #6BDD00
+Black: #000000
+White: #ffffff
 ```
 
-Example:
+## 1. Update font declarations
 
-```properties
-salespoint.title=Selecteer uw verkooppunt
-salespoint.subtitle=Kies het verkooppunt waarmee u wilt doorgaan
-salespoint.continue=Doorgaan
-salespoint.noSalesPoints=Er zijn geen verkooppunten beschikbaar voor uw gebruiker.
-salespoint.error.title=Er is iets misgegaan
-salespoint.error.message=We konden uw verkooppunten niet ophalen. Probeer het later opnieuw.
+At the top of both CSS files, add the fonts.
+
+Since your Ubuntu fonts are currently under `static/css/fonts.Ubuntu/.woff2`, from `sales-points.css` the path is:
+
+```css
+url('./fonts.Ubuntu/.woff2/Ubuntu-Bold.woff2')
 ```
 
-Then in your Thymeleaf page:
-
-```html
-<h1 th:text="#{salespoint.title}">Select your sales point</h1>
-
-<p th:text="#{salespoint.subtitle}">
-  Choose the sales point you want to continue with
-</p>
-
-<button type="submit" th:text="#{salespoint.continue}">
-  Continue
-</button>
-```
-
-Spring will pick `messages_nl.properties` automatically when the user locale is `nl`.
-
-## 2. Where to put the fonts
-
-Put the provided font files here:
-
-```text
-src/main/resources/static/fonts/
-```
-
-Example:
-
-```text
-src/main/resources/static/fonts/MyTitleFont.woff2
-src/main/resources/static/fonts/MyTitleFont.woff
-```
-
-Prefer `.woff2` if available. You can keep `.woff` as fallback.
-
-## 3. Register the font in CSS
-
-In your CSS file, for example:
-
-```text
-src/main/resources/static/css/sales-point.css
-```
-
-Add:
+Add this:
 
 ```css
 @font-face {
-  font-family: 'SalesPointTitleFont';
-  src: url('/fonts/MyTitleFont.woff2') format('woff2'),
-       url('/fonts/MyTitleFont.woff') format('woff');
-  font-weight: 400;
+  font-family: 'UbuntuCustom';
+  src: url('./fonts.Ubuntu/.woff2/Ubuntu-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'UbuntuCustom';
+  src: url('./fonts.Ubuntu/.woff2/Ubuntu-Light.woff2') format('woff2');
+  font-weight: 300;
   font-style: normal;
   font-display: swap;
 }
 ```
 
-Then use it only for the title:
+For Open Sans, the design requires:
+
+```text
+Open Sans Light
+Open Sans Medium
+Open Sans Bold
+```
+
+If you do not have Open Sans files yet, add them similarly under:
+
+```text
+src/main/resources/static/css/fonts.OpenSans/.woff2/
+```
+
+Then add:
 
 ```css
-.sales-point-title {
-  font-family: 'SalesPointTitleFont', Arial, sans-serif;
-  font-size: 32px;
-  font-weight: 400;
-  line-height: 1.2;
+@font-face {
+  font-family: 'OpenSansCustom';
+  src: url('./fonts.OpenSans/.woff2/OpenSans-Light.woff2') format('woff2');
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'OpenSansCustom';
+  src: url('./fonts.OpenSans/.woff2/OpenSans-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'OpenSansCustom';
+  src: url('./fonts.OpenSans/.woff2/OpenSans-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
 }
 ```
 
-And in HTML:
+---
 
-```html
-<h1 class="sales-point-title" th:text="#{salespoint.title}">
-  Select your sales point
-</h1>
-```
+# Sales point selection screen CSS
 
-## 4. Include the CSS in the Thymeleaf page
-
-In your sales point page:
-
-```html
-<link rel="stylesheet" th:href="@{/css/sales-point.css}">
-```
-
-## 5. Locale switching / NL detection
-
-If your app already uses Spring locale resolution, then Dutch should work when the request has:
-
-```http
-Accept-Language: nl
-```
-
-or if you pass a language parameter like:
-
-```text
-?salesPointLang=nl
-```
-
-depending on your current setup.
-
-For Spring Boot, a simple config usually looks like:
-
-```java
-@Bean
-public LocaleResolver localeResolver() {
-    SessionLocaleResolver resolver = new SessionLocaleResolver();
-    resolver.setDefaultLocale(Locale.ENGLISH);
-    return resolver;
-}
-
-@Bean
-public LocaleChangeInterceptor localeChangeInterceptor() {
-    LocaleChangeInterceptor interceptor = new LocaleChangeInterceptor();
-    interceptor.setParamName("lang");
-    return interceptor;
-}
-```
-
-Then URLs like this work:
-
-```text
-/sales-points?lang=nl
-```
-
-## 6. Important note about fonts
-
-Do not hardcode fonts from your local machine like this:
+Add/update these in `sales-points.css`.
 
 ```css
-font-family: "Some Installed Font";
+:root {
+  --color-green-dark: #154734;
+  --color-green-hover: #237656;
+  --color-green-light: #6BDD00;
+  --color-black: #000000;
+  --color-white: #ffffff;
+}
+
+.left-content h1 {
+  margin: 0 0 8px;
+  font-family: 'UbuntuCustom', Arial, sans-serif;
+  font-weight: 700;
+  font-size: 48px;
+  line-height: 1.18;
+  color: var(--color-black);
+}
+
+.left-content h2 {
+  margin: 0 0 32px;
+  font-family: 'UbuntuCustom', Arial, sans-serif;
+  font-weight: 300;
+  font-size: 40px;
+  line-height: 1.15;
+  color: var(--color-green-dark);
+}
+
+.left-content p {
+  margin: 0 0 36px;
+  font-family: 'OpenSansCustom', Arial, sans-serif;
+  font-weight: 300;
+  font-size: 18px;
+  line-height: 1.45;
+  color: var(--color-black);
+}
+
+.sales-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 40px;
+}
+
+.sales-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-family: 'OpenSansCustom', Arial, sans-serif;
+  font-weight: 300;
+  font-size: 18px;
+  line-height: 24px;
+  color: var(--color-black);
+  cursor: pointer;
+}
+
+.sales-option input[type='radio'] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  margin: 0;
+  border: 2px solid var(--color-black);
+  border-radius: 50%;
+  background-color: var(--color-white);
+  cursor: pointer;
+  position: relative;
+}
+
+.sales-option input[type='radio']:checked {
+  border-color: var(--color-green-dark);
+}
+
+.sales-option input[type='radio']:checked::after {
+  content: '';
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  top: 5px;
+  left: 5px;
+  border-radius: 50%;
+  background-color: var(--color-green-light);
+}
+
+.confirm-btn {
+  min-width: 138px;
+  height: 48px;
+  padding: 12px 16px;
+  border: 1.5px solid var(--color-green-light);
+  border-radius: 1000px;
+  background-color: var(--color-green-dark);
+  color: var(--color-white);
+  font-family: 'OpenSansCustom', Arial, sans-serif;
+  font-weight: 500;
+  font-size: 16px;
+  line-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  cursor: pointer;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.04),
+    0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+.confirm-btn:hover {
+  background-color: var(--color-green-hover);
+}
+
+.confirm-btn:focus {
+  outline: 2px solid var(--color-green-light);
+  outline-offset: 2px;
+}
+
+.btn-icon {
+  width: 18px;
+  height: 18px;
+}
 ```
 
-That only works if the user also has that font installed. Since the font files were shared with you, include them as static assets and load them using `@font-face`.
-
-## Recommended structure
-
-```text
-src/main/resources/
-├── messages.properties
-├── messages_fr.properties
-├── messages_nl.properties
-└── static/
-    ├── css/
-    │   └── sales-point.css
-    ├── fonts/
-    │   ├── MyTitleFont.woff2
-    │   └── MyTitleFont.woff
-    └── images/
-        └── continue-icon.svg
-```
-
-For your case, the next code change is likely:
+Make sure your button HTML is like this:
 
 ```html
-<h1 class="sales-point-title" th:text="#{salespoint.title}">
-```
-
-plus the `@font-face` block in CSS.
------------
-
-
-
-
-
-Yes, right now this page is **hardcoded in French**, except the `<title>` already uses:
-
-```html
-<title th:text="#{pageTitle}">Choix point de vente</title>
-```
-
-So the browser title can translate, but the visible screen content cannot because these are plain French strings:
-
-```html
-<h1>Connexion à<br>votre espace partenaire</h1>
-<h2>Votre point de vente</h2>
-<p>Vous devez choisir le point de vente dans lequel vous vous trouvez actuellement.</p>
-<button>Confirmer ...</button>
-```
-
-Update them to message keys like this:
-
-```html
-<h1 th:utext="#{salesPoints.heading}">
-    Connexion à<br>votre espace partenaire
-</h1>
-
-<h2 th:text="#{salesPoints.title}">
-    Votre point de vente
-</h2>
-
-<p th:text="#{salesPoints.description}">
-    Vous devez choisir le point de vente dans lequel vous vous trouvez actuellement.
-</p>
-
 <button class="confirm-btn" type="submit">
     <span th:text="#{salesPoints.confirm}">Confirmer</span>
     <img th:src="@{/images/icons/arrow-forward.svg}"
@@ -222,136 +223,157 @@ Update them to message keys like this:
 </button>
 ```
 
-For the language buttons, also make them dynamic:
+---
+
+# Failure screen CSS
+
+For the failure page design, specs are:
+
+```text
+Icon size: 112px x 112px
+Circle fill: #154734
+Triangle/icon fill: #6bdd00
+Title: Ubuntu Bold, 48px, black
+Body 1: Open Sans Light, 18px, black
+Body 2: Open Sans Bold, 18px, black
+```
+
+Your failure page should have structure like this:
 
 ```html
-<div class="language-selector">
-    <a th:href="@{/sales-points(appId=${appId}, lang='fr')}"
-       th:classappend="${#locale.language == 'fr'} ? ' active' : ''"
-       class="language-btn">FR</a>
+<section class="failure-card">
+    <img class="failure-icon"
+         th:src="@{/images/icons/custom-icons.svg}"
+         alt="">
 
-    <a th:href="@{/sales-points(appId=${appId}, lang='nl')}"
-       th:classappend="${#locale.language == 'nl'} ? ' active' : ''"
-       class="language-btn">NL</a>
-</div>
+    <h1 th:utext="#{salesPoints.failure.title}">
+        Oups, votre point de vente<br>n’est pas encore défini.
+    </h1>
+
+    <p class="failure-message"
+       th:text="#{salesPoints.failure.message}">
+        Votre compte n’est pas associé à un point de vente. Vous ne pouvez donc pas accéder à la plateforme partenaire.
+    </p>
+
+    <p class="failure-help"
+       th:text="#{salesPoints.failure.help}">
+        Veuillez contacter votre interlocuteur habituel pour recevoir de l'aide.
+    </p>
+</section>
 ```
 
-Then add/update your message files.
+Then update `sales-points-failure.css`:
 
-`messages_fr.properties`:
+```css
+:root {
+  --color-green-dark: #154734;
+  --color-green-light: #6BDD00;
+  --color-black: #000000;
+  --color-white: #ffffff;
+}
+
+.failure-card {
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 56px 72px;
+  text-align: center;
+  background-color: var(--color-white);
+}
+
+.failure-icon {
+  width: 112px;
+  height: 112px;
+  margin-bottom: 40px;
+}
+
+.failure-card h1 {
+  margin: 0 0 40px;
+  font-family: 'UbuntuCustom', Arial, sans-serif;
+  font-weight: 700;
+  font-size: 48px;
+  line-height: 1.18;
+  color: var(--color-black);
+}
+
+.failure-message {
+  margin: 0 auto 16px;
+  max-width: 680px;
+  font-family: 'OpenSansCustom', Arial, sans-serif;
+  font-weight: 300;
+  font-size: 18px;
+  line-height: 1.45;
+  text-align: left;
+  color: var(--color-black);
+}
+
+.failure-help {
+  margin: 0 auto;
+  max-width: 680px;
+  font-family: 'OpenSansCustom', Arial, sans-serif;
+  font-weight: 700;
+  font-size: 18px;
+  line-height: 1.45;
+  text-align: left;
+  color: var(--color-black);
+}
+```
+
+If the failure page should be centered vertically inside the screen, also add:
+
+```css
+.screen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f5f5f5;
+}
+```
+
+---
+
+# Translation keys
+
+Add these to `messages_fr.properties`:
 
 ```properties
-pageTitle=Choix point de vente
-
 salesPoints.heading=Connexion à<br>votre espace partenaire
 salesPoints.title=Votre point de vente
 salesPoints.description=Vous devez choisir le point de vente dans lequel vous vous trouvez actuellement.
 salesPoints.confirm=Confirmer
+
+salesPoints.failure.title=Oups, votre point de vente<br>n’est pas encore défini.
+salesPoints.failure.message=Votre compte n’est pas associé à un point de vente. Vous ne pouvez donc pas accéder à la plateforme partenaire.
+salesPoints.failure.help=Veuillez contacter votre interlocuteur habituel pour recevoir de l'aide.
 ```
 
-`messages_nl.properties`:
+And `messages_nl.properties`:
 
 ```properties
-pageTitle=Keuze verkooppunt
-
 salesPoints.heading=Verbinding met<br>uw partneromgeving
 salesPoints.title=Uw verkooppunt
 salesPoints.description=U moet het verkooppunt kiezen waar u zich momenteel bevindt.
 salesPoints.confirm=Bevestigen
+
+salesPoints.failure.title=Oeps, uw verkooppunt<br>is nog niet gedefinieerd.
+salesPoints.failure.message=Uw account is niet gekoppeld aan een verkooppunt. U kunt daarom geen toegang krijgen tot het partnerplatform.
+salesPoints.failure.help=Neem contact op met uw gebruikelijke contactpersoon voor hulp.
 ```
 
-Because `salesPoints.heading` contains `<br>`, use `th:utext` only for that one. For the rest, use `th:text`.
+Use `th:utext` only where `<br>` is needed:
 
-For your custom title font, put the font file here:
-
-```text
-src/main/resources/static/fonts/
+```html
+<h1 th:utext="#{salesPoints.heading}">
 ```
 
-Example:
+and:
 
-```text
-src/main/resources/static/fonts/title-font.woff2
+```html
+<h1 th:utext="#{salesPoints.failure.title}">
 ```
 
-Then add this at the top of `sales-points.css`:
+For all other labels, keep `th:text`.
 
-```css
-@font-face {
-  font-family: 'SalesPointTitle';
-  src: url('/fonts/title-font.woff2') format('woff2');
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-```
+---
 
-And apply it to your main title:
-
-```css
-.left-content h1 {
-  font-family: 'SalesPointTitle', Arial, sans-serif;
-}
-```
-
-One important thing: your `<button type="button">FR</button>` and `<button type="button">NL</button>` currently do nothing unless JavaScript is attached. Using `<a th:href=...>` is easier and works immediately with Spring locale switching.
-------------
-
-
-
-Yes, but with one important distinction:
-
-**For normal Spring Boot configuration**, YAML works:
-
-```yaml
-# application.yml
-spring:
-  messages:
-    basename: messages
-    encoding: UTF-8
-```
-
-But for **i18n translation message bundles**, Spring Boot expects `.properties` files by default:
-
-```text
-messages.properties
-messages_fr.properties
-messages_nl.properties
-```
-
-So for this sales point text, the recommended setup is still:
-
-```text
-src/main/resources/messages_fr.properties
-src/main/resources/messages_nl.properties
-```
-
-Example:
-
-```properties
-pageTitle=Choix point de vente
-salesPoints.heading=Connexion à<br>votre espace partenaire
-salesPoints.title=Votre point de vente
-salesPoints.description=Vous devez choisir le point de vente dans lequel vous vous trouvez actuellement.
-salesPoints.confirm=Confirmer
-```
-
-```properties
-pageTitle=Keuze verkooppunt
-salesPoints.heading=Verbinding met<br>uw partneromgeving
-salesPoints.title=Uw verkooppunt
-salesPoints.description=U moet het verkooppunt kiezen waar u zich momenteel bevindt.
-salesPoints.confirm=Bevestigen
-```
-
-You **can** use YAML for translations, but not out of the box cleanly. You would need a custom `MessageSource` / YAML message bundle loader. I would avoid that unless your project already has one.
-
-Best approach:
-
-```text
-application.yml          ✅ app config
-messages_fr.properties   ✅ translations
-messages_nl.properties   ✅ translations
-```
-
-So yes for app properties/config, but for `#{salesPoints.title}` translations, use `.properties`.
+One thing I would change in your folder structure later: move fonts out of `static/css` into `static/fonts`, but your current path can work. For now, use the relative paths exactly as shown above.
