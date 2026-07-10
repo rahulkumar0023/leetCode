@@ -377,3 +377,124 @@ For all other labels, keep `th:text`.
 ---
 
 One thing I would change in your folder structure later: move fonts out of `static/css` into `static/fonts`, but your current path can work. For now, use the relative paths exactly as shown above.
+
+
+---
+
+
+Yes — if one person can have multiple relationship types, then `relationship_type` should be a **list**.
+
+For example, instead of:
+
+```json
+"working_relationship": {
+  "relationship_type": "SELLER",
+  "status": "ACTIVE"
+}
+```
+
+use:
+
+```json
+"working_relationship": {
+  "relationship_types": ["SELLER", "DEALER"],
+  "status": "ACTIVE"
+}
+```
+
+Then update the DTO:
+
+```java
+@Getter
+@Setter
+public class As400WorkingRelationshipRequest {
+
+    @NotEmpty
+    @JsonProperty("relationship_types")
+    @JsonAlias({"relationshipTypes", "relationship_type", "relationshipType"})
+    private List<String> relationshipTypes;
+
+    @NotBlank
+    private String status;
+}
+```
+
+Imports:
+
+```java
+import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotEmpty;
+import lombok.Getter;
+import lombok.Setter;
+
+import java.util.List;
+```
+
+Then update the service loop. Since your DB stores one relationship row per type, create/update one row per sales point and per relationship type:
+
+```java
+for (As400PointOfSalesRequest pointOfSalesRequest : request.getPointOfSales()) {
+    SalesPointEntity salesPoint = salesPointRepository
+            .findBySalesPointId(pointOfSalesRequest.getId())
+            .orElseGet(SalesPointEntity::new);
+
+    updateSalesPoint(salesPoint, pointOfSalesRequest, request);
+    salesPointRepository.save(salesPoint);
+
+    for (String relationshipType
+            : request.getWorkingRelationship().getRelationshipTypes()) {
+
+        PersonSalesPointRelationshipEntity relationship =
+                relationshipRepository
+                        .findByPersonUserIdAndSalesPointIdAndRelationshipType(
+                                user.getUserId(),
+                                salesPoint.getSalesPointId(),
+                                relationshipType)
+                        .orElseGet(PersonSalesPointRelationshipEntity::new);
+
+        updateRelationship(
+                relationship,
+                user,
+                salesPoint,
+                relationshipType,
+                request);
+
+        relationshipRepository.save(relationship);
+    }
+}
+```
+
+Your JSON then becomes:
+
+```json
+{
+  "point_of_sales": [
+    {
+      "id": "BOU001",
+      "name": "Orange Shop Brussels"
+    },
+    {
+      "id": "BOU002",
+      "name": "Orange Shop Brussels 2"
+    }
+  ],
+  "working_relationship": {
+    "relationship_types": ["SELLER", "DEALER"],
+    "status": "ACTIVE"
+  }
+}
+```
+
+This means:
+
+```text
+gps000001 -> BOU001 -> SELLER
+gps000001 -> BOU001 -> DEALER
+gps000001 -> BOU002 -> SELLER
+gps000001 -> BOU002 -> DEALER
+```
+
+That matches your many-to-many model with extra relationship metadata.
+
