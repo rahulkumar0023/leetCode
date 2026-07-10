@@ -1,86 +1,44 @@
-Fonts are loading now. The problem in the screenshot is **not font-related**.
+Yes. The clean approach is:
 
-This part:
+* Use **French** when locale is `fr`
+* Use **Dutch** when locale is `nl`
+* Use **default fallback** for everything else, like `en`, `en_GB`, `de`, etc.
 
-```text
-??salesPoints.heading_en_GB??
-??salesPoints.title_en_GB??
-??salesPoints.description_en_GB??
-??salesPoints.confirm_en_GB??
-```
-
-means Spring/Thymeleaf cannot find those translation keys for the current locale, which is:
+You already get this behavior if you keep:
 
 ```text
-en_GB
-```
-
-So your app is currently trying to load English UK messages, but you only have:
-
-```text
+messages.properties
 messages_fr.properties
 messages_nl.properties
 ```
 
-## Fix 1: Add default `messages.properties`
-
-Create this file directly under `src/main/resources`:
+For your case, put the default language you want inside:
 
 ```text
 src/main/resources/messages.properties
 ```
 
-Add French fallback values:
+For example, if default should be French:
 
 ```properties
 pageTitle=Choix point de vente
-
 salesPoints.heading=Connexion à<br>votre espace partenaire
 salesPoints.title=Votre point de vente
 salesPoints.description=Vous devez choisir le point de vente dans lequel vous vous trouvez actuellement.
 salesPoints.confirm=Confirmer
 ```
 
-This prevents `??key_en_GB??` when the browser locale is English.
+Then:
 
-## Fix 2: Keep your French and Dutch files
-
-`messages_fr.properties`:
-
-```properties
-pageTitle=Choix point de vente
-
-salesPoints.heading=Connexion à<br>votre espace partenaire
-salesPoints.title=Votre point de vente
-salesPoints.description=Vous devez choisir le point de vente dans lequel vous vous trouvez actuellement.
-salesPoints.confirm=Confirmer
+```text
+Browser language en_GB -> messages.properties
+Browser language fr    -> messages_fr.properties
+Browser language nl    -> messages_nl.properties
 ```
 
-`messages_nl.properties`:
+So yes, for your English system/browser, it will use default.
 
-```properties
-pageTitle=Keuze verkooppunt
-
-salesPoints.heading=Verbinding met<br>uw partneromgeving
-salesPoints.title=Uw verkooppunt
-salesPoints.description=U moet het verkooppunt kiezen waar u zich momenteel bevindt.
-salesPoints.confirm=Bevestigen
-```
-
-## Fix 3: Make sure Spring is reading messages
-
-In `application.yml`:
-
-```yaml
-spring:
-  messages:
-    basename: messages
-    encoding: UTF-8
-```
-
-## Fix 4: Make `?lang=fr` / `?lang=nl` work
-
-Add this config class if you do not already have it:
+One improvement: set default locale explicitly to French in your config:
 
 ```java
 @Configuration
@@ -107,11 +65,61 @@ public class LocaleConfig implements WebMvcConfigurer {
 }
 ```
 
+But if you want **only FR/NL supported**, and everything else forced to French, add a small interceptor:
+
+```java
+@Configuration
+public class LocaleConfig implements WebMvcConfigurer {
+
+    private static final Set<String> SUPPORTED_LANGUAGES = Set.of("fr", "nl");
+
+    @Bean
+    public LocaleResolver localeResolver() {
+        SessionLocaleResolver resolver = new SessionLocaleResolver();
+        resolver.setDefaultLocale(Locale.FRENCH);
+        return resolver;
+    }
+
+    @Bean
+    public LocaleChangeInterceptor localeChangeInterceptor() {
+        LocaleChangeInterceptor interceptor = new LocaleChangeInterceptor();
+        interceptor.setParamName("lang");
+        return interceptor;
+    }
+
+    @Override
+    public void addInterceptors(InterceptorRegistry registry) {
+        registry.addInterceptor(localeChangeInterceptor());
+
+        registry.addInterceptor(new HandlerInterceptor() {
+            @Override
+            public boolean preHandle(
+                    HttpServletRequest request,
+                    HttpServletResponse response,
+                    Object handler
+            ) {
+                Locale locale = LocaleContextHolder.getLocale();
+
+                if (!SUPPORTED_LANGUAGES.contains(locale.getLanguage())) {
+                    LocaleContextHolder.setLocale(Locale.FRENCH);
+                }
+
+                return true;
+            }
+        });
+    }
+}
+```
+
 Imports:
 
 ```java
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.i18n.LocaleContextHolder;
+import org.springframework.web.servlet.HandlerInterceptor;
 import org.springframework.web.servlet.LocaleResolver;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
@@ -119,22 +127,15 @@ import org.springframework.web.servlet.i18n.LocaleChangeInterceptor;
 import org.springframework.web.servlet.i18n.SessionLocaleResolver;
 
 import java.util.Locale;
+import java.util.Set;
 ```
 
-## Why you see `_en_GB`
-
-Your browser/system locale is probably English UK, so Spring is looking for:
+But honestly, for your case, I’d keep it simple:
 
 ```text
-messages_en_GB.properties
-messages_en.properties
-messages.properties
+messages.properties     -> default French
+messages_fr.properties  -> French
+messages_nl.properties  -> Dutch
 ```
 
-Since you did not have `messages.properties`, it displayed:
-
-```text
-??salesPoints.heading_en_GB??
-```
-
-After adding `messages.properties`, the page should show French fallback text. Then clicking `FR` or `NL` should switch languages once the `LocaleChangeInterceptor` is active.
+That is enough.
