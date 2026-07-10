@@ -381,113 +381,239 @@ One thing I would change in your folder structure later: move fonts out of `stat
 
 ---
 
+Right — your current service handles only **one sales point** and **one relationship type**:
 
-Yes — if one person can have multiple relationship types, then `relationship_type` should be a **list**.
+```java
+request.getPointOfSales().getId()
+request.getWorkingRelationship().getRelationshipType()
+```
 
-For example, instead of:
+Now that you want:
 
 ```json
+"point_of_sales": [ ... ],
 "working_relationship": {
-  "relationship_type": "SELLER",
-  "status": "ACTIVE"
+  "relationship_types": ["SELLER", "DEALER"]
 }
 ```
 
-use:
+you need to replace the single sales-point/relationship block with nested loops.
 
-```json
-"working_relationship": {
-  "relationship_types": ["SELLER", "DEALER"],
-  "status": "ACTIVE"
+Keep your user create/update part as-is:
+
+```java
+UserEntity user = existingUser.orElseGet(UserEntity::new);
+
+if (userCreated) {
+    populateNewUser(user, request);
+} else {
+    updateUser(user, request);
 }
+
+user = userRepository.save(user);
 ```
 
-Then update the DTO:
+Then replace everything from:
 
 ```java
-@Getter
-@Setter
-public class As400WorkingRelationshipRequest {
-
-    @NotEmpty
-    @JsonProperty("relationship_types")
-    @JsonAlias({"relationshipTypes", "relationship_type", "relationshipType"})
-    private List<String> relationshipTypes;
-
-    @NotBlank
-    private String status;
-}
+SalesPointEntity salesPoint = salesPointRepository
+        .findBySalesPointId(request.getPointOfSales().getId())
 ```
 
-Imports:
+down to:
 
 ```java
-import com.fasterxml.jackson.annotation.JsonAlias;
-import com.fasterxml.jackson.annotation.JsonProperty;
-import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.NotEmpty;
-import lombok.Getter;
-import lombok.Setter;
-
-import java.util.List;
+relationshipRepository.save(relationship);
 ```
 
-Then update the service loop. Since your DB stores one relationship row per type, create/update one row per sales point and per relationship type:
+with this:
 
 ```java
-for (As400PointOfSalesRequest pointOfSalesRequest : request.getPointOfSales()) {
+boolean anySalesPointChanged = false;
+boolean anyRelationshipCreated = false;
+boolean anyRelationshipChanged = false;
+
+for (As400PointOfSalesRequest pointOfSalesRequest
+        : request.getPointOfSales()) {
+
     SalesPointEntity salesPoint = salesPointRepository
             .findBySalesPointId(pointOfSalesRequest.getId())
             .orElseGet(SalesPointEntity::new);
 
-    updateSalesPoint(salesPoint, pointOfSalesRequest, request);
-    salesPointRepository.save(salesPoint);
+    boolean salesPointChanged =
+            updateSalesPoint(salesPoint, pointOfSalesRequest, request);
+
+    if (salesPointChanged) {
+        anySalesPointChanged = true;
+    }
+
+    salesPoint = salesPointRepository.save(salesPoint);
 
     for (String relationshipType
             : request.getWorkingRelationship().getRelationshipTypes()) {
 
-        PersonSalesPointRelationshipEntity relationship =
+        Optional<PersonSalesPointRelationshipEntity> existingRelationship =
                 relationshipRepository
                         .findByPersonUserIdAndSalesPointIdAndRelationshipType(
                                 user.getUserId(),
                                 salesPoint.getSalesPointId(),
-                                relationshipType)
-                        .orElseGet(PersonSalesPointRelationshipEntity::new);
+                                relationshipType);
 
-        updateRelationship(
-                relationship,
-                user,
-                salesPoint,
-                relationshipType,
-                request);
+        boolean relationshipCreated = existingRelationship.isEmpty();
+
+        PersonSalesPointRelationshipEntity relationship =
+                existingRelationship.orElseGet(
+                        PersonSalesPointRelationshipEntity::new);
+
+        boolean relationshipChanged =
+                updateRelationship(
+                        relationship,
+                        user,
+                        salesPoint,
+                        relationshipType,
+                        request);
 
         relationshipRepository.save(relationship);
+
+        if (relationshipCreated) {
+            anyRelationshipCreated = true;
+        }
+
+        if (relationshipChanged) {
+            anyRelationshipChanged = true;
+        }
     }
 }
 ```
 
-Your JSON then becomes:
+Now update your helper method signatures.
 
-```json
-{
-  "point_of_sales": [
-    {
-      "id": "BOU001",
-      "name": "Orange Shop Brussels"
-    },
-    {
-      "id": "BOU002",
-      "name": "Orange Shop Brussels 2"
-    }
-  ],
-  "working_relationship": {
-    "relationship_types": ["SELLER", "DEALER"],
-    "status": "ACTIVE"
-  }
+### `updateSalesPoint`
+
+```java
+private boolean updateSalesPoint(
+        SalesPointEntity salesPoint,
+        As400PointOfSalesRequest pointOfSalesRequest,
+        As400UserSnapshotRequest request) {
+
+    boolean changed =
+            !Objects.equals(
+                    salesPoint.getSalesPointId(),
+                    pointOfSalesRequest.getId())
+                    || !Objects.equals(
+                    salesPoint.getLabel(),
+                    pointOfSalesRequest.getName())
+                    || !Objects.equals(
+                    salesPoint.getEntity(),
+                    request.getSource().getEntity());
+
+    salesPoint.setSalesPointId(pointOfSalesRequest.getId());
+    salesPoint.setLabel(pointOfSalesRequest.getName());
+    salesPoint.setEntity(request.getSource().getEntity());
+
+    return changed;
 }
 ```
 
-This means:
+If you still keep `orgUnitId` in `SalesPointEntity`, you can set it to `pointOfSalesRequest.getId()` or `request.getSource().getSourcePointOfSalesId()`, but with multiple sales points, the list item ID is safer.
+
+### `updateRelationship`
+
+```java
+private boolean updateRelationship(
+        PersonSalesPointRelationshipEntity relationship,
+        UserEntity user,
+        SalesPointEntity salesPoint,
+        String relationshipType,
+        As400UserSnapshotRequest request) {
+
+    boolean changed =
+            !Objects.equals(relationship.getPersonUserId(), user.getUserId())
+                    || !Objects.equals(
+                    relationship.getSalesPointId(),
+                    salesPoint.getSalesPointId())
+                    || !Objects.equals(
+                    relationship.getRelationshipType(),
+                    relationshipType)
+                    || !Objects.equals(
+                    relationship.getOrgUnitId(),
+                    salesPoint.getSalesPointId())
+                    || !Objects.equals(
+                    relationship.getStatus(),
+                    request.getWorkingRelationship().getStatus());
+
+    relationship.setPersonUserId(user.getUserId());
+    relationship.setSalesPointId(salesPoint.getSalesPointId());
+    relationship.setRelationshipType(relationshipType);
+    relationship.setOrgUnitId(salesPoint.getSalesPointId());
+    relationship.setStatus(request.getWorkingRelationship().getStatus());
+
+    return changed;
+}
+```
+
+Then update your response logic:
+
+```java
+if (isInactive(request)) {
+    return As400SyncResponse.builder()
+            .status("ACCEPTED")
+            .code(As400SyncCode.RECORD_DEACTIVATED)
+            .message("User relationship was deactivated.")
+            .correlationId(correlationId)
+            .partnerRepositoryRecordId(user.getUserId())
+            .build();
+}
+
+if (userCreated || anyRelationshipCreated) {
+    return As400SyncResponse.builder()
+            .status("ACCEPTED")
+            .code(As400SyncCode.RECORD_CREATED)
+            .message("User snapshot created successfully.")
+            .correlationId(correlationId)
+            .partnerRepositoryRecordId(user.getUserId())
+            .build();
+}
+
+if (anySalesPointChanged || anyRelationshipChanged) {
+    return As400SyncResponse.builder()
+            .status("ACCEPTED")
+            .code(As400SyncCode.RECORD_UPDATED)
+            .message("User snapshot updated successfully.")
+            .correlationId(correlationId)
+            .partnerRepositoryRecordId(user.getUserId())
+            .build();
+}
+
+return As400SyncResponse.builder()
+        .status("ACCEPTED")
+        .code(As400SyncCode.NO_CHANGE)
+        .message("Snapshot received but no effective change was detected.")
+        .correlationId(correlationId)
+        .partnerRepositoryRecordId(user.getUserId())
+        .build();
+```
+
+Also your DTO should now be:
+
+```java
+@Valid
+@NotEmpty
+@JsonProperty("point_of_sales")
+@JsonAlias("pointOfSales")
+private List<As400PointOfSalesRequest> pointOfSales;
+```
+
+and:
+
+```java
+@NotEmpty
+@JsonProperty("relationship_types")
+@JsonAlias({"relationshipTypes", "relationship_type", "relationshipType"})
+private List<String> relationshipTypes;
+```
+
+This will create rows like:
 
 ```text
 gps000001 -> BOU001 -> SELLER
@@ -496,5 +622,4 @@ gps000001 -> BOU002 -> SELLER
 gps000001 -> BOU002 -> DEALER
 ```
 
-That matches your many-to-many model with extra relationship metadata.
 
