@@ -1,625 +1,140 @@
-Yes. You now need to update **both** screens:
+Fonts are loading now. The problem in the screenshot is **not font-related**.
 
-1. `sales-points.html` / `sales-points.css`
-2. `sales-points-failure.html` / `sales-points-failure.css`
-
-The design specs are:
+This part:
 
 ```text
-Green dark: #154734
-Green hover: #237656
-Green light: #6BDD00
-Black: #000000
-White: #ffffff
+??salesPoints.heading_en_GB??
+??salesPoints.title_en_GB??
+??salesPoints.description_en_GB??
+??salesPoints.confirm_en_GB??
 ```
 
-## 1. Update font declarations
-
-At the top of both CSS files, add the fonts.
-
-Since your Ubuntu fonts are currently under `static/css/fonts.Ubuntu/.woff2`, from `sales-points.css` the path is:
-
-```css
-url('./fonts.Ubuntu/.woff2/Ubuntu-Bold.woff2')
-```
-
-Add this:
-
-```css
-@font-face {
-  font-family: 'UbuntuCustom';
-  src: url('./fonts.Ubuntu/.woff2/Ubuntu-Bold.woff2') format('woff2');
-  font-weight: 700;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'UbuntuCustom';
-  src: url('./fonts.Ubuntu/.woff2/Ubuntu-Light.woff2') format('woff2');
-  font-weight: 300;
-  font-style: normal;
-  font-display: swap;
-}
-```
-
-For Open Sans, the design requires:
+means Spring/Thymeleaf cannot find those translation keys for the current locale, which is:
 
 ```text
-Open Sans Light
-Open Sans Medium
-Open Sans Bold
+en_GB
 ```
 
-If you do not have Open Sans files yet, add them similarly under:
+So your app is currently trying to load English UK messages, but you only have:
 
 ```text
-src/main/resources/static/css/fonts.OpenSans/.woff2/
+messages_fr.properties
+messages_nl.properties
 ```
 
-Then add:
+## Fix 1: Add default `messages.properties`
 
-```css
-@font-face {
-  font-family: 'OpenSansCustom';
-  src: url('./fonts.OpenSans/.woff2/OpenSans-Light.woff2') format('woff2');
-  font-weight: 300;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'OpenSansCustom';
-  src: url('./fonts.OpenSans/.woff2/OpenSans-Medium.woff2') format('woff2');
-  font-weight: 500;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'OpenSansCustom';
-  src: url('./fonts.OpenSans/.woff2/OpenSans-Bold.woff2') format('woff2');
-  font-weight: 700;
-  font-style: normal;
-  font-display: swap;
-}
-```
-
----
-
-# Sales point selection screen CSS
-
-Add/update these in `sales-points.css`.
-
-```css
-:root {
-  --color-green-dark: #154734;
-  --color-green-hover: #237656;
-  --color-green-light: #6BDD00;
-  --color-black: #000000;
-  --color-white: #ffffff;
-}
-
-.left-content h1 {
-  margin: 0 0 8px;
-  font-family: 'UbuntuCustom', Arial, sans-serif;
-  font-weight: 700;
-  font-size: 48px;
-  line-height: 1.18;
-  color: var(--color-black);
-}
-
-.left-content h2 {
-  margin: 0 0 32px;
-  font-family: 'UbuntuCustom', Arial, sans-serif;
-  font-weight: 300;
-  font-size: 40px;
-  line-height: 1.15;
-  color: var(--color-green-dark);
-}
-
-.left-content p {
-  margin: 0 0 36px;
-  font-family: 'OpenSansCustom', Arial, sans-serif;
-  font-weight: 300;
-  font-size: 18px;
-  line-height: 1.45;
-  color: var(--color-black);
-}
-
-.sales-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin-bottom: 40px;
-}
-
-.sales-option {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  font-family: 'OpenSansCustom', Arial, sans-serif;
-  font-weight: 300;
-  font-size: 18px;
-  line-height: 24px;
-  color: var(--color-black);
-  cursor: pointer;
-}
-
-.sales-option input[type='radio'] {
-  appearance: none;
-  -webkit-appearance: none;
-  width: 24px;
-  height: 24px;
-  flex: 0 0 24px;
-  margin: 0;
-  border: 2px solid var(--color-black);
-  border-radius: 50%;
-  background-color: var(--color-white);
-  cursor: pointer;
-  position: relative;
-}
-
-.sales-option input[type='radio']:checked {
-  border-color: var(--color-green-dark);
-}
-
-.sales-option input[type='radio']:checked::after {
-  content: '';
-  position: absolute;
-  width: 10px;
-  height: 10px;
-  top: 5px;
-  left: 5px;
-  border-radius: 50%;
-  background-color: var(--color-green-light);
-}
-
-.confirm-btn {
-  min-width: 138px;
-  height: 48px;
-  padding: 12px 16px;
-  border: 1.5px solid var(--color-green-light);
-  border-radius: 1000px;
-  background-color: var(--color-green-dark);
-  color: var(--color-white);
-  font-family: 'OpenSansCustom', Arial, sans-serif;
-  font-weight: 500;
-  font-size: 16px;
-  line-height: 24px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  cursor: pointer;
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.04),
-    0 1px 3px rgba(0, 0, 0, 0.06);
-}
-
-.confirm-btn:hover {
-  background-color: var(--color-green-hover);
-}
-
-.confirm-btn:focus {
-  outline: 2px solid var(--color-green-light);
-  outline-offset: 2px;
-}
-
-.btn-icon {
-  width: 18px;
-  height: 18px;
-}
-```
-
-Make sure your button HTML is like this:
-
-```html
-<button class="confirm-btn" type="submit">
-    <span th:text="#{salesPoints.confirm}">Confirmer</span>
-    <img th:src="@{/images/icons/arrow-forward.svg}"
-         th:alt="#{salesPoints.confirm}"
-         class="btn-icon">
-</button>
-```
-
----
-
-# Failure screen CSS
-
-For the failure page design, specs are:
+Create this file directly under `src/main/resources`:
 
 ```text
-Icon size: 112px x 112px
-Circle fill: #154734
-Triangle/icon fill: #6bdd00
-Title: Ubuntu Bold, 48px, black
-Body 1: Open Sans Light, 18px, black
-Body 2: Open Sans Bold, 18px, black
+src/main/resources/messages.properties
 ```
 
-Your failure page should have structure like this:
-
-```html
-<section class="failure-card">
-    <img class="failure-icon"
-         th:src="@{/images/icons/custom-icons.svg}"
-         alt="">
-
-    <h1 th:utext="#{salesPoints.failure.title}">
-        Oups, votre point de vente<br>n’est pas encore défini.
-    </h1>
-
-    <p class="failure-message"
-       th:text="#{salesPoints.failure.message}">
-        Votre compte n’est pas associé à un point de vente. Vous ne pouvez donc pas accéder à la plateforme partenaire.
-    </p>
-
-    <p class="failure-help"
-       th:text="#{salesPoints.failure.help}">
-        Veuillez contacter votre interlocuteur habituel pour recevoir de l'aide.
-    </p>
-</section>
-```
-
-Then update `sales-points-failure.css`:
-
-```css
-:root {
-  --color-green-dark: #154734;
-  --color-green-light: #6BDD00;
-  --color-black: #000000;
-  --color-white: #ffffff;
-}
-
-.failure-card {
-  max-width: 780px;
-  margin: 0 auto;
-  padding: 56px 72px;
-  text-align: center;
-  background-color: var(--color-white);
-}
-
-.failure-icon {
-  width: 112px;
-  height: 112px;
-  margin-bottom: 40px;
-}
-
-.failure-card h1 {
-  margin: 0 0 40px;
-  font-family: 'UbuntuCustom', Arial, sans-serif;
-  font-weight: 700;
-  font-size: 48px;
-  line-height: 1.18;
-  color: var(--color-black);
-}
-
-.failure-message {
-  margin: 0 auto 16px;
-  max-width: 680px;
-  font-family: 'OpenSansCustom', Arial, sans-serif;
-  font-weight: 300;
-  font-size: 18px;
-  line-height: 1.45;
-  text-align: left;
-  color: var(--color-black);
-}
-
-.failure-help {
-  margin: 0 auto;
-  max-width: 680px;
-  font-family: 'OpenSansCustom', Arial, sans-serif;
-  font-weight: 700;
-  font-size: 18px;
-  line-height: 1.45;
-  text-align: left;
-  color: var(--color-black);
-}
-```
-
-If the failure page should be centered vertically inside the screen, also add:
-
-```css
-.screen {
-  min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #f5f5f5;
-}
-```
-
----
-
-# Translation keys
-
-Add these to `messages_fr.properties`:
+Add French fallback values:
 
 ```properties
+pageTitle=Choix point de vente
+
 salesPoints.heading=Connexion à<br>votre espace partenaire
 salesPoints.title=Votre point de vente
 salesPoints.description=Vous devez choisir le point de vente dans lequel vous vous trouvez actuellement.
 salesPoints.confirm=Confirmer
-
-salesPoints.failure.title=Oups, votre point de vente<br>n’est pas encore défini.
-salesPoints.failure.message=Votre compte n’est pas associé à un point de vente. Vous ne pouvez donc pas accéder à la plateforme partenaire.
-salesPoints.failure.help=Veuillez contacter votre interlocuteur habituel pour recevoir de l'aide.
 ```
 
-And `messages_nl.properties`:
+This prevents `??key_en_GB??` when the browser locale is English.
+
+## Fix 2: Keep your French and Dutch files
+
+`messages_fr.properties`:
 
 ```properties
+pageTitle=Choix point de vente
+
+salesPoints.heading=Connexion à<br>votre espace partenaire
+salesPoints.title=Votre point de vente
+salesPoints.description=Vous devez choisir le point de vente dans lequel vous vous trouvez actuellement.
+salesPoints.confirm=Confirmer
+```
+
+`messages_nl.properties`:
+
+```properties
+pageTitle=Keuze verkooppunt
+
 salesPoints.heading=Verbinding met<br>uw partneromgeving
 salesPoints.title=Uw verkooppunt
 salesPoints.description=U moet het verkooppunt kiezen waar u zich momenteel bevindt.
 salesPoints.confirm=Bevestigen
-
-salesPoints.failure.title=Oeps, uw verkooppunt<br>is nog niet gedefinieerd.
-salesPoints.failure.message=Uw account is niet gekoppeld aan een verkooppunt. U kunt daarom geen toegang krijgen tot het partnerplatform.
-salesPoints.failure.help=Neem contact op met uw gebruikelijke contactpersoon voor hulp.
 ```
 
-Use `th:utext` only where `<br>` is needed:
+## Fix 3: Make sure Spring is reading messages
 
-```html
-<h1 th:utext="#{salesPoints.heading}">
+In `application.yml`:
+
+```yaml
+spring:
+  messages:
+    basename: messages
+    encoding: UTF-8
 ```
 
-and:
+## Fix 4: Make `?lang=fr` / `?lang=nl` work
 
-```html
-<h1 th:utext="#{salesPoints.failure.title}">
-```
-
-For all other labels, keep `th:text`.
-
----
-
-One thing I would change in your folder structure later: move fonts out of `static/css` into `static/fonts`, but your current path can work. For now, use the relative paths exactly as shown above.
-
-
----
-
-Right — your current service handles only **one sales point** and **one relationship type**:
+Add this config class if you do not already have it:
 
 ```java
-request.getPointOfSales().getId()
-request.getWorkingRelationship().getRelationshipType()
-```
+@Configuration
+public class LocaleConfig implements WebMvcConfigurer {
 
-Now that you want:
-
-```json
-"point_of_sales": [ ... ],
-"working_relationship": {
-  "relationship_types": ["SELLER", "DEALER"]
-}
-```
-
-you need to replace the single sales-point/relationship block with nested loops.
-
-Keep your user create/update part as-is:
-
-```java
-UserEntity user = existingUser.orElseGet(UserEntity::new);
-
-if (userCreated) {
-    populateNewUser(user, request);
-} else {
-    updateUser(user, request);
-}
-
-user = userRepository.save(user);
-```
-
-Then replace everything from:
-
-```java
-SalesPointEntity salesPoint = salesPointRepository
-        .findBySalesPointId(request.getPointOfSales().getId())
-```
-
-down to:
-
-```java
-relationshipRepository.save(relationship);
-```
-
-with this:
-
-```java
-boolean anySalesPointChanged = false;
-boolean anyRelationshipCreated = false;
-boolean anyRelationshipChanged = false;
-
-for (As400PointOfSalesRequest pointOfSalesRequest
-        : request.getPointOfSales()) {
-
-    SalesPointEntity salesPoint = salesPointRepository
-            .findBySalesPointId(pointOfSalesRequest.getId())
-            .orElseGet(SalesPointEntity::new);
-
-    boolean salesPointChanged =
-            updateSalesPoint(salesPoint, pointOfSalesRequest, request);
-
-    if (salesPointChanged) {
-        anySalesPointChanged = true;
+    @Bean
+    public LocaleResolver localeResolver() {
+        SessionLocaleResolver resolver = new SessionLocaleResolver();
+        resolver.setDefaultLocale(Locale.FRENCH);
+        return resolver;
     }
 
-    salesPoint = salesPointRepository.save(salesPoint);
+    @Bean
+    public LocaleChangeInterceptor localeChangeInterceptor() {
+        LocaleChangeInterceptor interceptor = new LocaleChangeInterceptor();
+        interceptor.setParamName("lang");
+        return interceptor;
+    }
 
-    for (String relationshipType
-            : request.getWorkingRelationship().getRelationshipTypes()) {
-
-        Optional<PersonSalesPointRelationshipEntity> existingRelationship =
-                relationshipRepository
-                        .findByPersonUserIdAndSalesPointIdAndRelationshipType(
-                                user.getUserId(),
-                                salesPoint.getSalesPointId(),
-                                relationshipType);
-
-        boolean relationshipCreated = existingRelationship.isEmpty();
-
-        PersonSalesPointRelationshipEntity relationship =
-                existingRelationship.orElseGet(
-                        PersonSalesPointRelationshipEntity::new);
-
-        boolean relationshipChanged =
-                updateRelationship(
-                        relationship,
-                        user,
-                        salesPoint,
-                        relationshipType,
-                        request);
-
-        relationshipRepository.save(relationship);
-
-        if (relationshipCreated) {
-            anyRelationshipCreated = true;
-        }
-
-        if (relationshipChanged) {
-            anyRelationshipChanged = true;
-        }
+    @Override
+    public void addInterceptors(InterceptorRegistry registry) {
+        registry.addInterceptor(localeChangeInterceptor());
     }
 }
 ```
 
-Now update your helper method signatures.
-
-### `updateSalesPoint`
+Imports:
 
 ```java
-private boolean updateSalesPoint(
-        SalesPointEntity salesPoint,
-        As400PointOfSalesRequest pointOfSalesRequest,
-        As400UserSnapshotRequest request) {
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.servlet.LocaleResolver;
+import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+import org.springframework.web.servlet.i18n.LocaleChangeInterceptor;
+import org.springframework.web.servlet.i18n.SessionLocaleResolver;
 
-    boolean changed =
-            !Objects.equals(
-                    salesPoint.getSalesPointId(),
-                    pointOfSalesRequest.getId())
-                    || !Objects.equals(
-                    salesPoint.getLabel(),
-                    pointOfSalesRequest.getName())
-                    || !Objects.equals(
-                    salesPoint.getEntity(),
-                    request.getSource().getEntity());
-
-    salesPoint.setSalesPointId(pointOfSalesRequest.getId());
-    salesPoint.setLabel(pointOfSalesRequest.getName());
-    salesPoint.setEntity(request.getSource().getEntity());
-
-    return changed;
-}
+import java.util.Locale;
 ```
 
-If you still keep `orgUnitId` in `SalesPointEntity`, you can set it to `pointOfSalesRequest.getId()` or `request.getSource().getSourcePointOfSalesId()`, but with multiple sales points, the list item ID is safer.
+## Why you see `_en_GB`
 
-### `updateRelationship`
-
-```java
-private boolean updateRelationship(
-        PersonSalesPointRelationshipEntity relationship,
-        UserEntity user,
-        SalesPointEntity salesPoint,
-        String relationshipType,
-        As400UserSnapshotRequest request) {
-
-    boolean changed =
-            !Objects.equals(relationship.getPersonUserId(), user.getUserId())
-                    || !Objects.equals(
-                    relationship.getSalesPointId(),
-                    salesPoint.getSalesPointId())
-                    || !Objects.equals(
-                    relationship.getRelationshipType(),
-                    relationshipType)
-                    || !Objects.equals(
-                    relationship.getOrgUnitId(),
-                    salesPoint.getSalesPointId())
-                    || !Objects.equals(
-                    relationship.getStatus(),
-                    request.getWorkingRelationship().getStatus());
-
-    relationship.setPersonUserId(user.getUserId());
-    relationship.setSalesPointId(salesPoint.getSalesPointId());
-    relationship.setRelationshipType(relationshipType);
-    relationship.setOrgUnitId(salesPoint.getSalesPointId());
-    relationship.setStatus(request.getWorkingRelationship().getStatus());
-
-    return changed;
-}
-```
-
-Then update your response logic:
-
-```java
-if (isInactive(request)) {
-    return As400SyncResponse.builder()
-            .status("ACCEPTED")
-            .code(As400SyncCode.RECORD_DEACTIVATED)
-            .message("User relationship was deactivated.")
-            .correlationId(correlationId)
-            .partnerRepositoryRecordId(user.getUserId())
-            .build();
-}
-
-if (userCreated || anyRelationshipCreated) {
-    return As400SyncResponse.builder()
-            .status("ACCEPTED")
-            .code(As400SyncCode.RECORD_CREATED)
-            .message("User snapshot created successfully.")
-            .correlationId(correlationId)
-            .partnerRepositoryRecordId(user.getUserId())
-            .build();
-}
-
-if (anySalesPointChanged || anyRelationshipChanged) {
-    return As400SyncResponse.builder()
-            .status("ACCEPTED")
-            .code(As400SyncCode.RECORD_UPDATED)
-            .message("User snapshot updated successfully.")
-            .correlationId(correlationId)
-            .partnerRepositoryRecordId(user.getUserId())
-            .build();
-}
-
-return As400SyncResponse.builder()
-        .status("ACCEPTED")
-        .code(As400SyncCode.NO_CHANGE)
-        .message("Snapshot received but no effective change was detected.")
-        .correlationId(correlationId)
-        .partnerRepositoryRecordId(user.getUserId())
-        .build();
-```
-
-Also your DTO should now be:
-
-```java
-@Valid
-@NotEmpty
-@JsonProperty("point_of_sales")
-@JsonAlias("pointOfSales")
-private List<As400PointOfSalesRequest> pointOfSales;
-```
-
-and:
-
-```java
-@NotEmpty
-@JsonProperty("relationship_types")
-@JsonAlias({"relationshipTypes", "relationship_type", "relationshipType"})
-private List<String> relationshipTypes;
-```
-
-This will create rows like:
+Your browser/system locale is probably English UK, so Spring is looking for:
 
 ```text
-gps000001 -> BOU001 -> SELLER
-gps000001 -> BOU001 -> DEALER
-gps000001 -> BOU002 -> SELLER
-gps000001 -> BOU002 -> DEALER
+messages_en_GB.properties
+messages_en.properties
+messages.properties
 ```
 
+Since you did not have `messages.properties`, it displayed:
 
+```text
+??salesPoints.heading_en_GB??
+```
+
+After adding `messages.properties`, the page should show French fallback text. Then clicking `FR` or `NL` should switch languages once the `LocaleChangeInterceptor` is active.
