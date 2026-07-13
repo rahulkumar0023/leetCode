@@ -1,141 +1,269 @@
-Yes. The clean approach is:
+Yes, this structure is better because the relationship now belongs to each sales point individually.
 
-* Use **French** when locale is `fr`
-* Use **Dutch** when locale is `nl`
-* Use **default fallback** for everything else, like `en`, `en_GB`, `de`, etc.
-
-You already get this behavior if you keep:
+The main changes are:
 
 ```text
-messages.properties
-messages_fr.properties
-messages_nl.properties
+source.related_parent
+person.status = "40"
+point_of_sales[].working_relationship
 ```
 
-For your case, put the default language you want inside:
+Also remove the `// ...` comments from the real JSON because standard JSON does not allow comments.
 
-```text
-src/main/resources/messages.properties
-```
-
-For example, if default should be French:
-
-```properties
-pageTitle=Choix point de vente
-salesPoints.heading=Connexion à<br>votre espace partenaire
-salesPoints.title=Votre point de vente
-salesPoints.description=Vous devez choisir le point de vente dans lequel vous vous trouvez actuellement.
-salesPoints.confirm=Confirmer
-```
-
-Then:
-
-```text
-Browser language en_GB -> messages.properties
-Browser language fr    -> messages_fr.properties
-Browser language nl    -> messages_nl.properties
-```
-
-So yes, for your English system/browser, it will use default.
-
-One improvement: set default locale explicitly to French in your config:
+Your request model should now look like this.
 
 ```java
-@Configuration
-public class LocaleConfig implements WebMvcConfigurer {
+@Getter
+@Setter
+public class As400UserSnapshotRequest {
 
-    @Bean
-    public LocaleResolver localeResolver() {
-        SessionLocaleResolver resolver = new SessionLocaleResolver();
-        resolver.setDefaultLocale(Locale.FRENCH);
-        return resolver;
-    }
+    @Valid
+    @NotNull
+    private As400MetadataRequest metadata;
 
-    @Bean
-    public LocaleChangeInterceptor localeChangeInterceptor() {
-        LocaleChangeInterceptor interceptor = new LocaleChangeInterceptor();
-        interceptor.setParamName("lang");
-        return interceptor;
-    }
+    @Valid
+    @NotNull
+    private As400SourceRequest source;
 
-    @Override
-    public void addInterceptors(InterceptorRegistry registry) {
-        registry.addInterceptor(localeChangeInterceptor());
+    @Valid
+    @NotNull
+    private As400PersonRequest person;
+
+    @Valid
+    @NotEmpty
+    @JsonProperty("point_of_sales")
+    @JsonAlias("pointOfSales")
+    private List<As400PointOfSalesRequest> pointOfSales;
+}
+```
+
+Update `As400SourceRequest`:
+
+```java
+@Getter
+@Setter
+public class As400SourceRequest {
+
+    @NotBlank
+    private String entity;
+
+    @NotBlank
+    @JsonProperty("source_record_type")
+    @JsonAlias("sourceRecordType")
+    private String sourceRecordType;
+
+    @JsonProperty("related_parent")
+    @JsonAlias("relatedParent")
+    private String relatedParent;
+
+    @JsonProperty("source_personal_id")
+    @JsonAlias("sourcePersonalId")
+    private String sourcePersonalId;
+
+    @NotBlank
+    @JsonProperty("gps_group_number")
+    @JsonAlias("gpsGroupNumber")
+    private String gpsGroupNumber;
+
+    @JsonProperty("source_point_of_sales_id")
+    @JsonAlias("sourcePointOfSalesId")
+    private String sourcePointOfSalesId;
+}
+```
+
+Update `As400PointOfSalesRequest` so each sales point owns its relationship:
+
+```java
+@Getter
+@Setter
+public class As400PointOfSalesRequest {
+
+    @NotBlank
+    private String id;
+
+    @NotBlank
+    private String name;
+
+    @Valid
+    @NotNull
+    @JsonProperty("working_relationship")
+    @JsonAlias("workingRelationship")
+    private As400WorkingRelationshipRequest workingRelationship;
+}
+```
+
+And the relationship DTO:
+
+```java
+@Getter
+@Setter
+public class As400WorkingRelationshipRequest {
+
+    @NotEmpty
+    @JsonProperty("relationship_types")
+    @JsonAlias({"relationshipTypes", "relationship_type", "relationshipType"})
+    private List<String> relationshipTypes;
+
+    @NotBlank
+    private String status;
+}
+```
+
+Because `person.status` is now `"40"` instead of `ACTIVE` or `INACTIVE`, remove this old validation:
+
+```java
+@Pattern(regexp = "ACTIVE|INACTIVE")
+```
+
+Use either a simple required field:
+
+```java
+@NotBlank
+private String status;
+```
+
+or validate the known AS400 status codes once they are confirmed:
+
+```java
+@Pattern(regexp = "40|50")
+private String status;
+```
+
+Do not guess those codes until the AS400 team confirms their meaning.
+
+Your service loop should now use the relationship inside each sales point:
+
+```java
+for (As400PointOfSalesRequest pointOfSalesRequest
+        : request.getPointOfSales()) {
+
+    SalesPointEntity salesPoint = salesPointRepository
+            .findBySalesPointId(pointOfSalesRequest.getId())
+            .orElseGet(SalesPointEntity::new);
+
+    boolean salesPointChanged =
+            updateSalesPoint(salesPoint, pointOfSalesRequest, request);
+
+    salesPoint = salesPointRepository.save(salesPoint);
+
+    As400WorkingRelationshipRequest workingRelationship =
+            pointOfSalesRequest.getWorkingRelationship();
+
+    for (String relationshipType
+            : workingRelationship.getRelationshipTypes()) {
+
+        Optional<PersonSalesPointRelationshipEntity> existingRelationship =
+                relationshipRepository
+                        .findByPersonUserIdAndSalesPointIdAndRelationshipType(
+                                user.getUserId(),
+                                salesPoint.getSalesPointId(),
+                                relationshipType);
+
+        PersonSalesPointRelationshipEntity relationship =
+                existingRelationship.orElseGet(
+                        PersonSalesPointRelationshipEntity::new);
+
+        updateRelationship(
+                relationship,
+                user,
+                salesPoint,
+                relationshipType,
+                workingRelationship);
+
+        relationshipRepository.save(relationship);
     }
 }
 ```
 
-But if you want **only FR/NL supported**, and everything else forced to French, add a small interceptor:
+Update the relationship helper:
 
 ```java
-@Configuration
-public class LocaleConfig implements WebMvcConfigurer {
+private boolean updateRelationship(
+        PersonSalesPointRelationshipEntity relationship,
+        UserEntity user,
+        SalesPointEntity salesPoint,
+        String relationshipType,
+        As400WorkingRelationshipRequest workingRelationship) {
 
-    private static final Set<String> SUPPORTED_LANGUAGES = Set.of("fr", "nl");
+    boolean changed =
+            !Objects.equals(
+                    relationship.getPersonUserId(),
+                    user.getUserId())
+            || !Objects.equals(
+                    relationship.getSalesPointId(),
+                    salesPoint.getSalesPointId())
+            || !Objects.equals(
+                    relationship.getRelationshipType(),
+                    relationshipType)
+            || !Objects.equals(
+                    relationship.getOrgUnitId(),
+                    salesPoint.getSalesPointId())
+            || !Objects.equals(
+                    relationship.getStatus(),
+                    workingRelationship.getStatus());
 
-    @Bean
-    public LocaleResolver localeResolver() {
-        SessionLocaleResolver resolver = new SessionLocaleResolver();
-        resolver.setDefaultLocale(Locale.FRENCH);
-        return resolver;
-    }
+    relationship.setPersonUserId(user.getUserId());
+    relationship.setSalesPointId(salesPoint.getSalesPointId());
+    relationship.setRelationshipType(relationshipType);
+    relationship.setOrgUnitId(salesPoint.getSalesPointId());
+    relationship.setStatus(workingRelationship.getStatus());
 
-    @Bean
-    public LocaleChangeInterceptor localeChangeInterceptor() {
-        LocaleChangeInterceptor interceptor = new LocaleChangeInterceptor();
-        interceptor.setParamName("lang");
-        return interceptor;
-    }
-
-    @Override
-    public void addInterceptors(InterceptorRegistry registry) {
-        registry.addInterceptor(localeChangeInterceptor());
-
-        registry.addInterceptor(new HandlerInterceptor() {
-            @Override
-            public boolean preHandle(
-                    HttpServletRequest request,
-                    HttpServletResponse response,
-                    Object handler
-            ) {
-                Locale locale = LocaleContextHolder.getLocale();
-
-                if (!SUPPORTED_LANGUAGES.contains(locale.getLanguage())) {
-                    LocaleContextHolder.setLocale(Locale.FRENCH);
-                }
-
-                return true;
-            }
-        });
-    }
+    return changed;
 }
 ```
 
-Imports:
+A valid JSON payload would be:
 
-```java
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.context.i18n.LocaleContextHolder;
-import org.springframework.web.servlet.HandlerInterceptor;
-import org.springframework.web.servlet.LocaleResolver;
-import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
-import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
-import org.springframework.web.servlet.i18n.LocaleChangeInterceptor;
-import org.springframework.web.servlet.i18n.SessionLocaleResolver;
-
-import java.util.Locale;
-import java.util.Set;
+```json
+{
+  "metadata": {
+    "source_system": "AS400",
+    "correlation_id": "AS400-20260703-000001",
+    "snapshot_timestamp": "2026-07-03T10:30:00Z",
+    "payload_version": "1.0"
+  },
+  "source": {
+    "entity": "OR",
+    "source_record_type": "SELLER",
+    "related_parent": "DEALER001",
+    "source_personal_id": "PSN001",
+    "gps_group_number": "GPS000001",
+    "source_point_of_sales_id": "BOU001"
+  },
+  "person": {
+    "first_name": "John",
+    "surname": "Doe",
+    "email": "john.doe@orange.example.com",
+    "phone_number": "+32470000000",
+    "language": "FR",
+    "status": "40"
+  },
+  "point_of_sales": [
+    {
+      "id": "POS001",
+      "name": "Orange Shop Brussels",
+      "working_relationship": {
+        "relationship_types": ["DEALER"],
+        "status": "ACTIVE"
+      }
+    },
+    {
+      "id": "POS002",
+      "name": "Orange Shop Brussels 2",
+      "working_relationship": {
+        "relationship_types": ["SELLER"],
+        "status": "ACTIVE"
+      }
+    }
+  ]
+}
 ```
 
-But honestly, for your case, I’d keep it simple:
+This models the business relationship correctly:
 
 ```text
-messages.properties     -> default French
-messages_fr.properties  -> French
-messages_nl.properties  -> Dutch
+person -> POS001 -> DEALER
+person -> POS002 -> SELLER
 ```
 
-That is enough.
+instead of applying the same relationship to every sales point.
