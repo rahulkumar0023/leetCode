@@ -1,36 +1,8 @@
-Yes — this target look is clearer now.
+You’re right — for the **radio button**, keep your existing color variables and make the visible circle larger.
 
-To match that design, the radio should be:
-
-* **24px clickable area**
-* **16px visible circle**
-* **unselected:** white fill + thin dark border
-* **selected:** **green outer circle + white inner dot**
-* label aligned vertically with the radio
-
-Use this exact CSS for the radio section and **remove any older radio rules**:
+Use this:
 
 ```css
-.sales-list {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    margin: 0 0 40px;
-}
-
-.sales-option {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-
-    font-family: 'Open Sans', Arial, sans-serif;
-    font-weight: 300;
-    font-size: 18px;
-    line-height: 24px;
-    color: #000000;
-    cursor: pointer;
-}
-
 .sales-option input[type='radio'] {
     appearance: none;
     -webkit-appearance: none;
@@ -46,104 +18,55 @@ Use this exact CSS for the radio section and **remove any older radio rules**:
     cursor: pointer;
 }
 
-/* visible radio circle */
 .sales-option input[type='radio']::before {
     content: '';
     position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
+    inset: 2px;
 
-    width: 16px;
-    height: 16px;
+    border: 2px solid var(--color-black);
     border-radius: 50%;
+    background-color: var(--color-white);
     box-sizing: border-box;
-
-    background-color: #ffffff;
-    border: 1.5px solid #1f2a2a;
 }
 
-/* selected state */
 .sales-option input[type='radio']:checked::before {
-    background-color: #6BDD00;
-    border: 1.5px solid #154734;
+    border-color: var(--color-green-dark);
+    background-color: var(--color-green-light);
 }
 
-/* white inner dot */
 .sales-option input[type='radio']:checked::after {
     content: '';
     position: absolute;
+
+    width: 7px;
+    height: 7px;
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
 
-    width: 6px;
-    height: 6px;
     border-radius: 50%;
-    background-color: #ffffff;
-}
-
-.sales-option input[type='radio']:focus-visible {
-    outline: 2px solid #6BDD00;
-    outline-offset: 2px;
-    border-radius: 50%;
-}
-
-.sales-option span {
-    font: inherit;
-    color: #000000;
+    background-color: var(--color-white);
 }
 ```
 
-## Why this will look closer
+This gives:
 
-Your current radio looks too large because the **whole 24px area** is being drawn as the circle.
+* `24px × 24px` control
+* visible radio about `20px`
+* selected fill `var(--color-green-light)`
+* dark-green border
+* white center dot
 
-This version keeps:
-
-* `24px` for accessibility/click area
-* only `16px` as the visible radio
-* a small centered white dot
-* tighter spacing like the design
-
-## If you want it even closer
-
-If the selected green still feels slightly too bright or too thick, change only this block:
+Keep your variables unchanged:
 
 ```css
-.sales-option input[type='radio']:checked::before {
-    background-color: #154734;
-    border: 1.5px solid #154734;
+:root {
+    --color-green-dark: #154734;
+    --color-green-hover: #237656;
+    --color-green-light: #6BDD00;
+    --color-black: #000000;
+    --color-white: #ffffff;
 }
 ```
 
-That gives a darker selected radio.
-
-But from the screenshot you shared, I’d first try:
-
-```css
-background-color: #6BDD00;
-border: 1.5px solid #154734;
-```
-
-because that visually matches the green outer ring better.
-
-## Important
-
-Search your CSS and make sure you only have **one active block** for:
-
-```css
-.sales-option input[type='radio']
-.sales-option input[type='radio']::before
-.sales-option input[type='radio']:checked::before
-.sales-option input[type='radio']:checked::after
-```
-
-If older radio rules still exist, they will override or mix with this.
-
-If you want, I can now give you a **single clean final CSS block** for both:
-
-1. **radio button**
-2. **confirm button**
-
-ready to paste directly into `sales-points.css`.
+Also remove any older active `:checked::before` or `:checked::after` radio rules, otherwise they may overlap.
