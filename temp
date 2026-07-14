@@ -1,269 +1,420 @@
-Yes, this structure is better because the relationship now belongs to each sales point individually.
+Your page is already close. The main problems are duplicate CSS rules, inconsistent font-family names, and one incorrect Open Sans path.
 
-The main changes are:
+## 1. Fix the font declarations
 
-```text
-source.related_parent
-person.status = "40"
-point_of_sales[].working_relationship
+One of your current paths contains an extra `/static/`:
+
+```css
+url('../fonts/OpenSans/.woff2/static/OpenSans-Light.woff2')
 ```
 
-Also remove the `// ...` comments from the real JSON because standard JSON does not allow comments.
+That should be:
 
-Your request model should now look like this.
+```css
+url('../fonts/OpenSans/.woff2/OpenSans-Light.woff2')
+```
 
-```java
-@Getter
-@Setter
-public class As400UserSnapshotRequest {
+Use one font family name per font family and let `font-weight` choose the file:
 
-    @Valid
-    @NotNull
-    private As400MetadataRequest metadata;
+```css
+@font-face {
+    font-family: 'Ubuntu';
+    src: url('../fonts/Ubuntu/.woff2/Ubuntu-Light.woff2') format('woff2');
+    font-weight: 300;
+    font-style: normal;
+    font-display: swap;
+}
 
-    @Valid
-    @NotNull
-    private As400SourceRequest source;
+@font-face {
+    font-family: 'Ubuntu';
+    src: url('../fonts/Ubuntu/.woff2/Ubuntu-Bold.woff2') format('woff2');
+    font-weight: 700;
+    font-style: normal;
+    font-display: swap;
+}
 
-    @Valid
-    @NotNull
-    private As400PersonRequest person;
+@font-face {
+    font-family: 'Open Sans';
+    src: url('../fonts/OpenSans/.woff2/OpenSans-Light.woff2') format('woff2');
+    font-weight: 300;
+    font-style: normal;
+    font-display: swap;
+}
 
-    @Valid
-    @NotEmpty
-    @JsonProperty("point_of_sales")
-    @JsonAlias("pointOfSales")
-    private List<As400PointOfSalesRequest> pointOfSales;
+@font-face {
+    font-family: 'Open Sans';
+    src: url('../fonts/OpenSans/.woff2/OpenSans-Medium.woff2') format('woff2');
+    font-weight: 500;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: 'Open Sans';
+    src: url('../fonts/OpenSans/.woff2/OpenSans-Bold.woff2') format('woff2');
+    font-weight: 700;
+    font-style: normal;
+    font-display: swap;
 }
 ```
 
-Update `As400SourceRequest`:
+Then stop using these mixed names:
 
-```java
-@Getter
-@Setter
-public class As400SourceRequest {
+```css
+UbuntuBold
+UbuntuLight
+OpenSansLight
+OpenSansCustom
+```
 
-    @NotBlank
-    private String entity;
+Use only:
 
-    @NotBlank
-    @JsonProperty("source_record_type")
-    @JsonAlias("sourceRecordType")
-    private String sourceRecordType;
+```css
+font-family: 'Ubuntu', Arial, sans-serif;
+```
 
-    @JsonProperty("related_parent")
-    @JsonAlias("relatedParent")
-    private String relatedParent;
+or:
 
-    @JsonProperty("source_personal_id")
-    @JsonAlias("sourcePersonalId")
-    private String sourcePersonalId;
+```css
+font-family: 'Open Sans', Arial, sans-serif;
+```
 
-    @NotBlank
-    @JsonProperty("gps_group_number")
-    @JsonAlias("gpsGroupNumber")
-    private String gpsGroupNumber;
+---
 
-    @JsonProperty("source_point_of_sales_id")
-    @JsonAlias("sourcePointOfSalesId")
-    private String sourcePointOfSalesId;
+## 2. Remove the global `gap: 40px`
+
+Your `.left-content` currently has:
+
+```css
+gap: 40px;
+```
+
+That creates the oversized spaces visible between the heading, subtitle, body, form, and button.
+
+Replace the complete block with:
+
+```css
+.left-content {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    width: 100%;
+    padding: clamp(40px, 7vh, 72px) clamp(24px, 7vw, 140px);
 }
 ```
 
-Update `As400PointOfSalesRequest` so each sales point owns its relationship:
+Do not use `gap` here. Control spacing with margins on the individual elements.
 
-```java
-@Getter
-@Setter
-public class As400PointOfSalesRequest {
+---
 
-    @NotBlank
-    private String id;
+## 3. Replace your heading and text styles
 
-    @NotBlank
-    private String name;
+```css
+.left-content h1 {
+    margin: 0 0 8px;
+    max-width: 650px;
+    font-family: 'Ubuntu', Arial, sans-serif;
+    font-weight: 700;
+    font-size: 48px;
+    line-height: 1.16;
+    color: var(--color-black);
+}
 
-    @Valid
-    @NotNull
-    @JsonProperty("working_relationship")
-    @JsonAlias("workingRelationship")
-    private As400WorkingRelationshipRequest workingRelationship;
+.left-content h2 {
+    margin: 0 0 40px;
+    font-family: 'Ubuntu', Arial, sans-serif;
+    font-weight: 300;
+    font-size: 40px;
+    line-height: 1.2;
+    color: var(--color-green-dark);
+}
+
+.left-content > p {
+    margin: 0 0 32px;
+    max-width: 560px;
+    font-family: 'Open Sans', Arial, sans-serif;
+    font-weight: 300;
+    font-size: 18px;
+    line-height: 1.45;
+    color: var(--color-black);
 }
 ```
 
-And the relationship DTO:
+Your current page has a very large gap below the title because spacing is coming from both `gap: 40px` and element margins.
 
-```java
-@Getter
-@Setter
-public class As400WorkingRelationshipRequest {
+---
 
-    @NotEmpty
-    @JsonProperty("relationship_types")
-    @JsonAlias({"relationshipTypes", "relationship_type", "relationshipType"})
-    private List<String> relationshipTypes;
+## 4. Update the form and radio list
 
-    @NotBlank
-    private String status;
+```css
+form {
+    width: 100%;
+    max-width: 560px;
+}
+
+.sales-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 0 0 40px;
+}
+
+.sales-option {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 24px;
+    font-family: 'Open Sans', Arial, sans-serif;
+    font-weight: 300;
+    font-size: 18px;
+    line-height: 24px;
+    color: var(--color-black);
+    cursor: pointer;
+}
+
+.sales-option span {
+    color: var(--color-black);
+    font: inherit;
 }
 ```
 
-Because `person.status` is now `"40"` instead of `ACTIVE` or `INACTIVE`, remove this old validation:
+You currently have `16px` on `.sales-option` and `18px` on its `span`. Remove that conflict and use `18px` consistently.
 
-```java
-@Pattern(regexp = "ACTIVE|INACTIVE")
+---
+
+## 5. Keep one radio implementation
+
+Replace the current radio rules with:
+
+```css
+.sales-option input[type='radio'] {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 24px;
+    height: 24px;
+    flex: 0 0 24px;
+    margin: 0;
+    border: 2px solid var(--color-black);
+    border-radius: 50%;
+    background-color: var(--color-white);
+    position: relative;
+    cursor: pointer;
+}
+
+.sales-option input[type='radio']:checked {
+    border-color: var(--color-green-dark);
+}
+
+.sales-option input[type='radio']:checked::after {
+    content: '';
+    position: absolute;
+    width: 10px;
+    height: 10px;
+    top: 5px;
+    left: 5px;
+    border-radius: 50%;
+    background-color: var(--color-green-light);
+}
+
+.sales-option input[type='radio']:focus-visible {
+    outline: 2px solid var(--color-green-light);
+    outline-offset: 3px;
+}
 ```
 
-Use either a simple required field:
+---
 
-```java
-@NotBlank
-private String status;
+## 6. Remove the old `.confirm-btn` block
+
+Your file still contains an older button block using:
+
+```css
+background: #073331;
+padding: 0 24px;
+font-weight: 700;
+gap: 8px;
+margin-top: 40px;
 ```
 
-or validate the known AS400 status codes once they are confirmed:
+That old rule conflicts with the newer design rule.
 
-```java
-@Pattern(regexp = "40|50")
-private String status;
+Delete or fully comment out the older `.confirm-btn` declaration and retain only this:
+
+```css
+.confirm-btn {
+    min-width: 138px;
+    height: 48px;
+    padding: 12px 16px;
+    border: 1.5px solid var(--color-green-light);
+    border-radius: 1000px;
+    background-color: var(--color-green-dark);
+    color: var(--color-white);
+    font-family: 'Open Sans', Arial, sans-serif;
+    font-weight: 500;
+    font-size: 16px;
+    line-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    cursor: pointer;
+    box-shadow:
+        0 1px 2px rgba(0, 0, 0, 0.04),
+        0 1px 3px rgba(0, 0, 0, 0.06);
+    transition:
+        background-color 150ms ease,
+        box-shadow 150ms ease;
+}
+
+.confirm-btn:hover {
+    background-color: var(--color-green-hover);
+}
+
+.confirm-btn:focus-visible {
+    outline: 2px solid var(--color-green-light);
+    outline-offset: 2px;
+}
+
+.btn-icon {
+    width: 20px;
+    height: 20px;
+    display: block;
+    filter: brightness(0) invert(1);
+}
 ```
 
-Do not guess those codes until the AS400 team confirms their meaning.
+Do not add `margin-top: 40px`; the `.sales-list` already has `margin-bottom: 40px`.
 
-Your service loop should now use the relationship inside each sales point:
+---
 
-```java
-for (As400PointOfSalesRequest pointOfSalesRequest
-        : request.getPointOfSales()) {
+## 7. Correct the language selector styling
 
-    SalesPointEntity salesPoint = salesPointRepository
-            .findBySalesPointId(pointOfSalesRequest.getId())
-            .orElseGet(SalesPointEntity::new);
+Your language links are anchors, so add text-decoration removal:
 
-    boolean salesPointChanged =
-            updateSalesPoint(salesPoint, pointOfSalesRequest, request);
+```css
+.language-selector {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
 
-    salesPoint = salesPointRepository.save(salesPoint);
+.language-btn {
+    width: 40px;
+    height: 40px;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--color-green-dark);
+    font-family: 'Open Sans', Arial, sans-serif;
+    font-size: 16px;
+    font-weight: 500;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
 
-    As400WorkingRelationshipRequest workingRelationship =
-            pointOfSalesRequest.getWorkingRelationship();
+.language-btn.active {
+    background: var(--color-green-dark);
+    color: var(--color-white);
+}
+```
 
-    for (String relationshipType
-            : workingRelationship.getRelationshipTypes()) {
+---
 
-        Optional<PersonSalesPointRelationshipEntity> existingRelationship =
-                relationshipRepository
-                        .findByPersonUserIdAndSalesPointIdAndRelationshipType(
-                                user.getUserId(),
-                                salesPoint.getSalesPointId(),
-                                relationshipType);
+## 8. Improve the desktop grid proportions
 
-        PersonSalesPointRelationshipEntity relationship =
-                existingRelationship.orElseGet(
-                        PersonSalesPointRelationshipEntity::new);
+Your current right side uses `42vw`, which makes the illustration quite large. That may be intentional, but to better match the design:
 
-        updateRelationship(
-                relationship,
-                user,
-                salesPoint,
-                relationshipType,
-                workingRelationship);
+```css
+.content-container {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(420px, 42vw);
+    min-height: calc(100vh - 96px);
+    align-items: stretch;
+}
+```
 
-        relationshipRepository.save(relationship);
+The right panel itself can stay:
+
+```css
+.right-illustration {
+    position: relative;
+    width: 100%;
+    min-height: calc(100vh - 96px);
+    overflow: hidden;
+    border-top-left-radius: 40px;
+    background: var(--color-green-dark);
+}
+```
+
+---
+
+## 9. Improve mobile headings
+
+Your mobile media rule changes the layout, but it does not reduce the 48px and 40px headings. Add:
+
+```css
+@media (max-width: 768px) {
+    .page-header {
+        height: 80px;
+        padding: 16px 24px;
+    }
+
+    .content-container {
+        display: flex;
+        flex-direction: column;
+        min-height: auto;
+    }
+
+    .left-content {
+        order: 1;
+        padding: 32px 24px;
+    }
+
+    .left-content h1 {
+        font-size: 36px;
+        line-height: 1.15;
+    }
+
+    .left-content h2 {
+        margin-bottom: 28px;
+        font-size: 30px;
+    }
+
+    .left-content > p {
+        margin-bottom: 28px;
+        font-size: 17px;
+    }
+
+    .right-illustration {
+        order: 2;
+        width: 100%;
+        min-height: 360px;
+        border-top-left-radius: 32px;
+        border-top-right-radius: 32px;
+    }
+
+    .mascot {
+        width: 360px;
+        right: 50%;
+        bottom: -90px;
+        transform: translateX(50%) scaleX(-1);
     }
 }
 ```
 
-Update the relationship helper:
+## Most important cleanup
 
-```java
-private boolean updateRelationship(
-        PersonSalesPointRelationshipEntity relationship,
-        UserEntity user,
-        SalesPointEntity salesPoint,
-        String relationshipType,
-        As400WorkingRelationshipRequest workingRelationship) {
+Search the CSS file for each of these selectors and ensure there is only one active definition:
 
-    boolean changed =
-            !Objects.equals(
-                    relationship.getPersonUserId(),
-                    user.getUserId())
-            || !Objects.equals(
-                    relationship.getSalesPointId(),
-                    salesPoint.getSalesPointId())
-            || !Objects.equals(
-                    relationship.getRelationshipType(),
-                    relationshipType)
-            || !Objects.equals(
-                    relationship.getOrgUnitId(),
-                    salesPoint.getSalesPointId())
-            || !Objects.equals(
-                    relationship.getStatus(),
-                    workingRelationship.getStatus());
-
-    relationship.setPersonUserId(user.getUserId());
-    relationship.setSalesPointId(salesPoint.getSalesPointId());
-    relationship.setRelationshipType(relationshipType);
-    relationship.setOrgUnitId(salesPoint.getSalesPointId());
-    relationship.setStatus(workingRelationship.getStatus());
-
-    return changed;
-}
+```css
+.left-content
+.left-content h1
+.left-content h2
+.left-content p
+.sales-option
+.confirm-btn
+.btn-icon
 ```
 
-A valid JSON payload would be:
-
-```json
-{
-  "metadata": {
-    "source_system": "AS400",
-    "correlation_id": "AS400-20260703-000001",
-    "snapshot_timestamp": "2026-07-03T10:30:00Z",
-    "payload_version": "1.0"
-  },
-  "source": {
-    "entity": "OR",
-    "source_record_type": "SELLER",
-    "related_parent": "DEALER001",
-    "source_personal_id": "PSN001",
-    "gps_group_number": "GPS000001",
-    "source_point_of_sales_id": "BOU001"
-  },
-  "person": {
-    "first_name": "John",
-    "surname": "Doe",
-    "email": "john.doe@orange.example.com",
-    "phone_number": "+32470000000",
-    "language": "FR",
-    "status": "40"
-  },
-  "point_of_sales": [
-    {
-      "id": "POS001",
-      "name": "Orange Shop Brussels",
-      "working_relationship": {
-        "relationship_types": ["DEALER"],
-        "status": "ACTIVE"
-      }
-    },
-    {
-      "id": "POS002",
-      "name": "Orange Shop Brussels 2",
-      "working_relationship": {
-        "relationship_types": ["SELLER"],
-        "status": "ACTIVE"
-      }
-    }
-  ]
-}
-```
-
-This models the business relationship correctly:
-
-```text
-person -> POS001 -> DEALER
-person -> POS002 -> SELLER
-```
-
-instead of applying the same relationship to every sales point.
+Right now the browser is combining old and new declarations. That is why some parts match the design while others still use the previous sizing, weight, spacing, or colors.
