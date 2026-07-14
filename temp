@@ -1,169 +1,21 @@
-Your page is already close. The main problems are duplicate CSS rules, inconsistent font-family names, and one incorrect Open Sans path.
+Yes. Based on the specs in your screenshots, update the **radio** and **button** like this.
 
-## 1. Fix the font declarations
+## Radio button
 
-One of your current paths contains an extra `/static/`:
+The radio must be:
 
-```css
-url('../fonts/OpenSans/.woff2/static/OpenSans-Light.woff2')
-```
+* `24px × 24px`
+* unselected border: black
+* selected border: `#154734`
+* selected inner dot: `#6BDD00`
 
-That should be:
-
-```css
-url('../fonts/OpenSans/.woff2/OpenSans-Light.woff2')
-```
-
-Use one font family name per font family and let `font-weight` choose the file:
+Use this exact CSS and remove the older radio styles to avoid conflicts:
 
 ```css
-@font-face {
-    font-family: 'Ubuntu';
-    src: url('../fonts/Ubuntu/.woff2/Ubuntu-Light.woff2') format('woff2');
-    font-weight: 300;
-    font-style: normal;
-    font-display: swap;
-}
-
-@font-face {
-    font-family: 'Ubuntu';
-    src: url('../fonts/Ubuntu/.woff2/Ubuntu-Bold.woff2') format('woff2');
-    font-weight: 700;
-    font-style: normal;
-    font-display: swap;
-}
-
-@font-face {
-    font-family: 'Open Sans';
-    src: url('../fonts/OpenSans/.woff2/OpenSans-Light.woff2') format('woff2');
-    font-weight: 300;
-    font-style: normal;
-    font-display: swap;
-}
-
-@font-face {
-    font-family: 'Open Sans';
-    src: url('../fonts/OpenSans/.woff2/OpenSans-Medium.woff2') format('woff2');
-    font-weight: 500;
-    font-style: normal;
-    font-display: swap;
-}
-
-@font-face {
-    font-family: 'Open Sans';
-    src: url('../fonts/OpenSans/.woff2/OpenSans-Bold.woff2') format('woff2');
-    font-weight: 700;
-    font-style: normal;
-    font-display: swap;
-}
-```
-
-Then stop using these mixed names:
-
-```css
-UbuntuBold
-UbuntuLight
-OpenSansLight
-OpenSansCustom
-```
-
-Use only:
-
-```css
-font-family: 'Ubuntu', Arial, sans-serif;
-```
-
-or:
-
-```css
-font-family: 'Open Sans', Arial, sans-serif;
-```
-
----
-
-## 2. Remove the global `gap: 40px`
-
-Your `.left-content` currently has:
-
-```css
-gap: 40px;
-```
-
-That creates the oversized spaces visible between the heading, subtitle, body, form, and button.
-
-Replace the complete block with:
-
-```css
-.left-content {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    width: 100%;
-    padding: clamp(40px, 7vh, 72px) clamp(24px, 7vw, 140px);
-}
-```
-
-Do not use `gap` here. Control spacing with margins on the individual elements.
-
----
-
-## 3. Replace your heading and text styles
-
-```css
-.left-content h1 {
-    margin: 0 0 8px;
-    max-width: 650px;
-    font-family: 'Ubuntu', Arial, sans-serif;
-    font-weight: 700;
-    font-size: 48px;
-    line-height: 1.16;
-    color: var(--color-black);
-}
-
-.left-content h2 {
-    margin: 0 0 40px;
-    font-family: 'Ubuntu', Arial, sans-serif;
-    font-weight: 300;
-    font-size: 40px;
-    line-height: 1.2;
-    color: var(--color-green-dark);
-}
-
-.left-content > p {
-    margin: 0 0 32px;
-    max-width: 560px;
-    font-family: 'Open Sans', Arial, sans-serif;
-    font-weight: 300;
-    font-size: 18px;
-    line-height: 1.45;
-    color: var(--color-black);
-}
-```
-
-Your current page has a very large gap below the title because spacing is coming from both `gap: 40px` and element margins.
-
----
-
-## 4. Update the form and radio list
-
-```css
-form {
-    width: 100%;
-    max-width: 560px;
-}
-
-.sales-list {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    margin: 0 0 40px;
-}
-
 .sales-option {
     display: flex;
     align-items: center;
     gap: 12px;
-    min-height: 24px;
     font-family: 'Open Sans', Arial, sans-serif;
     font-weight: 300;
     font-size: 18px;
@@ -172,31 +24,19 @@ form {
     cursor: pointer;
 }
 
-.sales-option span {
-    color: var(--color-black);
-    font: inherit;
-}
-```
-
-You currently have `16px` on `.sales-option` and `18px` on its `span`. Remove that conflict and use `18px` consistently.
-
----
-
-## 5. Keep one radio implementation
-
-Replace the current radio rules with:
-
-```css
 .sales-option input[type='radio'] {
     appearance: none;
     -webkit-appearance: none;
+
     width: 24px;
     height: 24px;
     flex: 0 0 24px;
     margin: 0;
+
     border: 2px solid var(--color-black);
     border-radius: 50%;
     background-color: var(--color-white);
+
     position: relative;
     cursor: pointer;
 }
@@ -208,10 +48,12 @@ Replace the current radio rules with:
 .sales-option input[type='radio']:checked::after {
     content: '';
     position: absolute;
+
     width: 10px;
     height: 10px;
     top: 5px;
     left: 5px;
+
     border-radius: 50%;
     background-color: var(--color-green-light);
 }
@@ -222,199 +64,137 @@ Replace the current radio rules with:
 }
 ```
 
----
+This gives you the selected state shown in the design:
 
-## 6. Remove the old `.confirm-btn` block
-
-Your file still contains an older button block using:
-
-```css
-background: #073331;
-padding: 0 24px;
-font-weight: 700;
-gap: 8px;
-margin-top: 40px;
+```text
+outer ring: #154734
+inner dot:  #6BDD00
 ```
 
-That old rule conflicts with the newer design rule.
+## Button
 
-Delete or fully comment out the older `.confirm-btn` declaration and retain only this:
+The button specs are:
+
+* height: `48px`
+* padding: `12px 16px`
+* gap: `4px`
+* border radius: `1000px`
+* default background: `#154734`
+* hover background: `#237656`
+* focus border: `1.5px solid #6BDD00`
+* button text: Open Sans Medium, `16px`, white
+
+Use:
 
 ```css
 .confirm-btn {
     min-width: 138px;
     height: 48px;
+
     padding: 12px 16px;
-    border: 1.5px solid var(--color-green-light);
+    border: 1.5px solid transparent;
     border-radius: 1000px;
+
     background-color: var(--color-green-dark);
     color: var(--color-white);
+
     font-family: 'Open Sans', Arial, sans-serif;
     font-weight: 500;
     font-size: 16px;
     line-height: 24px;
+
     display: inline-flex;
     align-items: center;
     justify-content: center;
     gap: 4px;
+
     cursor: pointer;
-    box-shadow:
-        0 1px 2px rgba(0, 0, 0, 0.04),
-        0 1px 3px rgba(0, 0, 0, 0.06);
+    box-sizing: border-box;
+
     transition:
         background-color 150ms ease,
+        border-color 150ms ease,
         box-shadow 150ms ease;
 }
 
 .confirm-btn:hover {
     background-color: var(--color-green-hover);
+
+    box-shadow:
+        0 1px 2px rgba(0, 0, 0, 0.04),
+        0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+.confirm-btn:focus {
+    outline: none;
 }
 
 .confirm-btn:focus-visible {
-    outline: 2px solid var(--color-green-light);
-    outline-offset: 2px;
-}
+    border-color: var(--color-green-light);
 
+    box-shadow:
+        inset 0 0 0 1px #ffffff,
+        0 0 0 2px var(--color-green-light);
+}
+```
+
+For the icon:
+
+```css
 .btn-icon {
     width: 20px;
     height: 20px;
     display: block;
+    flex-shrink: 0;
     filter: brightness(0) invert(1);
 }
 ```
 
-Do not add `margin-top: 40px`; the `.sales-list` already has `margin-bottom: 40px`.
+Your HTML is already suitable:
 
----
+```html
+<button class="confirm-btn" type="submit">
+    <span th:text="#{salesPoints.confirm}">Confirmer</span>
 
-## 7. Correct the language selector styling
-
-Your language links are anchors, so add text-decoration removal:
-
-```css
-.language-selector {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.language-btn {
-    width: 40px;
-    height: 40px;
-    border-radius: 999px;
-    background: transparent;
-    color: var(--color-green-dark);
-    font-family: 'Open Sans', Arial, sans-serif;
-    font-size: 16px;
-    font-weight: 500;
-    text-decoration: none;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-}
-
-.language-btn.active {
-    background: var(--color-green-dark);
-    color: var(--color-white);
-}
+    <img th:src="@{/images/icons/arrow-forward.svg}"
+         th:alt="#{salesPoints.confirm}"
+         class="btn-icon">
+</button>
 ```
 
----
+## Important cleanup
 
-## 8. Improve the desktop grid proportions
-
-Your current right side uses `42vw`, which makes the illustration quite large. That may be intentional, but to better match the design:
+Your CSS previously had more than one `.confirm-btn` definition. Search for:
 
 ```css
-.content-container {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(420px, 42vw);
-    min-height: calc(100vh - 96px);
-    align-items: stretch;
-}
-```
-
-The right panel itself can stay:
-
-```css
-.right-illustration {
-    position: relative;
-    width: 100%;
-    min-height: calc(100vh - 96px);
-    overflow: hidden;
-    border-top-left-radius: 40px;
-    background: var(--color-green-dark);
-}
-```
-
----
-
-## 9. Improve mobile headings
-
-Your mobile media rule changes the layout, but it does not reduce the 48px and 40px headings. Add:
-
-```css
-@media (max-width: 768px) {
-    .page-header {
-        height: 80px;
-        padding: 16px 24px;
-    }
-
-    .content-container {
-        display: flex;
-        flex-direction: column;
-        min-height: auto;
-    }
-
-    .left-content {
-        order: 1;
-        padding: 32px 24px;
-    }
-
-    .left-content h1 {
-        font-size: 36px;
-        line-height: 1.15;
-    }
-
-    .left-content h2 {
-        margin-bottom: 28px;
-        font-size: 30px;
-    }
-
-    .left-content > p {
-        margin-bottom: 28px;
-        font-size: 17px;
-    }
-
-    .right-illustration {
-        order: 2;
-        width: 100%;
-        min-height: 360px;
-        border-top-left-radius: 32px;
-        border-top-right-radius: 32px;
-    }
-
-    .mascot {
-        width: 360px;
-        right: 50%;
-        bottom: -90px;
-        transform: translateX(50%) scaleX(-1);
-    }
-}
-```
-
-## Most important cleanup
-
-Search the CSS file for each of these selectors and ensure there is only one active definition:
-
-```css
-.left-content
-.left-content h1
-.left-content h2
-.left-content p
-.sales-option
 .confirm-btn
+.confirm-btn:hover
+.confirm-btn:focus
 .btn-icon
 ```
 
-Right now the browser is combining old and new declarations. That is why some parts match the design while others still use the previous sizing, weight, spacing, or colors.
+Keep only one active version of each.
+
+Also remove old values such as:
+
+```css
+background: #073331;
+padding: 0 24px;
+gap: 8px;
+font-weight: 700;
+margin-top: 40px;
+```
+
+Those conflict with the design specs.
+
+Use these variables at the top:
+
+```css
+:root {
+    --color-green-dark: #154734;
+    --color-green-hover: #237656;
+    --color-green-light: #6BDD00;
+    --color-black: #000000;
+    --color-white: #ffffff;
+}
+```
