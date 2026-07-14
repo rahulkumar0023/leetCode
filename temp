@@ -1,8 +1,36 @@
-Yes — keep the radio control **24×24**, but make the selected state a **dark-green filled circle with a small white center**.
+Yes — this target look is clearer now.
 
-Use this exact CSS:
+To match that design, the radio should be:
+
+* **24px clickable area**
+* **16px visible circle**
+* **unselected:** white fill + thin dark border
+* **selected:** **green outer circle + white inner dot**
+* label aligned vertically with the radio
+
+Use this exact CSS for the radio section and **remove any older radio rules**:
 
 ```css
+.sales-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 0 0 40px;
+}
+
+.sales-option {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+
+    font-family: 'Open Sans', Arial, sans-serif;
+    font-weight: 300;
+    font-size: 18px;
+    line-height: 24px;
+    color: #000000;
+    cursor: pointer;
+}
+
 .sales-option input[type='radio'] {
     appearance: none;
     -webkit-appearance: none;
@@ -12,51 +40,110 @@ Use this exact CSS:
     flex: 0 0 24px;
     margin: 0;
 
-    border: 1.5px solid #000000;
-    border-radius: 50%;
-    background-color: #ffffff;
-
+    border: 0;
+    background: transparent;
     position: relative;
     cursor: pointer;
+}
+
+/* visible radio circle */
+.sales-option input[type='radio']::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
     box-sizing: border-box;
+
+    background-color: #ffffff;
+    border: 1.5px solid #1f2a2a;
 }
 
-.sales-option input[type='radio']:checked {
-    border-color: #154734;
-    background-color: #154734;
+/* selected state */
+.sales-option input[type='radio']:checked::before {
+    background-color: #6BDD00;
+    border: 1.5px solid #154734;
 }
 
+/* white inner dot */
 .sales-option input[type='radio']:checked::after {
     content: '';
     position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
 
-    width: 8px;
-    height: 8px;
-    top: 6.5px;
-    left: 6.5px;
-
+    width: 6px;
+    height: 6px;
     border-radius: 50%;
     background-color: #ffffff;
 }
-```
 
-Because the radio is `24px` and border is `1.5px`, the inner usable area is around `21px`. An `8px` white dot centered at `6.5px` gives the expected look.
+.sales-option input[type='radio']:focus-visible {
+    outline: 2px solid #6BDD00;
+    outline-offset: 2px;
+    border-radius: 50%;
+}
 
-Also keep your label alignment like this:
-
-```css
-.sales-option {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-
-    font-family: 'Open Sans', Arial, sans-serif;
-    font-weight: 300;
-    font-size: 18px;
-    line-height: 24px;
+.sales-option span {
+    font: inherit;
     color: #000000;
-    cursor: pointer;
 }
 ```
 
-Remove any older `:checked::after` rule that uses `#6BDD00`; that bright green is for focus/border, not the selected radio center.
+## Why this will look closer
+
+Your current radio looks too large because the **whole 24px area** is being drawn as the circle.
+
+This version keeps:
+
+* `24px` for accessibility/click area
+* only `16px` as the visible radio
+* a small centered white dot
+* tighter spacing like the design
+
+## If you want it even closer
+
+If the selected green still feels slightly too bright or too thick, change only this block:
+
+```css
+.sales-option input[type='radio']:checked::before {
+    background-color: #154734;
+    border: 1.5px solid #154734;
+}
+```
+
+That gives a darker selected radio.
+
+But from the screenshot you shared, I’d first try:
+
+```css
+background-color: #6BDD00;
+border: 1.5px solid #154734;
+```
+
+because that visually matches the green outer ring better.
+
+## Important
+
+Search your CSS and make sure you only have **one active block** for:
+
+```css
+.sales-option input[type='radio']
+.sales-option input[type='radio']::before
+.sales-option input[type='radio']:checked::before
+.sales-option input[type='radio']:checked::after
+```
+
+If older radio rules still exist, they will override or mix with this.
+
+If you want, I can now give you a **single clean final CSS block** for both:
+
+1. **radio button**
+2. **confirm button**
+
+ready to paste directly into `sales-points.css`.
