@@ -1,72 +1,185 @@
-You’re right — for the **radio button**, keep your existing color variables and make the visible circle larger.
+Yes. The mascot is moving because its current CSS uses viewport-based values such as `vw`, negative `bottom`, and `clamp(...)`. When the viewport changes, those values change too, so the mascot shifts relative to the green panel.
 
-Use this:
+The stable approach is:
+
+* Keep the pattern attached to `.right-illustration`
+* Anchor the mascot to the bottom of that same container
+* Size the mascot relative to the panel, not the viewport
+* Change the layout only at a breakpoint
+
+Use this structure:
+
+```html
+<section class="right-illustration">
+    <img class="background-pattern"
+         th:src="@{/images/pattern-green.png}"
+         alt="">
+
+    <img class="mascot"
+         th:src="@{/images/sales-point-hero.png}"
+         alt="Mascot">
+</section>
+```
+
+Then replace the current illustration styles with these.
 
 ```css
-.sales-option input[type='radio'] {
-    appearance: none;
-    -webkit-appearance: none;
-
-    width: 24px;
-    height: 24px;
-    flex: 0 0 24px;
-    margin: 0;
-
-    border: 0;
-    background: transparent;
+.right-illustration {
     position: relative;
-    cursor: pointer;
+    width: 100%;
+    min-height: calc(100vh - 96px);
+    overflow: hidden;
+
+    border-top-left-radius: 40px;
+    background-color: var(--color-green-dark);
 }
 
-.sales-option input[type='radio']::before {
-    content: '';
+.background-pattern {
     position: absolute;
-    inset: 2px;
+    inset: 0;
 
-    border: 2px solid var(--color-black);
-    border-radius: 50%;
-    background-color: var(--color-white);
-    box-sizing: border-box;
+    width: 100%;
+    height: 100%;
+
+    object-fit: cover;
+    object-position: center;
+    z-index: 1;
 }
 
-.sales-option input[type='radio']:checked::before {
-    border-color: var(--color-green-dark);
-    background-color: var(--color-green-light);
-}
-
-.sales-option input[type='radio']:checked::after {
-    content: '';
+.mascot {
     position: absolute;
 
-    width: 7px;
-    height: 7px;
-    top: 50%;
+    width: min(82%, 680px);
+    height: auto;
+    max-width: none;
+
     left: 50%;
-    transform: translate(-50%, -50%);
+    bottom: -8%;
 
-    border-radius: 50%;
-    background-color: var(--color-white);
+    transform: translateX(-50%) scaleX(-1);
+    transform-origin: bottom center;
+
+    z-index: 2;
 }
 ```
 
-This gives:
+This keeps the mascot centered inside the green panel regardless of screen width.
 
-* `24px × 24px` control
-* visible radio about `20px`
-* selected fill `var(--color-green-light)`
-* dark-green border
-* white center dot
-
-Keep your variables unchanged:
+Your current rules probably look similar to:
 
 ```css
-:root {
-    --color-green-dark: #154734;
-    --color-green-hover: #237656;
-    --color-green-light: #6BDD00;
-    --color-black: #000000;
-    --color-white: #ffffff;
+width: clamp(420px, 46vw, 590px);
+right: clamp(-40px, 4vw, 60px);
+bottom: clamp(-180px, -12vw, -80px);
+```
+
+Remove those. Mixing `right`, `vw`, and negative `bottom` is what causes the movement.
+
+## Make the green panel stable too
+
+Use a grid where the right panel has a controlled width:
+
+```css
+.content-container {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(430px, 42vw);
+    min-height: calc(100vh - 96px);
+    align-items: stretch;
 }
 ```
 
-Also remove any older active `:checked::before` or `:checked::after` radio rules, otherwise they may overlap.
+For wider desktop screens, you can slightly limit it:
+
+```css
+@media (min-width: 1440px) {
+    .content-container {
+        grid-template-columns: minmax(0, 1fr) minmax(520px, 40vw);
+    }
+
+    .mascot {
+        width: min(78%, 720px);
+        bottom: -7%;
+    }
+}
+```
+
+## Tablet
+
+On smaller desktop/tablet screens, reduce the mascot proportion instead of moving it using `right`:
+
+```css
+@media (max-width: 1024px) {
+    .content-container {
+        grid-template-columns: minmax(0, 1fr) minmax(340px, 40vw);
+    }
+
+    .mascot {
+        width: 88%;
+        bottom: -5%;
+    }
+}
+```
+
+## Mobile
+
+On mobile, stack the image below the content and give the panel a fixed responsive height:
+
+```css
+@media (max-width: 768px) {
+    .content-container {
+        display: flex;
+        flex-direction: column;
+        min-height: auto;
+    }
+
+    .left-content {
+        order: 1;
+    }
+
+    .right-illustration {
+        order: 2;
+
+        width: 100%;
+        min-height: 420px;
+        height: 55vh;
+        max-height: 540px;
+
+        border-top-left-radius: 32px;
+        border-top-right-radius: 32px;
+    }
+
+    .background-pattern {
+        object-position: center;
+    }
+
+    .mascot {
+        width: min(78%, 430px);
+        left: 50%;
+        bottom: -8%;
+
+        transform: translateX(-50%) scaleX(-1);
+    }
+}
+```
+
+## To match your two screenshots more closely
+
+Your first screenshot shows the mascot too low and partially cut off. Your second shows it shifted more centrally. Start with:
+
+```css
+.mascot {
+    width: min(82%, 680px);
+    left: 50%;
+    bottom: -6%;
+    transform: translateX(-50%) scaleX(-1);
+}
+```
+
+Then adjust only these two values:
+
+```css
+width: 82%;
+bottom: -6%;
+```
+
+Do not change `left`, `right`, or use viewport units. This keeps the relationship between the mascot and background panel stable.
