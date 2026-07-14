@@ -1,29 +1,8 @@
-Yes. Based on the specs in your screenshots, update the **radio** and **button** like this.
+Yes — keep the radio control **24×24**, but make the selected state a **dark-green filled circle with a small white center**.
 
-## Radio button
-
-The radio must be:
-
-* `24px × 24px`
-* unselected border: black
-* selected border: `#154734`
-* selected inner dot: `#6BDD00`
-
-Use this exact CSS and remove the older radio styles to avoid conflicts:
+Use this exact CSS:
 
 ```css
-.sales-option {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    font-family: 'Open Sans', Arial, sans-serif;
-    font-weight: 300;
-    font-size: 18px;
-    line-height: 24px;
-    color: var(--color-black);
-    cursor: pointer;
-}
-
 .sales-option input[type='radio'] {
     appearance: none;
     -webkit-appearance: none;
@@ -33,168 +12,51 @@ Use this exact CSS and remove the older radio styles to avoid conflicts:
     flex: 0 0 24px;
     margin: 0;
 
-    border: 2px solid var(--color-black);
+    border: 1.5px solid #000000;
     border-radius: 50%;
-    background-color: var(--color-white);
+    background-color: #ffffff;
 
     position: relative;
     cursor: pointer;
+    box-sizing: border-box;
 }
 
 .sales-option input[type='radio']:checked {
-    border-color: var(--color-green-dark);
+    border-color: #154734;
+    background-color: #154734;
 }
 
 .sales-option input[type='radio']:checked::after {
     content: '';
     position: absolute;
 
-    width: 10px;
-    height: 10px;
-    top: 5px;
-    left: 5px;
+    width: 8px;
+    height: 8px;
+    top: 6.5px;
+    left: 6.5px;
 
     border-radius: 50%;
-    background-color: var(--color-green-light);
-}
-
-.sales-option input[type='radio']:focus-visible {
-    outline: 2px solid var(--color-green-light);
-    outline-offset: 3px;
+    background-color: #ffffff;
 }
 ```
 
-This gives you the selected state shown in the design:
+Because the radio is `24px` and border is `1.5px`, the inner usable area is around `21px`. An `8px` white dot centered at `6.5px` gives the expected look.
 
-```text
-outer ring: #154734
-inner dot:  #6BDD00
-```
-
-## Button
-
-The button specs are:
-
-* height: `48px`
-* padding: `12px 16px`
-* gap: `4px`
-* border radius: `1000px`
-* default background: `#154734`
-* hover background: `#237656`
-* focus border: `1.5px solid #6BDD00`
-* button text: Open Sans Medium, `16px`, white
-
-Use:
+Also keep your label alignment like this:
 
 ```css
-.confirm-btn {
-    min-width: 138px;
-    height: 48px;
-
-    padding: 12px 16px;
-    border: 1.5px solid transparent;
-    border-radius: 1000px;
-
-    background-color: var(--color-green-dark);
-    color: var(--color-white);
+.sales-option {
+    display: flex;
+    align-items: center;
+    gap: 12px;
 
     font-family: 'Open Sans', Arial, sans-serif;
-    font-weight: 500;
-    font-size: 16px;
+    font-weight: 300;
+    font-size: 18px;
     line-height: 24px;
-
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 4px;
-
+    color: #000000;
     cursor: pointer;
-    box-sizing: border-box;
-
-    transition:
-        background-color 150ms ease,
-        border-color 150ms ease,
-        box-shadow 150ms ease;
-}
-
-.confirm-btn:hover {
-    background-color: var(--color-green-hover);
-
-    box-shadow:
-        0 1px 2px rgba(0, 0, 0, 0.04),
-        0 1px 3px rgba(0, 0, 0, 0.06);
-}
-
-.confirm-btn:focus {
-    outline: none;
-}
-
-.confirm-btn:focus-visible {
-    border-color: var(--color-green-light);
-
-    box-shadow:
-        inset 0 0 0 1px #ffffff,
-        0 0 0 2px var(--color-green-light);
 }
 ```
 
-For the icon:
-
-```css
-.btn-icon {
-    width: 20px;
-    height: 20px;
-    display: block;
-    flex-shrink: 0;
-    filter: brightness(0) invert(1);
-}
-```
-
-Your HTML is already suitable:
-
-```html
-<button class="confirm-btn" type="submit">
-    <span th:text="#{salesPoints.confirm}">Confirmer</span>
-
-    <img th:src="@{/images/icons/arrow-forward.svg}"
-         th:alt="#{salesPoints.confirm}"
-         class="btn-icon">
-</button>
-```
-
-## Important cleanup
-
-Your CSS previously had more than one `.confirm-btn` definition. Search for:
-
-```css
-.confirm-btn
-.confirm-btn:hover
-.confirm-btn:focus
-.btn-icon
-```
-
-Keep only one active version of each.
-
-Also remove old values such as:
-
-```css
-background: #073331;
-padding: 0 24px;
-gap: 8px;
-font-weight: 700;
-margin-top: 40px;
-```
-
-Those conflict with the design specs.
-
-Use these variables at the top:
-
-```css
-:root {
-    --color-green-dark: #154734;
-    --color-green-hover: #237656;
-    --color-green-light: #6BDD00;
-    --color-black: #000000;
-    --color-white: #ffffff;
-}
-```
+Remove any older `:checked::after` rule that uses `#6BDD00`; that bright green is for focus/border, not the selected radio center.
