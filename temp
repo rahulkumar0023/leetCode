@@ -1,185 +1,111 @@
-Yes. The mascot is moving because its current CSS uses viewport-based values such as `vw`, negative `bottom`, and `clamp(...)`. When the viewport changes, those values change too, so the mascot shifts relative to the green panel.
+The important part is at the bottom:
 
-The stable approach is:
-
-* Keep the pattern attached to `.right-illustration`
-* Anchor the mascot to the bottom of that same container
-* Size the mascot relative to the panel, not the viewport
-* Change the layout only at a breakpoint
-
-Use this structure:
-
-```html
-<section class="right-illustration">
-    <img class="background-pattern"
-         th:src="@{/images/pattern-green.png}"
-         alt="">
-
-    <img class="mascot"
-         th:src="@{/images/sales-point-hero.png}"
-         alt="Mascot">
-</section>
+```text
+java.security.UnrecoverableKeyException: Cannot recover key
 ```
 
-Then replace the current illustration styles with these.
+That means Tomcat is trying to start HTTPS using a JKS/keystore, but it cannot read the private key inside it.
 
-```css
-.right-illustration {
-    position: relative;
-    width: 100%;
-    min-height: calc(100vh - 96px);
-    overflow: hidden;
+Most commonly, one of these passwords is wrong:
 
-    border-top-left-radius: 40px;
-    background-color: var(--color-green-dark);
-}
-
-.background-pattern {
-    position: absolute;
-    inset: 0;
-
-    width: 100%;
-    height: 100%;
-
-    object-fit: cover;
-    object-position: center;
-    z-index: 1;
-}
-
-.mascot {
-    position: absolute;
-
-    width: min(82%, 680px);
-    height: auto;
-    max-width: none;
-
-    left: 50%;
-    bottom: -8%;
-
-    transform: translateX(-50%) scaleX(-1);
-    transform-origin: bottom center;
-
-    z-index: 2;
-}
+```text
+keystore password
+private key password
 ```
 
-This keeps the mascot centered inside the green panel regardless of screen width.
+They are not always the same.
 
-Your current rules probably look similar to:
+You likely configured something like:
 
-```css
-width: clamp(420px, 46vw, 590px);
-right: clamp(-40px, 4vw, 60px);
-bottom: clamp(-180px, -12vw, -80px);
+```yaml
+server:
+  ssl:
+    enabled: true
+    key-store: file:/path/server.jks
+    key-store-password: ${KEYSTORE_PASSWORD}
+    key-password: ${KEY_PASSWORD}
+    key-store-type: JKS
 ```
 
-Remove those. Mixing `right`, `vw`, and negative `bottom` is what causes the movement.
+Check these points:
 
-## Make the green panel stable too
+1. The JKS actually contains a private key entry, not only trusted certificates.
 
-Use a grid where the right panel has a controlled width:
+Run:
 
-```css
-.content-container {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(430px, 42vw);
-    min-height: calc(100vh - 96px);
-    align-items: stretch;
-}
+```bash
+keytool -list -v -keystore server.jks
 ```
 
-For wider desktop screens, you can slightly limit it:
+Look for:
 
-```css
-@media (min-width: 1440px) {
-    .content-container {
-        grid-template-columns: minmax(0, 1fr) minmax(520px, 40vw);
-    }
-
-    .mascot {
-        width: min(78%, 720px);
-        bottom: -7%;
-    }
-}
+```text
+Entry type: PrivateKeyEntry
 ```
 
-## Tablet
+If it only says:
 
-On smaller desktop/tablet screens, reduce the mascot proportion instead of moving it using `right`:
-
-```css
-@media (max-width: 1024px) {
-    .content-container {
-        grid-template-columns: minmax(0, 1fr) minmax(340px, 40vw);
-    }
-
-    .mascot {
-        width: 88%;
-        bottom: -5%;
-    }
-}
+```text
+trustedCertEntry
 ```
 
-## Mobile
+then it is a truststore, not a server keystore, and Tomcat cannot use it to host HTTPS.
 
-On mobile, stack the image below the content and give the panel a fixed responsive height:
+2. Confirm the keystore password.
 
-```css
-@media (max-width: 768px) {
-    .content-container {
-        display: flex;
-        flex-direction: column;
-        min-height: auto;
-    }
-
-    .left-content {
-        order: 1;
-    }
-
-    .right-illustration {
-        order: 2;
-
-        width: 100%;
-        min-height: 420px;
-        height: 55vh;
-        max-height: 540px;
-
-        border-top-left-radius: 32px;
-        border-top-right-radius: 32px;
-    }
-
-    .background-pattern {
-        object-position: center;
-    }
-
-    .mascot {
-        width: min(78%, 430px);
-        left: 50%;
-        bottom: -8%;
-
-        transform: translateX(-50%) scaleX(-1);
-    }
-}
+```bash
+keytool -list -keystore server.jks
 ```
 
-## To match your two screenshots more closely
+If this fails, the keystore password is wrong.
 
-Your first screenshot shows the mascot too low and partially cut off. Your second shows it shifted more centrally. Start with:
+3. Confirm the private-key password.
 
-```css
-.mascot {
-    width: min(82%, 680px);
-    left: 50%;
-    bottom: -6%;
-    transform: translateX(-50%) scaleX(-1);
-}
+A JKS can have:
+
+```text
+keystore password = one value
+private key password = another value
 ```
 
-Then adjust only these two values:
+If they differ, configure both:
 
-```css
-width: 82%;
-bottom: -6%;
+```yaml
+server:
+  ssl:
+    key-store-password: ${KEYSTORE_PASSWORD}
+    key-password: ${KEY_PASSWORD}
 ```
 
-Do not change `left`, `right`, or use viewport units. This keeps the relationship between the mascot and background panel stable.
+4. Make sure you are not using the Arthur client truststore as the Partner Repository server keystore.
+
+From your previous setup, the JKS may have been intended only for Arthur Core to trust Partner Repository. In that case it belongs under Arthur’s SSL bundle:
+
+```yaml
+spring:
+  ssl:
+    bundle:
+      jks:
+        partner-repository:
+          truststore:
+            location: ...
+```
+
+It should not be placed under Partner Repository:
+
+```yaml
+server:
+  ssl:
+    key-store: ...
+```
+
+unless that JKS contains Partner Repository’s server private key and certificate.
+
+So the likely issue is:
+
+```text
+You configured a truststore as Tomcat’s server keystore,
+or the private-key password is incorrect.
+```
+
+In Kubernetes, HTTPS is often terminated by the ingress. If that is your setup, Partner Repository should usually run plain HTTP internally and you should remove `server.ssl.*` from Partner Repository. The ingress presents the HTTPS certificate, while Arthur Core uses its JKS truststore when calling the external HTTPS route.
