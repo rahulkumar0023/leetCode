@@ -1,111 +1,465 @@
-The important part is at the bottom:
+Yes. Let’s clean up the error screen the same way as the sales-point screen: consistent fonts, translations, colors, and stable responsive illustration.
 
-```text
-java.security.UnrecoverableKeyException: Cannot recover key
+## `ui-error.html`
+
+Replace the current page body with this structure:
+
+```html
+<!DOCTYPE html>
+<html th:lang="${#locale.language}"
+      xmlns:th="http://www.thymeleaf.org">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0">
+
+    <title th:text="#{error.pageTitle}">
+        Erreur
+    </title>
+
+    <link rel="stylesheet"
+          th:href="@{/css/sales-points-failure.css}">
+</head>
+
+<body>
+
+<main class="failure-screen">
+
+    <header class="page-header">
+        <img class="logo"
+             th:src="@{/images/alphacredit-logo.png}"
+             alt="AlphaCredit">
+
+        <nav class="language-selector"
+             aria-label="Language selection">
+
+            <a th:href="@{/sales-points(appId=${appId}, lang='fr')}"
+               class="language-btn"
+               th:classappend="${#locale.language == 'fr'} ? ' active' : ''">
+                FR
+            </a>
+
+            <a th:href="@{/sales-points(appId=${appId}, lang='nl')}"
+               class="language-btn"
+               th:classappend="${#locale.language == 'nl'} ? ' active' : ''">
+                NL
+            </a>
+        </nav>
+    </header>
+
+    <section class="failure-container">
+
+        <section class="failure-content">
+
+            <img class="failure-icon"
+                 th:src="@{/images/icons/warning.svg}"
+                 alt="">
+
+            <h1 th:utext="#{error.title}">
+                Oups, un problème technique est survenu.
+            </h1>
+
+            <p class="message"
+               th:text="#{error.message}">
+                Nous n’avons pas pu charger les données nécessaires pour le moment.
+            </p>
+
+            <p class="strong-message"
+               th:if="${strongMessage != null and !#strings.isEmpty(strongMessage)}"
+               th:text="${strongMessage}">
+                Réessayez dans quelques minutes.
+            </p>
+
+        </section>
+
+        <section class="right-illustration">
+            <img class="background-pattern"
+                 th:src="@{/images/pattern-green.png}"
+                 alt="">
+
+            <img class="mascot"
+                 th:src="@{/images/sales-point-hero.png}"
+                 alt="">
+        </section>
+
+    </section>
+
+</main>
+
+</body>
+</html>
 ```
 
-That means Tomcat is trying to start HTTPS using a JKS/keystore, but it cannot read the private key inside it.
+If the error page has its own controller URL, change the FR/NL links to that URL rather than `/sales-points`.
 
-Most commonly, one of these passwords is wrong:
+---
 
-```text
-keystore password
-private key password
+# Final `sales-points-failure.css`
+
+Replace the current CSS with this cleaner version.
+
+```css
+* {
+    box-sizing: border-box;
+}
+
+:root {
+    --color-green-dark: #154734;
+    --color-green-hover: #237656;
+    --color-green-light: #6BDD00;
+    --color-black: #000000;
+    --color-white: #ffffff;
+}
+
+/* Fonts */
+
+@font-face {
+    font-family: 'Ubuntu';
+    src: url('../fonts/Ubuntu/.woff2/Ubuntu-Bold.woff2')
+         format('woff2');
+    font-weight: 700;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: 'Open Sans';
+    src: url('../fonts/OpenSans/.woff2/OpenSans-Light.woff2')
+         format('woff2');
+    font-weight: 300;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: 'Open Sans';
+    src: url('../fonts/OpenSans/.woff2/OpenSans-Bold.woff2')
+         format('woff2');
+    font-weight: 700;
+    font-style: normal;
+    font-display: swap;
+}
+
+html,
+body {
+    margin: 0;
+    min-height: 100%;
+    font-family: 'Open Sans', Arial, sans-serif;
+    background-color: var(--color-white);
+    color: var(--color-black);
+}
+
+.failure-screen {
+    width: 100%;
+    min-height: 100vh;
+    background-color: var(--color-white);
+    overflow-x: hidden;
+}
+
+/* Header */
+
+.page-header {
+    height: 96px;
+    padding: 16px clamp(24px, 7vw, 140px);
+
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+
+    flex-shrink: 0;
+}
+
+.logo {
+    width: clamp(120px, 12vw, 160px);
+    height: auto;
+    display: block;
+}
+
+.language-selector {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.language-btn {
+    width: 40px;
+    height: 40px;
+
+    border-radius: 999px;
+    background-color: transparent;
+    color: var(--color-green-dark);
+
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+
+    font-family: 'Open Sans', Arial, sans-serif;
+    font-size: 16px;
+    font-weight: 700;
+    text-decoration: none;
+}
+
+.language-btn:hover {
+    background-color: rgba(21, 71, 52, 0.08);
+}
+
+.language-btn.active {
+    background-color: var(--color-green-dark);
+    color: var(--color-white);
+}
+
+/* Main layout */
+
+.failure-container {
+    display: grid;
+    grid-template-columns:
+        minmax(0, 1fr)
+        minmax(430px, 42vw);
+
+    min-height: calc(100vh - 96px);
+    align-items: stretch;
+}
+
+/* Failure content */
+
+.failure-content {
+    padding:
+        clamp(48px, 8vh, 96px)
+        clamp(24px, 7vw, 140px);
+
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+
+    text-align: center;
+}
+
+.failure-icon {
+    width: 112px;
+    height: 112px;
+    margin: 0 0 32px;
+    object-fit: contain;
+}
+
+.failure-content h1 {
+    max-width: 760px;
+    margin: 0;
+
+    font-family: 'Ubuntu', Arial, sans-serif;
+    font-size: 48px;
+    font-weight: 700;
+    line-height: 1.15;
+    letter-spacing: -0.02em;
+
+    color: var(--color-black);
+}
+
+.message {
+    max-width: 680px;
+    margin: 36px 0 0;
+
+    font-family: 'Open Sans', Arial, sans-serif;
+    font-size: 18px;
+    font-weight: 300;
+    line-height: 1.45;
+
+    color: var(--color-black);
+}
+
+.strong-message {
+    max-width: 680px;
+    margin: 12px 0 0;
+
+    font-family: 'Open Sans', Arial, sans-serif;
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 1.45;
+
+    color: var(--color-black);
+}
+
+/* Illustration */
+
+.right-illustration {
+    position: relative;
+    width: 100%;
+    min-height: calc(100vh - 96px);
+
+    overflow: hidden;
+    border-top-left-radius: 40px;
+    background-color: var(--color-green-dark);
+}
+
+.background-pattern {
+    position: absolute;
+    inset: 0;
+
+    width: 100%;
+    height: 100%;
+
+    object-fit: cover;
+    object-position: center;
+    z-index: 1;
+}
+
+.mascot {
+    position: absolute;
+
+    width: min(82%, 680px);
+    height: auto;
+    max-width: none;
+
+    left: 50%;
+    bottom: -6%;
+
+    transform: translateX(-50%) scaleX(-1);
+    transform-origin: bottom center;
+
+    z-index: 2;
+}
+
+/* Tablet */
+
+@media (max-width: 1024px) {
+
+    .failure-container {
+        grid-template-columns:
+            minmax(0, 1fr)
+            minmax(340px, 40vw);
+    }
+
+    .failure-content {
+        padding: 48px 40px;
+    }
+
+    .failure-content h1 {
+        font-size: 40px;
+    }
+
+    .mascot {
+        width: 88%;
+        bottom: -5%;
+    }
+}
+
+/* Mobile */
+
+@media (max-width: 768px) {
+
+    .page-header {
+        height: 80px;
+        padding: 16px 24px;
+    }
+
+    .failure-container {
+        display: flex;
+        flex-direction: column;
+        min-height: auto;
+    }
+
+    .failure-content {
+        order: 1;
+        padding: 48px 24px;
+        justify-content: flex-start;
+    }
+
+    .failure-icon {
+        width: 88px;
+        height: 88px;
+        margin-bottom: 24px;
+    }
+
+    .failure-content h1 {
+        font-size: 34px;
+        line-height: 1.15;
+    }
+
+    .message,
+    .strong-message {
+        font-size: 16px;
+    }
+
+    .message {
+        margin-top: 28px;
+    }
+
+    .right-illustration {
+        order: 2;
+
+        width: 100%;
+        min-height: 420px;
+        height: 55vh;
+        max-height: 540px;
+
+        border-top-left-radius: 32px;
+        border-top-right-radius: 32px;
+    }
+
+    .mascot {
+        width: min(78%, 430px);
+        left: 50%;
+        bottom: -8%;
+
+        transform: translateX(-50%) scaleX(-1);
+    }
+}
 ```
 
-They are not always the same.
+## Important changes from your current CSS
 
-You likely configured something like:
+Remove these existing mascot rules:
 
-```yaml
-server:
-  ssl:
-    enabled: true
-    key-store: file:/path/server.jks
-    key-store-password: ${KEYSTORE_PASSWORD}
-    key-password: ${KEY_PASSWORD}
-    key-store-type: JKS
+```css
+width: clamp(420px, 46vw, 590px);
+right: clamp(-40px, 4vw, 60px);
+bottom: clamp(-180px, -12vw, -80px);
 ```
 
-Check these points:
+They cause the mascot to move unpredictably when the viewport width changes.
 
-1. The JKS actually contains a private key entry, not only trusted certificates.
+The new version anchors it consistently using:
 
-Run:
-
-```bash
-keytool -list -v -keystore server.jks
+```css
+left: 50%;
+bottom: -6%;
+transform: translateX(-50%) scaleX(-1);
 ```
 
-Look for:
+Also change your current error title:
 
-```text
-Entry type: PrivateKeyEntry
+```css
+font-weight: 800;
 ```
 
-If it only says:
+to:
 
-```text
-trustedCertEntry
+```css
+font-family: 'Ubuntu', Arial, sans-serif;
+font-weight: 700;
 ```
 
-then it is a truststore, not a server keystore, and Tomcat cannot use it to host HTTPS.
+because the design calls for **Ubuntu Bold**, not an artificial weight of `800`.
 
-2. Confirm the keystore password.
+## Translation files
 
-```bash
-keytool -list -keystore server.jks
+Add to `messages_fr.properties`:
+
+```properties
+error.pageTitle=Erreur
+error.title=Oups, un problème technique est survenu.
+error.message=Nous n’avons pas pu charger les données nécessaires pour le moment.
+error.strongMessage=Réessayez dans quelques minutes.
 ```
 
-If this fails, the keystore password is wrong.
+Add to `messages_nl.properties`:
 
-3. Confirm the private-key password.
-
-A JKS can have:
-
-```text
-keystore password = one value
-private key password = another value
+```properties
+error.pageTitle=Fout
+error.title=Oeps, er is een technisch probleem opgetreden.
+error.message=We konden de benodigde gegevens momenteel niet laden.
+error.strongMessage=Probeer het over enkele minuten opnieuw.
 ```
 
-If they differ, configure both:
-
-```yaml
-server:
-  ssl:
-    key-store-password: ${KEYSTORE_PASSWORD}
-    key-password: ${KEY_PASSWORD}
-```
-
-4. Make sure you are not using the Arthur client truststore as the Partner Repository server keystore.
-
-From your previous setup, the JKS may have been intended only for Arthur Core to trust Partner Repository. In that case it belongs under Arthur’s SSL bundle:
-
-```yaml
-spring:
-  ssl:
-    bundle:
-      jks:
-        partner-repository:
-          truststore:
-            location: ...
-```
-
-It should not be placed under Partner Repository:
-
-```yaml
-server:
-  ssl:
-    key-store: ...
-```
-
-unless that JKS contains Partner Repository’s server private key and certificate.
-
-So the likely issue is:
-
-```text
-You configured a truststore as Tomcat’s server keystore,
-or the private-key password is incorrect.
-```
-
-In Kubernetes, HTTPS is often terminated by the ingress. If that is your setup, Partner Repository should usually run plain HTTP internally and you should remove `server.ssl.*` from Partner Repository. The ingress presents the HTTPS certificate, while Arthur Core uses its JKS truststore when calling the external HTTPS route.
+Add the French values to `messages.properties` as the fallback when the system language is neither French nor Dutch.
