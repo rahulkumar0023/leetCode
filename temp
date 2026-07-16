@@ -1,131 +1,321 @@
-You’re right—the expected screen has **no white gutter around the right illustration**. The green panel should touch the right and bottom edges of the viewport.
+You can use the Ping Swagger/OpenAPI JSON to generate a **client inside Partner Repository**. Partner Repository will receive the AS400 user snapshot, save/update Postgres, then call Ping using the generated client with these attributes:
 
-The gap is usually caused by padding/margin on `.screen`, `.content-container`, or a parent wrapper. Keep the padding only inside `.left-content` and `.page-header`.
+```text
+givenName
+sn
+cn
+mail
+mobile
+status
+```
 
-Use this layout:
+## Recommended approach
 
-```css
-html,
-body {
-    margin: 0;
-    width: 100%;
-    min-height: 100%;
-}
+Do **not** manually write all Ping request/response classes if you already have Swagger JSON. Generate them from the Swagger file.
 
-body {
-    overflow-x: hidden;
-}
+Flow:
 
-.screen {
-    width: 100%;
-    min-height: 100vh;
-    margin: 0;
-    padding: 0;
-    max-width: none;
-}
+```text
+AS400
+  -> Partner Repository API
+      -> map AS400 request to Partner Repository entities
+      -> save/update Postgres
+      -> map user entity to Ping request
+      -> call Ping API
+```
 
-.content-container {
-    display: grid;
-    grid-template-columns: minmax(0, 57%) minmax(0, 43%);
+## 1. Put the Swagger file in Partner Repository
 
-    width: 100%;
-    min-height: calc(100vh - 96px);
+Example location:
 
-    margin: 0;
-    padding: 0;
-    gap: 0;
+```text
+partner-repository/
+└── src/main/resources/openapi/ping-api.json
+```
+
+Or:
+
+```text
+partner-repository/
+└── src/main/openapi/ping-api.json
+```
+
+I usually prefer:
+
+```text
+src/main/openapi/ping-api.json
+```
+
+because it is build-time input, not runtime config.
+
+## 2. Add OpenAPI Generator Maven plugin
+
+In `pom.xml`, add something like this:
+
+```xml
+<plugin>
+    <groupId>org.openapitools</groupId>
+    <artifactId>openapi-generator-maven-plugin</artifactId>
+    <version>7.8.0</version>
+    <executions>
+        <execution>
+            <id>generate-ping-client</id>
+            <goals>
+                <goal>generate</goal>
+            </goals>
+            <configuration>
+                <inputSpec>${project.basedir}/src/main/openapi/ping-api.json</inputSpec>
+                <generatorName>java</generatorName>
+
+                <apiPackage>com.bnpp.pf.partner.repository.ping.client.api</apiPackage>
+                <modelPackage>com.bnpp.pf.partner.repository.ping.client.model</modelPackage>
+                <invokerPackage>com.bnpp.pf.partner.repository.ping.client.invoker</invokerPackage>
+
+                <configOptions>
+                    <library>restclient</library>
+                    <dateLibrary>java8</dateLibrary>
+                    <useJakartaEe>true</useJakartaEe>
+                    <openApiNullable>false</openApiNullable>
+                </configOptions>
+            </configuration>
+        </execution>
+    </executions>
+</plugin>
+```
+
+If `restclient` gives issues in your setup, use:
+
+```xml
+<library>webclient</library>
+```
+
+or:
+
+```xml
+<library>resttemplate</library>
+```
+
+Since you previously asked about using `RestClient`, `restclient` is the cleaner choice if your Spring Boot version supports it.
+
+## 3. Generate the client
+
+Run:
+
+```bash
+mvn clean generate-sources
+```
+
+The generated classes will appear under:
+
+```text
+target/generated-sources/openapi
+```
+
+Make sure IntelliJ marks it as generated source root. Maven usually handles this automatically.
+
+## 4. Create your own wrapper service
+
+Do not call the generated Ping API directly from your AS400 service. Wrap it.
+
+Example:
+
+```java
+@Service
+public class PingUserClient {
+
+    private final PingUsersApi pingUsersApi;
+
+    public PingUserClient(PingUsersApi pingUsersApi) {
+        this.pingUsersApi = pingUsersApi;
+    }
+
+    public void createOrUpdateUser(UserEntity user) {
+        PingUserRequest request = toPingRequest(user);
+
+        pingUsersApi.createOrUpdateUser(request);
+    }
+
+    private PingUserRequest toPingRequest(UserEntity user) {
+        PingUserRequest request = new PingUserRequest();
+
+        request.setGivenName(user.getFirstName());
+        request.setSn(user.getLastName());
+        request.setCn(user.getUsername());
+        request.setMail(user.getEmail());
+        request.setMobile(user.getPhoneNumber());
+        request.setStatus(mapStatus(user.getStatus()));
+
+        return request;
+    }
+
+    private String mapStatus(String status) {
+        if ("ACTIVE".equalsIgnoreCase(status)) {
+            return "active";
+        }
+        if ("INACTIVE".equalsIgnoreCase(status)) {
+            return "inactive";
+        }
+        return status;
+    }
 }
 ```
 
-Keep spacing inside only the left column:
+The exact generated class names may be different depending on the Swagger file. For example, it might generate:
 
-```css
-.left-content {
-    width: 100%;
-    min-width: 0;
+```text
+UsersApi
+UserApi
+CreateUserRequest
+UserRepresentation
+```
 
-    padding:
-        clamp(40px, 7vh, 72px)
-        clamp(32px, 5vw, 96px);
+instead of `PingUsersApi` and `PingUserRequest`.
 
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
+## 5. Map your fields
+
+Based on what you said, the mapping should probably be:
+
+```text
+Partner Repository / AS400      Ping
+------------------------------------------------
+person.firstName                givenName
+person.surname                  sn
+user.username or userId         cn
+person.email                    mail
+person.phoneNumber              mobile
+person.status                   status
+```
+
+Example:
+
+```java
+private PingUserRequest toPingRequest(UserSnapshotRequest request, UserEntity user) {
+    PingUserRequest pingRequest = new PingUserRequest();
+
+    pingRequest.setGivenName(request.getPerson().getFirstName());
+    pingRequest.setSn(request.getPerson().getSurname());
+    pingRequest.setCn(user.getUserId());
+    pingRequest.setMail(request.getPerson().getEmail());
+    pingRequest.setMobile(request.getPerson().getPhoneNumber());
+    pingRequest.setStatus(request.getPerson().getStatus());
+
+    return pingRequest;
 }
 ```
 
-Make the illustration fill its entire grid cell:
+For `cn`, confirm with Ping whether they expect:
 
-```css
-.right-illustration {
-    position: relative;
+```text
+gps000001
+```
 
-    width: 100%;
-    height: 100%;
-    min-height: calc(100vh - 96px);
+or:
 
-    margin: 0;
-    padding: 0;
+```text
+John Doe
+```
 
-    overflow: hidden;
-    border-top-left-radius: 40px;
-    background-color: var(--color-green-dark);
+In LDAP-style attributes, `cn` often means “common name”, but in identity integrations it is sometimes used as username/display name. Since your stable user identifier is `gps000001`, I would ask Ping whether `cn` should be the normalized GPS/user id or the full name.
+
+## 6. Configuration in `application.yml`
+
+Add Ping config:
+
+```yaml
+ping:
+  api:
+    base-url: https://ping-api.example.com
+    client-id: ${PING_CLIENT_ID}
+    client-secret: ${PING_CLIENT_SECRET}
+    connect-timeout: 5s
+    read-timeout: 10s
+```
+
+Then create properties:
+
+```java
+@ConfigurationProperties(prefix = "ping.api")
+public class PingApiProperties {
+
+    private String baseUrl;
+    private String clientId;
+    private String clientSecret;
+    private Duration connectTimeout;
+    private Duration readTimeout;
+
+    // getters and setters
 }
 ```
 
-The pattern must also cover the whole panel:
+## 7. Configure the generated client
 
-```css
-.background-pattern {
-    position: absolute;
-    inset: 0;
+Depending on the generated library, the config differs slightly. Conceptually:
 
-    width: 100%;
-    height: 100%;
+```java
+@Configuration
+@EnableConfigurationProperties(PingApiProperties.class)
+public class PingClientConfig {
 
-    display: block;
-    object-fit: cover;
-    object-position: center;
+    @Bean
+    public ApiClient pingApiClient(PingApiProperties properties) {
+        ApiClient apiClient = new ApiClient();
+        apiClient.setBasePath(properties.getBaseUrl());
 
-    margin: 0;
-    z-index: 1;
+        return apiClient;
+    }
+
+    @Bean
+    public PingUsersApi pingUsersApi(ApiClient pingApiClient) {
+        return new PingUsersApi(pingApiClient);
+    }
 }
 ```
 
-Also check that you do **not** have any of these active:
+If Ping requires OAuth/client credentials, then Partner Repository needs to first get an access token and send:
 
-```css
-.screen {
-    padding: ...;
-    max-width: ...;
-    margin: auto;
-}
+```http
+Authorization: Bearer <token>
+```
 
-.content-container {
-    gap: ...;
-    padding: ...;
-    max-width: ...;
-    margin: auto;
-}
+If they use basic auth, then configure username/password/client credentials in the generated `ApiClient`.
 
-.right-illustration {
-    margin-right: ...;
+## 8. Where to call Ping in your current flow
+
+Your service should look like this:
+
+```java
+@Transactional
+public UserSnapshotResponse processSnapshot(UserSnapshotRequest request) {
+    UserEntity user = saveOrUpdateUserInPostgres(request);
+
+    pingUserClient.createOrUpdateUser(user);
+
+    return buildAcceptedResponse(user);
 }
 ```
 
-For your expected layout, `gap` must be exactly:
+But one important production concern: if Postgres succeeds and Ping fails, you need to decide what happens.
 
-```css
-gap: 0;
+Safer production approach:
+
+```text
+1. Save user snapshot in Postgres
+2. Save pending Ping sync record
+3. Return ACCEPTED
+4. Async worker calls Ping
+5. Mark Ping sync SUCCESS / FAILED
 ```
 
-The header can still have horizontal padding:
+For now, during development, synchronous call is okay. But for production, async/outbox is better.
 
-```css
-.page-header {
-    height: 96px;
-    padding: 16px clamp(24px, 7vw, 140px);
-}
-```
+## 9. What I need from the Swagger file
 
-That padding should not be applied to `.content-container`. This will make the green panel flush with the right and bottom edges while preserving the white header area above it.
+To give you the exact code, I need to see:
+
+* The endpoint path, for example `/users`, `/scim/v2/Users`, `/identity/users`
+* Whether it is `POST`, `PUT`, or `PATCH`
+* The request model name
+* Authentication method
+* Whether `status` is a string, boolean, enum, or nested object
+
+Once you share the Swagger JSON, I can tell you the exact generated API class and exact request object to use.
