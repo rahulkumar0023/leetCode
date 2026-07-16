@@ -1,174 +1,90 @@
-Yes — to move the mascot **a bit higher**, you mainly need to adjust the `bottom` value on `.mascot`.
+That explains it: on the success screen you likely use the message key directly:
 
-Right now your mascot is sitting too low because the `bottom` values are too negative.
+```html
+<h1 th:utext="#{salesPoints.heading}">
+```
 
-## What to change
+So Thymeleaf reads the property and renders `<br>` as HTML.
 
-### Current idea
+On the error screen, your value comes from the controller as a model attribute:
 
-You likely have something like:
+```html
+<h1 th:utext="${title}">
+```
 
-```css
-.mascot {
-    position: absolute;
-    width: clamp(420px, 46vw, 590px);
-    max-width: none;
-    right: clamp(-40px, 4vw, 60px);
-    bottom: clamp(-180px, -12vw, -80px);
-    z-index: 2;
-    transform: scaleX(-1);
+If it still shows `<br>`, the most likely reason is that the controller is adding an **escaped** value, like `Oups, un problème&lt;br&gt;technique...`, or the property file contains escaped text.
+
+Best fix: don’t resolve the title in the controller. Pass the **message key** to the template, then let Thymeleaf resolve it with `#{...}` like the success screen.
+
+## Controller
+
+Change from:
+
+```java
+mv.addObject("title", messageSource.getMessage("error.technical.title", null, locale));
+```
+
+to:
+
+```java
+mv.addObject("titleKey", "error.technical.title");
+```
+
+For example:
+
+```java
+@GetMapping("/error/technical")
+public ModelAndView technicalError() {
+    ModelAndView mv = new ModelAndView("views/ui-error");
+    mv.addObject("pageTitleKey", "error.technical.pageTitle");
+    mv.addObject("iconPath", "/images/icons/tools.svg");
+    mv.addObject("titleKey", "error.technical.title");
+    mv.addObject("messageKey", "error.technical.message");
+    mv.addObject("strongMessageKey", "error.technical.strongMessage");
+    return mv;
 }
 ```
 
-That `bottom: clamp(-180px, -12vw, -80px);` pushes the mascot too far down.
+And:
 
----
-
-# Better version
-
-Use this instead:
-
-```css
-.mascot {
-    position: absolute;
-    width: clamp(420px, 46vw, 590px);
-    max-width: none;
-    right: clamp(-20px, 2vw, 40px);
-    bottom: clamp(-120px, -8vw, -30px);
-    z-index: 2;
-    transform: scaleX(-1);
+```java
+@GetMapping("/error/no-sales-point")
+public ModelAndView noSalesPoint() {
+    ModelAndView mv = new ModelAndView("views/ui-error");
+    mv.addObject("pageTitleKey", "error.noSalesPoint.pageTitle");
+    mv.addObject("iconPath", "/images/icons/warning.svg");
+    mv.addObject("titleKey", "error.noSalesPoint.title");
+    mv.addObject("messageKey", "error.noSalesPoint.message");
+    mv.addObject("strongMessageKey", "error.noSalesPoint.strongMessage");
+    return mv;
 }
 ```
 
-This will:
+## Template
 
-* move the mascot **up**
-* keep it still slightly “cropped” at the bottom like in the design
-* reduce the feeling that it is sinking too much
+Use dynamic message lookup:
 
----
+```html
+<title th:text="#{${pageTitleKey}}">Erreur</title>
 
-# Tablet adjustment
+<h1 th:utext="#{${titleKey}}">
+    Oups, un problème<br>technique est survenu.
+</h1>
 
-For tablet, also lift it a bit:
+<p class="message" th:text="#{${messageKey}}">
+    Nous n’avons pas pu charger les données nécessaires.
+</p>
 
-```css
-@media (max-width: 1024px) {
-    .mascot {
-        width: clamp(360px, 44vw, 500px);
-        right: -20px;
-        bottom: -70px;
-    }
-}
+<p class="strong-message" th:text="#{${strongMessageKey}}">
+    Réessayez dans quelques minutes.
+</p>
 ```
 
----
+## Properties
 
-# Mobile adjustment
-
-On mobile, your current one is probably too low too. Use:
-
-```css
-@media (max-width: 768px) {
-    .right-illustration {
-        order: 2;
-        width: 100%;
-        min-height: 360px;
-        border-top-left-radius: 32px;
-        border-top-right-radius: 32px;
-    }
-
-    .mascot {
-        width: 340px;
-        right: 50%;
-        bottom: -50px;
-        transform: translateX(50%) scaleX(-1);
-    }
-}
+```properties
+error.technical.title=Oups, un problème<br>technique est survenu.
+error.noSalesPoint.title=Oups, votre point de vente<br>n’est pas encore défini.
 ```
 
-If you want it **even higher**, try:
-
-```css
-bottom: -30px;
-```
-
-instead of `-50px`.
-
----
-
-# Recommended full block
-
-If you want something easy to paste, use this:
-
-```css
-.right-illustration {
-    position: relative;
-    width: 100%;
-    min-height: calc(100vh - 96px);
-    overflow: hidden;
-    border-top-left-radius: 40px;
-    background: #154734;
-}
-
-.background-pattern {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    z-index: 1;
-}
-
-.mascot {
-    position: absolute;
-    width: clamp(420px, 46vw, 590px);
-    max-width: none;
-    right: clamp(-20px, 2vw, 40px);
-    bottom: clamp(-120px, -8vw, -30px);
-    z-index: 2;
-    transform: scaleX(-1);
-}
-
-/* Tablet */
-@media (max-width: 1024px) {
-    .mascot {
-        width: clamp(360px, 44vw, 500px);
-        right: -20px;
-        bottom: -70px;
-    }
-}
-
-/* Mobile */
-@media (max-width: 768px) {
-    .right-illustration {
-        order: 2;
-        width: 100%;
-        min-height: 360px;
-        border-top-left-radius: 32px;
-        border-top-right-radius: 32px;
-    }
-
-    .mascot {
-        width: 340px;
-        right: 50%;
-        bottom: -50px;
-        transform: translateX(50%) scaleX(-1);
-    }
-}
-```
-
----
-
-# Important note
-
-Since both the **sales-point screen** and the **error screens** use the same mascot panel style, you should use the **same `.right-illustration`, `.background-pattern`, and `.mascot` values** in both CSS files so they stay visually aligned.
-
----
-
-If you want, I can now give you:
-
-1. **the final updated `sales-points.css` mascot section**, and
-2. **the final updated `sales-points-failure.css` / error screen mascot section**
-
-ready to paste.
+This makes the error screen behave the same as the success screen: translation comes through `#{...}`, and `th:utext` renders the `<br>`.
