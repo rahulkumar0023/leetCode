@@ -1,465 +1,163 @@
-Yes. Let’s clean up the error screen the same way as the sales-point screen: consistent fonts, translations, colors, and stable responsive illustration.
+Yes — this is the existing error flow we should keep.
 
-## `ui-error.html`
+Your `ErrorController` already distinguishes:
 
-Replace the current page body with this structure:
+* `/error/technical`
+* `/error/no-sales-point`
+
+and sends these model attributes to `views/ui-error`:
+
+```java
+pageTitle
+iconPath
+title
+message
+strongMessage
+```
+
+The main update is to stop hardcoding French in the controller and resolve the text from `messages.properties`, `messages_fr.properties`, or `messages_nl.properties`.
+
+## Updated controller
+
+```java
+package com.bnpp.pf.arthur.core.exception;
+
+import java.util.Locale;
+
+import org.springframework.context.MessageSource;
+import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.servlet.ModelAndView;
+
+@Controller
+public class ErrorController {
+
+    private static final String ERROR_VIEW = "views/ui-error";
+
+    private final MessageSource messageSource;
+
+    public ErrorController(MessageSource messageSource) {
+        this.messageSource = messageSource;
+    }
+
+    @GetMapping("/error/technical")
+    public ModelAndView technicalError(Locale locale) {
+        return buildErrorView(
+                locale,
+                "error.technical.pageTitle",
+                "/images/icons/tools.svg",
+                "error.technical.title",
+                "error.technical.message",
+                "error.technical.strongMessage"
+        );
+    }
+
+    @GetMapping("/error/no-sales-point")
+    public ModelAndView noSalesPoint(Locale locale) {
+        return buildErrorView(
+                locale,
+                "error.noSalesPoint.pageTitle",
+                "/images/icons/warning.svg",
+                "error.noSalesPoint.title",
+                "error.noSalesPoint.message",
+                "error.noSalesPoint.strongMessage"
+        );
+    }
+
+    private ModelAndView buildErrorView(
+            Locale locale,
+            String pageTitleKey,
+            String iconPath,
+            String titleKey,
+            String messageKey,
+            String strongMessageKey
+    ) {
+        ModelAndView modelAndView = new ModelAndView(ERROR_VIEW);
+
+        modelAndView.addObject(
+                "pageTitle",
+                messageSource.getMessage(pageTitleKey, null, locale)
+        );
+        modelAndView.addObject("iconPath", iconPath);
+        modelAndView.addObject(
+                "title",
+                messageSource.getMessage(titleKey, null, locale)
+        );
+        modelAndView.addObject(
+                "message",
+                messageSource.getMessage(messageKey, null, locale)
+        );
+        modelAndView.addObject(
+                "strongMessage",
+                messageSource.getMessage(strongMessageKey, null, locale)
+        );
+
+        return modelAndView;
+    }
+}
+```
+
+This avoids duplicating the same `ModelAndView` setup in both methods.
+
+## French messages
+
+`messages_fr.properties`:
+
+```properties
+error.technical.pageTitle=Erreur technique
+error.technical.title=Oups, un problème technique est survenu.
+error.technical.message=Nous n’avons pas pu charger les données nécessaires pour le moment.
+error.technical.strongMessage=Réessayez dans quelques minutes. Si le problème persiste, contactez votre Zone Manager pour obtenir de l’aide.
+
+error.noSalesPoint.pageTitle=Point de vente non défini
+error.noSalesPoint.title=Oups, votre point de vente n’est pas encore défini.
+error.noSalesPoint.message=Votre compte n’est pas associé à un point de vente. Vous ne pouvez donc pas accéder à la plateforme partenaire.
+error.noSalesPoint.strongMessage=Veuillez contacter votre Zone Manager pour recevoir de l’aide.
+```
+
+## Dutch messages
+
+`messages_nl.properties`:
+
+```properties
+error.technical.pageTitle=Technische fout
+error.technical.title=Oeps, er is een technisch probleem opgetreden.
+error.technical.message=We konden de benodigde gegevens momenteel niet laden.
+error.technical.strongMessage=Probeer het over enkele minuten opnieuw. Neem contact op met uw Zone Manager als het probleem blijft bestaan.
+
+error.noSalesPoint.pageTitle=Verkooppunt niet gedefinieerd
+error.noSalesPoint.title=Oeps, uw verkooppunt is nog niet gedefinieerd.
+error.noSalesPoint.message=Uw account is niet gekoppeld aan een verkooppunt. Daarom hebt u geen toegang tot het partnerplatform.
+error.noSalesPoint.strongMessage=Neem contact op met uw Zone Manager voor hulp.
+```
+
+Copy the French values into `messages.properties` so unsupported system languages fall back to French.
+
+## Keep the template model-based
+
+Because the controller already resolves the translation, your HTML should continue using `${...}`, not `#{...}`:
 
 ```html
-<!DOCTYPE html>
-<html th:lang="${#locale.language}"
-      xmlns:th="http://www.thymeleaf.org">
+<title th:text="${pageTitle}">Erreur</title>
 
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport"
-          content="width=device-width, initial-scale=1.0">
+<img class="failure-icon"
+     th:src="@{${iconPath}}"
+     alt="">
 
-    <title th:text="#{error.pageTitle}">
-        Erreur
-    </title>
+<h1 th:text="${title}">
+    Oups, un problème technique est survenu.
+</h1>
 
-    <link rel="stylesheet"
-          th:href="@{/css/sales-points-failure.css}">
-</head>
+<p class="message"
+   th:text="${message}">
+    Nous n’avons pas pu charger les données nécessaires.
+</p>
 
-<body>
-
-<main class="failure-screen">
-
-    <header class="page-header">
-        <img class="logo"
-             th:src="@{/images/alphacredit-logo.png}"
-             alt="AlphaCredit">
-
-        <nav class="language-selector"
-             aria-label="Language selection">
-
-            <a th:href="@{/sales-points(appId=${appId}, lang='fr')}"
-               class="language-btn"
-               th:classappend="${#locale.language == 'fr'} ? ' active' : ''">
-                FR
-            </a>
-
-            <a th:href="@{/sales-points(appId=${appId}, lang='nl')}"
-               class="language-btn"
-               th:classappend="${#locale.language == 'nl'} ? ' active' : ''">
-                NL
-            </a>
-        </nav>
-    </header>
-
-    <section class="failure-container">
-
-        <section class="failure-content">
-
-            <img class="failure-icon"
-                 th:src="@{/images/icons/warning.svg}"
-                 alt="">
-
-            <h1 th:utext="#{error.title}">
-                Oups, un problème technique est survenu.
-            </h1>
-
-            <p class="message"
-               th:text="#{error.message}">
-                Nous n’avons pas pu charger les données nécessaires pour le moment.
-            </p>
-
-            <p class="strong-message"
-               th:if="${strongMessage != null and !#strings.isEmpty(strongMessage)}"
-               th:text="${strongMessage}">
-                Réessayez dans quelques minutes.
-            </p>
-
-        </section>
-
-        <section class="right-illustration">
-            <img class="background-pattern"
-                 th:src="@{/images/pattern-green.png}"
-                 alt="">
-
-            <img class="mascot"
-                 th:src="@{/images/sales-point-hero.png}"
-                 alt="">
-        </section>
-
-    </section>
-
-</main>
-
-</body>
-</html>
+<p class="strong-message"
+   th:if="${strongMessage != null and !#strings.isEmpty(strongMessage)}"
+   th:text="${strongMessage}">
+    Réessayez dans quelques minutes.
+</p>
 ```
 
-If the error page has its own controller URL, change the FR/NL links to that URL rather than `/sales-points`.
-
----
-
-# Final `sales-points-failure.css`
-
-Replace the current CSS with this cleaner version.
-
-```css
-* {
-    box-sizing: border-box;
-}
-
-:root {
-    --color-green-dark: #154734;
-    --color-green-hover: #237656;
-    --color-green-light: #6BDD00;
-    --color-black: #000000;
-    --color-white: #ffffff;
-}
-
-/* Fonts */
-
-@font-face {
-    font-family: 'Ubuntu';
-    src: url('../fonts/Ubuntu/.woff2/Ubuntu-Bold.woff2')
-         format('woff2');
-    font-weight: 700;
-    font-style: normal;
-    font-display: swap;
-}
-
-@font-face {
-    font-family: 'Open Sans';
-    src: url('../fonts/OpenSans/.woff2/OpenSans-Light.woff2')
-         format('woff2');
-    font-weight: 300;
-    font-style: normal;
-    font-display: swap;
-}
-
-@font-face {
-    font-family: 'Open Sans';
-    src: url('../fonts/OpenSans/.woff2/OpenSans-Bold.woff2')
-         format('woff2');
-    font-weight: 700;
-    font-style: normal;
-    font-display: swap;
-}
-
-html,
-body {
-    margin: 0;
-    min-height: 100%;
-    font-family: 'Open Sans', Arial, sans-serif;
-    background-color: var(--color-white);
-    color: var(--color-black);
-}
-
-.failure-screen {
-    width: 100%;
-    min-height: 100vh;
-    background-color: var(--color-white);
-    overflow-x: hidden;
-}
-
-/* Header */
-
-.page-header {
-    height: 96px;
-    padding: 16px clamp(24px, 7vw, 140px);
-
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-
-    flex-shrink: 0;
-}
-
-.logo {
-    width: clamp(120px, 12vw, 160px);
-    height: auto;
-    display: block;
-}
-
-.language-selector {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.language-btn {
-    width: 40px;
-    height: 40px;
-
-    border-radius: 999px;
-    background-color: transparent;
-    color: var(--color-green-dark);
-
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-
-    font-family: 'Open Sans', Arial, sans-serif;
-    font-size: 16px;
-    font-weight: 700;
-    text-decoration: none;
-}
-
-.language-btn:hover {
-    background-color: rgba(21, 71, 52, 0.08);
-}
-
-.language-btn.active {
-    background-color: var(--color-green-dark);
-    color: var(--color-white);
-}
-
-/* Main layout */
-
-.failure-container {
-    display: grid;
-    grid-template-columns:
-        minmax(0, 1fr)
-        minmax(430px, 42vw);
-
-    min-height: calc(100vh - 96px);
-    align-items: stretch;
-}
-
-/* Failure content */
-
-.failure-content {
-    padding:
-        clamp(48px, 8vh, 96px)
-        clamp(24px, 7vw, 140px);
-
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-
-    text-align: center;
-}
-
-.failure-icon {
-    width: 112px;
-    height: 112px;
-    margin: 0 0 32px;
-    object-fit: contain;
-}
-
-.failure-content h1 {
-    max-width: 760px;
-    margin: 0;
-
-    font-family: 'Ubuntu', Arial, sans-serif;
-    font-size: 48px;
-    font-weight: 700;
-    line-height: 1.15;
-    letter-spacing: -0.02em;
-
-    color: var(--color-black);
-}
-
-.message {
-    max-width: 680px;
-    margin: 36px 0 0;
-
-    font-family: 'Open Sans', Arial, sans-serif;
-    font-size: 18px;
-    font-weight: 300;
-    line-height: 1.45;
-
-    color: var(--color-black);
-}
-
-.strong-message {
-    max-width: 680px;
-    margin: 12px 0 0;
-
-    font-family: 'Open Sans', Arial, sans-serif;
-    font-size: 18px;
-    font-weight: 700;
-    line-height: 1.45;
-
-    color: var(--color-black);
-}
-
-/* Illustration */
-
-.right-illustration {
-    position: relative;
-    width: 100%;
-    min-height: calc(100vh - 96px);
-
-    overflow: hidden;
-    border-top-left-radius: 40px;
-    background-color: var(--color-green-dark);
-}
-
-.background-pattern {
-    position: absolute;
-    inset: 0;
-
-    width: 100%;
-    height: 100%;
-
-    object-fit: cover;
-    object-position: center;
-    z-index: 1;
-}
-
-.mascot {
-    position: absolute;
-
-    width: min(82%, 680px);
-    height: auto;
-    max-width: none;
-
-    left: 50%;
-    bottom: -6%;
-
-    transform: translateX(-50%) scaleX(-1);
-    transform-origin: bottom center;
-
-    z-index: 2;
-}
-
-/* Tablet */
-
-@media (max-width: 1024px) {
-
-    .failure-container {
-        grid-template-columns:
-            minmax(0, 1fr)
-            minmax(340px, 40vw);
-    }
-
-    .failure-content {
-        padding: 48px 40px;
-    }
-
-    .failure-content h1 {
-        font-size: 40px;
-    }
-
-    .mascot {
-        width: 88%;
-        bottom: -5%;
-    }
-}
-
-/* Mobile */
-
-@media (max-width: 768px) {
-
-    .page-header {
-        height: 80px;
-        padding: 16px 24px;
-    }
-
-    .failure-container {
-        display: flex;
-        flex-direction: column;
-        min-height: auto;
-    }
-
-    .failure-content {
-        order: 1;
-        padding: 48px 24px;
-        justify-content: flex-start;
-    }
-
-    .failure-icon {
-        width: 88px;
-        height: 88px;
-        margin-bottom: 24px;
-    }
-
-    .failure-content h1 {
-        font-size: 34px;
-        line-height: 1.15;
-    }
-
-    .message,
-    .strong-message {
-        font-size: 16px;
-    }
-
-    .message {
-        margin-top: 28px;
-    }
-
-    .right-illustration {
-        order: 2;
-
-        width: 100%;
-        min-height: 420px;
-        height: 55vh;
-        max-height: 540px;
-
-        border-top-left-radius: 32px;
-        border-top-right-radius: 32px;
-    }
-
-    .mascot {
-        width: min(78%, 430px);
-        left: 50%;
-        bottom: -8%;
-
-        transform: translateX(-50%) scaleX(-1);
-    }
-}
-```
-
-## Important changes from your current CSS
-
-Remove these existing mascot rules:
-
-```css
-width: clamp(420px, 46vw, 590px);
-right: clamp(-40px, 4vw, 60px);
-bottom: clamp(-180px, -12vw, -80px);
-```
-
-They cause the mascot to move unpredictably when the viewport width changes.
-
-The new version anchors it consistently using:
-
-```css
-left: 50%;
-bottom: -6%;
-transform: translateX(-50%) scaleX(-1);
-```
-
-Also change your current error title:
-
-```css
-font-weight: 800;
-```
-
-to:
-
-```css
-font-family: 'Ubuntu', Arial, sans-serif;
-font-weight: 700;
-```
-
-because the design calls for **Ubuntu Bold**, not an artificial weight of `800`.
-
-## Translation files
-
-Add to `messages_fr.properties`:
-
-```properties
-error.pageTitle=Erreur
-error.title=Oups, un problème technique est survenu.
-error.message=Nous n’avons pas pu charger les données nécessaires pour le moment.
-error.strongMessage=Réessayez dans quelques minutes.
-```
-
-Add to `messages_nl.properties`:
-
-```properties
-error.pageTitle=Fout
-error.title=Oeps, er is een technisch probleem opgetreden.
-error.message=We konden de benodigde gegevens momenteel niet laden.
-error.strongMessage=Probeer het over enkele minuten opnieuw.
-```
-
-Add the French values to `messages.properties` as the fallback when the system language is neither French nor Dutch.
+Use `th:text` for the title unless you intentionally store HTML such as `<br>` in the translation. This keeps the existing controller → shared error template design and adds FR/NL cleanly.
