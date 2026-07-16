@@ -1,90 +1,131 @@
-That explains it: on the success screen you likely use the message key directly:
+You’re right—the expected screen has **no white gutter around the right illustration**. The green panel should touch the right and bottom edges of the viewport.
 
-```html
-<h1 th:utext="#{salesPoints.heading}">
-```
+The gap is usually caused by padding/margin on `.screen`, `.content-container`, or a parent wrapper. Keep the padding only inside `.left-content` and `.page-header`.
 
-So Thymeleaf reads the property and renders `<br>` as HTML.
+Use this layout:
 
-On the error screen, your value comes from the controller as a model attribute:
+```css
+html,
+body {
+    margin: 0;
+    width: 100%;
+    min-height: 100%;
+}
 
-```html
-<h1 th:utext="${title}">
-```
+body {
+    overflow-x: hidden;
+}
 
-If it still shows `<br>`, the most likely reason is that the controller is adding an **escaped** value, like `Oups, un problème&lt;br&gt;technique...`, or the property file contains escaped text.
+.screen {
+    width: 100%;
+    min-height: 100vh;
+    margin: 0;
+    padding: 0;
+    max-width: none;
+}
 
-Best fix: don’t resolve the title in the controller. Pass the **message key** to the template, then let Thymeleaf resolve it with `#{...}` like the success screen.
+.content-container {
+    display: grid;
+    grid-template-columns: minmax(0, 57%) minmax(0, 43%);
 
-## Controller
+    width: 100%;
+    min-height: calc(100vh - 96px);
 
-Change from:
-
-```java
-mv.addObject("title", messageSource.getMessage("error.technical.title", null, locale));
-```
-
-to:
-
-```java
-mv.addObject("titleKey", "error.technical.title");
-```
-
-For example:
-
-```java
-@GetMapping("/error/technical")
-public ModelAndView technicalError() {
-    ModelAndView mv = new ModelAndView("views/ui-error");
-    mv.addObject("pageTitleKey", "error.technical.pageTitle");
-    mv.addObject("iconPath", "/images/icons/tools.svg");
-    mv.addObject("titleKey", "error.technical.title");
-    mv.addObject("messageKey", "error.technical.message");
-    mv.addObject("strongMessageKey", "error.technical.strongMessage");
-    return mv;
+    margin: 0;
+    padding: 0;
+    gap: 0;
 }
 ```
 
-And:
+Keep spacing inside only the left column:
 
-```java
-@GetMapping("/error/no-sales-point")
-public ModelAndView noSalesPoint() {
-    ModelAndView mv = new ModelAndView("views/ui-error");
-    mv.addObject("pageTitleKey", "error.noSalesPoint.pageTitle");
-    mv.addObject("iconPath", "/images/icons/warning.svg");
-    mv.addObject("titleKey", "error.noSalesPoint.title");
-    mv.addObject("messageKey", "error.noSalesPoint.message");
-    mv.addObject("strongMessageKey", "error.noSalesPoint.strongMessage");
-    return mv;
+```css
+.left-content {
+    width: 100%;
+    min-width: 0;
+
+    padding:
+        clamp(40px, 7vh, 72px)
+        clamp(32px, 5vw, 96px);
+
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
 }
 ```
 
-## Template
+Make the illustration fill its entire grid cell:
 
-Use dynamic message lookup:
+```css
+.right-illustration {
+    position: relative;
 
-```html
-<title th:text="#{${pageTitleKey}}">Erreur</title>
+    width: 100%;
+    height: 100%;
+    min-height: calc(100vh - 96px);
 
-<h1 th:utext="#{${titleKey}}">
-    Oups, un problème<br>technique est survenu.
-</h1>
+    margin: 0;
+    padding: 0;
 
-<p class="message" th:text="#{${messageKey}}">
-    Nous n’avons pas pu charger les données nécessaires.
-</p>
-
-<p class="strong-message" th:text="#{${strongMessageKey}}">
-    Réessayez dans quelques minutes.
-</p>
+    overflow: hidden;
+    border-top-left-radius: 40px;
+    background-color: var(--color-green-dark);
+}
 ```
 
-## Properties
+The pattern must also cover the whole panel:
 
-```properties
-error.technical.title=Oups, un problème<br>technique est survenu.
-error.noSalesPoint.title=Oups, votre point de vente<br>n’est pas encore défini.
+```css
+.background-pattern {
+    position: absolute;
+    inset: 0;
+
+    width: 100%;
+    height: 100%;
+
+    display: block;
+    object-fit: cover;
+    object-position: center;
+
+    margin: 0;
+    z-index: 1;
+}
 ```
 
-This makes the error screen behave the same as the success screen: translation comes through `#{...}`, and `th:utext` renders the `<br>`.
+Also check that you do **not** have any of these active:
+
+```css
+.screen {
+    padding: ...;
+    max-width: ...;
+    margin: auto;
+}
+
+.content-container {
+    gap: ...;
+    padding: ...;
+    max-width: ...;
+    margin: auto;
+}
+
+.right-illustration {
+    margin-right: ...;
+}
+```
+
+For your expected layout, `gap` must be exactly:
+
+```css
+gap: 0;
+```
+
+The header can still have horizontal padding:
+
+```css
+.page-header {
+    height: 96px;
+    padding: 16px clamp(24px, 7vw, 140px);
+}
+```
+
+That padding should not be applied to `.content-container`. This will make the green panel flush with the right and bottom edges while preserving the white header area above it.
