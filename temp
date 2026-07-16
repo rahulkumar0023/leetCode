@@ -1,163 +1,93 @@
-Yes — this is the existing error flow we should keep.
+This clarifies the target spacing and typography.
 
-Your `ErrorController` already distinguishes:
+For the **no-sales-point** screen, the left content should be positioned higher, but not directly under the header. The design looks roughly like:
 
-* `/error/technical`
-* `/error/no-sales-point`
+* Icon: `112 × 112px`
+* Space below icon: about `28–32px`
+* Title: Ubuntu Bold, `48px`
+* Space below title: about `40–48px`
+* Body: Open Sans Light, `18px`
+* Strong body: Open Sans Bold, `18px`
+* Content width: around `680px`
 
-and sends these model attributes to `views/ui-error`:
+Use this for the left side:
 
-```java
-pageTitle
-iconPath
-title
-message
-strongMessage
-```
+```css
+.failure-content {
+    padding:
+        clamp(56px, 7vh, 84px)
+        clamp(32px, 7vw, 120px)
+        48px;
 
-The main update is to stop hardcoding French in the controller and resolve the text from `messages.properties`, `messages_fr.properties`, or `messages_nl.properties`.
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
 
-## Updated controller
-
-```java
-package com.bnpp.pf.arthur.core.exception;
-
-import java.util.Locale;
-
-import org.springframework.context.MessageSource;
-import org.springframework.stereotype.Controller;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.servlet.ModelAndView;
-
-@Controller
-public class ErrorController {
-
-    private static final String ERROR_VIEW = "views/ui-error";
-
-    private final MessageSource messageSource;
-
-    public ErrorController(MessageSource messageSource) {
-        this.messageSource = messageSource;
-    }
-
-    @GetMapping("/error/technical")
-    public ModelAndView technicalError(Locale locale) {
-        return buildErrorView(
-                locale,
-                "error.technical.pageTitle",
-                "/images/icons/tools.svg",
-                "error.technical.title",
-                "error.technical.message",
-                "error.technical.strongMessage"
-        );
-    }
-
-    @GetMapping("/error/no-sales-point")
-    public ModelAndView noSalesPoint(Locale locale) {
-        return buildErrorView(
-                locale,
-                "error.noSalesPoint.pageTitle",
-                "/images/icons/warning.svg",
-                "error.noSalesPoint.title",
-                "error.noSalesPoint.message",
-                "error.noSalesPoint.strongMessage"
-        );
-    }
-
-    private ModelAndView buildErrorView(
-            Locale locale,
-            String pageTitleKey,
-            String iconPath,
-            String titleKey,
-            String messageKey,
-            String strongMessageKey
-    ) {
-        ModelAndView modelAndView = new ModelAndView(ERROR_VIEW);
-
-        modelAndView.addObject(
-                "pageTitle",
-                messageSource.getMessage(pageTitleKey, null, locale)
-        );
-        modelAndView.addObject("iconPath", iconPath);
-        modelAndView.addObject(
-                "title",
-                messageSource.getMessage(titleKey, null, locale)
-        );
-        modelAndView.addObject(
-                "message",
-                messageSource.getMessage(messageKey, null, locale)
-        );
-        modelAndView.addObject(
-                "strongMessage",
-                messageSource.getMessage(strongMessageKey, null, locale)
-        );
-
-        return modelAndView;
-    }
+    text-align: center;
 }
 ```
 
-This avoids duplicating the same `ModelAndView` setup in both methods.
+Then use these element styles:
 
-## French messages
+```css
+.failure-icon {
+    width: 112px;
+    height: 112px;
+    margin: 0 0 32px;
+    object-fit: contain;
+}
 
-`messages_fr.properties`:
+.failure-content h1 {
+    max-width: 760px;
+    margin: 0 0 44px;
 
-```properties
-error.technical.pageTitle=Erreur technique
-error.technical.title=Oups, un problème technique est survenu.
-error.technical.message=Nous n’avons pas pu charger les données nécessaires pour le moment.
-error.technical.strongMessage=Réessayez dans quelques minutes. Si le problème persiste, contactez votre Zone Manager pour obtenir de l’aide.
+    font-family: 'Ubuntu', Arial, sans-serif;
+    font-size: 48px;
+    font-weight: 700;
+    line-height: 1.15;
+    letter-spacing: -0.02em;
 
-error.noSalesPoint.pageTitle=Point de vente non défini
-error.noSalesPoint.title=Oups, votre point de vente n’est pas encore défini.
-error.noSalesPoint.message=Votre compte n’est pas associé à un point de vente. Vous ne pouvez donc pas accéder à la plateforme partenaire.
-error.noSalesPoint.strongMessage=Veuillez contacter votre Zone Manager pour recevoir de l’aide.
+    color: var(--color-black);
+}
+
+.message {
+    max-width: 680px;
+    margin: 0 0 12px;
+
+    font-family: 'Open Sans', Arial, sans-serif;
+    font-size: 18px;
+    font-weight: 300;
+    line-height: 1.45;
+
+    color: var(--color-black);
+    text-align: left;
+}
+
+.strong-message {
+    max-width: 680px;
+    margin: 0;
+
+    font-family: 'Open Sans', Arial, sans-serif;
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 1.45;
+
+    color: var(--color-black);
+    text-align: left;
+}
 ```
 
-## Dutch messages
+One important point: your current `.failure-content` centers all text. In the design, the icon and title are centered, but the two paragraph blocks are left-aligned. So the paragraph rules should keep:
 
-`messages_nl.properties`:
-
-```properties
-error.technical.pageTitle=Technische fout
-error.technical.title=Oeps, er is een technisch probleem opgetreden.
-error.technical.message=We konden de benodigde gegevens momenteel niet laden.
-error.technical.strongMessage=Probeer het over enkele minuten opnieuw. Neem contact op met uw Zone Manager als het probleem blijft bestaan.
-
-error.noSalesPoint.pageTitle=Verkooppunt niet gedefinieerd
-error.noSalesPoint.title=Oeps, uw verkooppunt is nog niet gedefinieerd.
-error.noSalesPoint.message=Uw account is niet gekoppeld aan een verkooppunt. Daarom hebt u geen toegang tot het partnerplatform.
-error.noSalesPoint.strongMessage=Neem contact op met uw Zone Manager voor hulp.
+```css
+text-align: left;
 ```
 
-Copy the French values into `messages.properties` so unsupported system languages fall back to French.
+while the parent remains:
 
-## Keep the template model-based
-
-Because the controller already resolves the translation, your HTML should continue using `${...}`, not `#{...}`:
-
-```html
-<title th:text="${pageTitle}">Erreur</title>
-
-<img class="failure-icon"
-     th:src="@{${iconPath}}"
-     alt="">
-
-<h1 th:text="${title}">
-    Oups, un problème technique est survenu.
-</h1>
-
-<p class="message"
-   th:text="${message}">
-    Nous n’avons pas pu charger les données nécessaires.
-</p>
-
-<p class="strong-message"
-   th:if="${strongMessage != null and !#strings.isEmpty(strongMessage)}"
-   th:text="${strongMessage}">
-    Réessayez dans quelques minutes.
-</p>
+```css
+text-align: center;
 ```
 
-Use `th:text` for the title unless you intentionally store HTML such as `<br>` in the translation. This keeps the existing controller → shared error template design and adds FR/NL cleanly.
+For the technical-error version, the same layout works; only the icon and text change.
