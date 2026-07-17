@@ -1,146 +1,119 @@
-You can use the Ping Swagger/OpenAPI JSON to generate a **client inside Partner Repository**. Partner Repository will receive the AS400 user snapshot, save/update Postgres, then call Ping using the generated client with these attributes:
+Yes — this is a **Swagger 2.0 definition for a SCIM 2.0 API**.
+
+From the screenshot, the important parts are:
 
 ```text
-givenName
-sn
-cn
-mail
-mobile
-status
+basePath: /scim/v2
+resource: /partners-BE-AP74737
 ```
 
-## Recommended approach
-
-Do **not** manually write all Ping request/response classes if you already have Swagger JSON. Generate them from the Swagger file.
-
-Flow:
+Available operations include:
 
 ```text
-AS400
-  -> Partner Repository API
-      -> map AS400 request to Partner Repository entities
-      -> save/update Postgres
-      -> map user entity to Ping request
-      -> call Ping API
+GET    /partners-BE-AP74737
+POST   /partners-BE-AP74737
+POST   /partners-BE-AP74737/.search
+GET    /partners-BE-AP74737/{id}
+PUT    /partners-BE-AP74737/{id}
+PATCH  /partners-BE-AP74737/{id}
+DELETE /partners-BE-AP74737/{id}
 ```
 
-## 1. Put the Swagger file in Partner Repository
-
-Example location:
+For your Partner Repository flow, you will mainly use:
 
 ```text
-partner-repository/
-└── src/main/resources/openapi/ping-api.json
+POST   /scim/v2/partners-BE-AP74737
+PATCH  /scim/v2/partners-BE-AP74737/{id}
+DELETE /scim/v2/partners-BE-AP74737/{id}
 ```
 
-Or:
+## How it maps to your AS400 flow
 
 ```text
-partner-repository/
-└── src/main/openapi/ping-api.json
+AS400 CREATE
+    -> Partner Repository saves user
+    -> POST Ping SCIM resource
+
+AS400 UPDATE
+    -> Partner Repository updates user
+    -> PATCH Ping SCIM resource
+
+AS400 DELETE
+    -> Partner Repository disables/deletes user
+    -> DELETE or PATCH status in Ping
 ```
 
-I usually prefer:
+Before using `DELETE`, confirm whether Ping expects physical deletion or only:
+
+```json
+{
+  "status": "INACTIVE"
+}
+```
+
+Identity systems often prefer disabling users instead of deleting them.
+
+## Your generated classes
+
+Your open tabs suggest OpenAPI Generator already created classes such as:
 
 ```text
-src/main/openapi/ping-api.json
+PartnersBEAP74737.java
+PartnersBEAP74737IdPatchRequest.java
+PingUserClient.java
 ```
 
-because it is build-time input, not runtime config.
+That means you should use the generated model rather than creating a second manual Ping request DTO.
 
-## 2. Add OpenAPI Generator Maven plugin
+The generated API class may have a name similar to:
 
-In `pom.xml`, add something like this:
-
-```xml
-<plugin>
-    <groupId>org.openapitools</groupId>
-    <artifactId>openapi-generator-maven-plugin</artifactId>
-    <version>7.8.0</version>
-    <executions>
-        <execution>
-            <id>generate-ping-client</id>
-            <goals>
-                <goal>generate</goal>
-            </goals>
-            <configuration>
-                <inputSpec>${project.basedir}/src/main/openapi/ping-api.json</inputSpec>
-                <generatorName>java</generatorName>
-
-                <apiPackage>com.bnpp.pf.partner.repository.ping.client.api</apiPackage>
-                <modelPackage>com.bnpp.pf.partner.repository.ping.client.model</modelPackage>
-                <invokerPackage>com.bnpp.pf.partner.repository.ping.client.invoker</invokerPackage>
-
-                <configOptions>
-                    <library>restclient</library>
-                    <dateLibrary>java8</dateLibrary>
-                    <useJakartaEe>true</useJakartaEe>
-                    <openApiNullable>false</openApiNullable>
-                </configOptions>
-            </configuration>
-        </execution>
-    </executions>
-</plugin>
-```
-
-If `restclient` gives issues in your setup, use:
-
-```xml
-<library>webclient</library>
+```java
+PartnersBEAP74737ResourceTypeApi
 ```
 
 or:
 
-```xml
-<library>resttemplate</library>
+```java
+DefaultApi
 ```
 
-Since you previously asked about using `RestClient`, `restclient` is the cleaner choice if your Spring Boot version supports it.
-
-## 3. Generate the client
-
-Run:
-
-```bash
-mvn clean generate-sources
-```
-
-The generated classes will appear under:
-
-```text
-target/generated-sources/openapi
-```
-
-Make sure IntelliJ marks it as generated source root. Maven usually handles this automatically.
-
-## 4. Create your own wrapper service
-
-Do not call the generated Ping API directly from your AS400 service. Wrap it.
-
-Example:
+The exact method names may look like:
 
 ```java
-@Service
-public class PingUserClient {
+partnersBEAP74737Post(...)
+partnersBEAP74737IdPatch(...)
+partnersBEAP74737IdDelete(...)
+```
 
-    private final PingUsersApi pingUsersApi;
+Check the generated class in your `api` package.
 
-    public PingUserClient(PingUsersApi pingUsersApi) {
-        this.pingUsersApi = pingUsersApi;
-    }
+## Create-user mapping
 
-    public void createOrUpdateUser(UserEntity user) {
-        PingUserRequest request = toPingRequest(user);
+Your six required attributes should map approximately like this:
 
-        pingUsersApi.createOrUpdateUser(request);
-    }
+```text
+Partner Repository         Ping SCIM
+------------------------------------------------
+firstName                  givenName
+surname / lastName         sn
+common/display name        cn
+email                      mail
+phoneNumber                mobile
+status                     status
+```
 
-    private PingUserRequest toPingRequest(UserEntity user) {
-        PingUserRequest request = new PingUserRequest();
+Example mapper:
+
+```java
+@Component
+public class PingUserMapper {
+
+    public PartnersBEAP74737 toCreateRequest(UserEntity user) {
+        PartnersBEAP74737 request = new PartnersBEAP74737();
 
         request.setGivenName(user.getFirstName());
         request.setSn(user.getLastName());
-        request.setCn(user.getUsername());
+        request.setCn(buildCommonName(user));
         request.setMail(user.getEmail());
         request.setMobile(user.getPhoneNumber());
         request.setStatus(mapStatus(user.getStatus()));
@@ -148,174 +121,243 @@ public class PingUserClient {
         return request;
     }
 
+    private String buildCommonName(UserEntity user) {
+        return Stream.of(user.getFirstName(), user.getLastName())
+                .filter(value -> value != null && !value.isBlank())
+                .collect(Collectors.joining(" "));
+    }
+
     private String mapStatus(String status) {
-        if ("ACTIVE".equalsIgnoreCase(status)) {
-            return "active";
+        if (status == null) {
+            return null;
         }
-        if ("INACTIVE".equalsIgnoreCase(status)) {
-            return "inactive";
-        }
-        return status;
+
+        return switch (status.toUpperCase(Locale.ROOT)) {
+            case "ACTIVE" -> "ACTIVE";
+            case "INACTIVE", "DISABLED", "DELETED" -> "INACTIVE";
+            default -> throw new IllegalArgumentException(
+                    "Unsupported Ping user status: " + status
+            );
+        };
     }
 }
 ```
 
-The exact generated class names may be different depending on the Swagger file. For example, it might generate:
-
-```text
-UsersApi
-UserApi
-CreateUserRequest
-UserRepresentation
-```
-
-instead of `PingUsersApi` and `PingUserRequest`.
-
-## 5. Map your fields
-
-Based on what you said, the mapping should probably be:
-
-```text
-Partner Repository / AS400      Ping
-------------------------------------------------
-person.firstName                givenName
-person.surname                  sn
-user.username or userId         cn
-person.email                    mail
-person.phoneNumber              mobile
-person.status                   status
-```
-
-Example:
+Imports:
 
 ```java
-private PingUserRequest toPingRequest(UserSnapshotRequest request, UserEntity user) {
-    PingUserRequest pingRequest = new PingUserRequest();
-
-    pingRequest.setGivenName(request.getPerson().getFirstName());
-    pingRequest.setSn(request.getPerson().getSurname());
-    pingRequest.setCn(user.getUserId());
-    pingRequest.setMail(request.getPerson().getEmail());
-    pingRequest.setMobile(request.getPerson().getPhoneNumber());
-    pingRequest.setStatus(request.getPerson().getStatus());
-
-    return pingRequest;
-}
+import java.util.Locale;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 ```
 
-For `cn`, confirm with Ping whether they expect:
-
-```text
-gps000001
-```
-
-or:
+Confirm whether Ping expects `cn` as:
 
 ```text
 John Doe
 ```
 
-In LDAP-style attributes, `cn` often means “common name”, but in identity integrations it is sometimes used as username/display name. Since your stable user identifier is `gps000001`, I would ask Ping whether `cn` should be the normalized GPS/user id or the full name.
+or as your normalized user identifier:
 
-## 6. Configuration in `application.yml`
+```text
+gps000001
+```
 
-Add Ping config:
+The schema definition will tell you, but `cn` normally represents the common/display name.
+
+## Wrapper client
+
+Keep generated code isolated behind your own service:
+
+```java
+@Component
+public class PingUserClient {
+
+    private final PartnersBEAP74737ResourceTypeApi pingApi;
+    private final PingUserMapper mapper;
+
+    public PingUserClient(
+            PartnersBEAP74737ResourceTypeApi pingApi,
+            PingUserMapper mapper
+    ) {
+        this.pingApi = pingApi;
+        this.mapper = mapper;
+    }
+
+    public String createUser(UserEntity user) {
+        PartnersBEAP74737 request = mapper.toCreateRequest(user);
+
+        PartnersBEAP74737 response =
+                pingApi.partnersBEAP74737Post(request);
+
+        if (response == null || response.getId() == null) {
+            throw new PingIntegrationException(
+                    "Ping created the user but returned no resource id"
+            );
+        }
+
+        return response.getId();
+    }
+}
+```
+
+The generated method and return type may differ. Use the names generated in your API class.
+
+## Update with PATCH
+
+The generated tab shows:
+
+```text
+PartnersBEAP74737IdPatchRequest
+```
+
+So updates likely require a SCIM patch body rather than the full user object.
+
+SCIM PATCH commonly looks like:
+
+```json
+{
+  "schemas": [
+    "urn:ietf:params:scim:api:messages:2.0:PatchOp"
+  ],
+  "Operations": [
+    {
+      "op": "replace",
+      "path": "mail",
+      "value": "new.email@example.com"
+    }
+  ]
+}
+```
+
+Your generated model may expose something like:
+
+```java
+PartnersBEAP74737IdPatchRequest patch =
+        new PartnersBEAP74737IdPatchRequest();
+
+patch.setSchemas(List.of(
+        "urn:ietf:params:scim:api:messages:2.0:PatchOp"
+));
+
+patch.setOperations(List.of(
+        buildReplaceOperation("givenName", user.getFirstName()),
+        buildReplaceOperation("sn", user.getLastName()),
+        buildReplaceOperation("cn", buildCommonName(user)),
+        buildReplaceOperation("mail", user.getEmail()),
+        buildReplaceOperation("mobile", user.getPhoneNumber()),
+        buildReplaceOperation("status", mapStatus(user.getStatus()))
+));
+```
+
+The exact property names may be lowercase or uppercase depending on the Swagger definition.
+
+## Store the Ping resource ID
+
+The create response should return a Ping/SCIM resource ID. Store that ID in Partner Repository, for example:
+
+```text
+users.ping_resource_id
+```
+
+Then update/delete calls can use:
+
+```text
+/scim/v2/partners-BE-AP74737/{pingResourceId}
+```
+
+Do not assume your local `userId` or `gpsGroupNumber` is automatically the Ping SCIM `{id}` unless Ping explicitly confirms that.
+
+Suggested columns:
+
+```text
+ping_resource_id
+ping_sync_status
+ping_last_synced_at
+ping_last_error
+```
+
+## Configuration
 
 ```yaml
 ping:
-  api:
-    base-url: https://ping-api.example.com
-    client-id: ${PING_CLIENT_ID}
-    client-secret: ${PING_CLIENT_SECRET}
+  scim:
+    base-url: https://ping-host.example/scim/v2
+    resource-path: /partners-BE-AP74737
     connect-timeout: 5s
     read-timeout: 10s
 ```
 
-Then create properties:
+The generated API client’s base URL should normally be:
 
-```java
-@ConfigurationProperties(prefix = "ping.api")
-public class PingApiProperties {
-
-    private String baseUrl;
-    private String clientId;
-    private String clientSecret;
-    private Duration connectTimeout;
-    private Duration readTimeout;
-
-    // getters and setters
-}
+```text
+https://ping-host.example/scim/v2
 ```
 
-## 7. Configure the generated client
+Then the generated method adds:
 
-Depending on the generated library, the config differs slightly. Conceptually:
-
-```java
-@Configuration
-@EnableConfigurationProperties(PingApiProperties.class)
-public class PingClientConfig {
-
-    @Bean
-    public ApiClient pingApiClient(PingApiProperties properties) {
-        ApiClient apiClient = new ApiClient();
-        apiClient.setBasePath(properties.getBaseUrl());
-
-        return apiClient;
-    }
-
-    @Bean
-    public PingUsersApi pingUsersApi(ApiClient pingApiClient) {
-        return new PingUsersApi(pingApiClient);
-    }
-}
+```text
+/partners-BE-AP74737
 ```
 
-If Ping requires OAuth/client credentials, then Partner Repository needs to first get an access token and send:
+Do not accidentally configure the full resource path twice.
 
-```http
-Authorization: Bearer <token>
+## Authentication
+
+Your Swagger shows secured endpoints and an **Authorize** button. Check the Swagger section:
+
+```json
+"securityDefinitions"
 ```
 
-If they use basic auth, then configure username/password/client credentials in the generated `ApiClient`.
+That tells you whether Partner Repository must send:
 
-## 8. Where to call Ping in your current flow
+```text
+Bearer token
+Basic authentication
+OAuth2 access token
+API key
+```
 
-Your service should look like this:
+The authentication used by Arthur Core for browser OIDC login is separate from the authentication Partner Repository uses for the SCIM API.
+
+## Recommended service flow
 
 ```java
 @Transactional
-public UserSnapshotResponse processSnapshot(UserSnapshotRequest request) {
-    UserEntity user = saveOrUpdateUserInPostgres(request);
+public SnapshotResponse processSnapshot(UserSnapshotRequest request) {
+    UserEntity user = userService.createOrUpdate(request);
 
-    pingUserClient.createOrUpdateUser(user);
+    try {
+        switch (request.getOperation()) {
+            case CREATE -> {
+                String pingId = pingUserClient.createUser(user);
+                user.setPingResourceId(pingId);
+            }
+            case UPDATE -> pingUserClient.updateUser(
+                    user.getPingResourceId(),
+                    user
+            );
+            case DELETE -> pingUserClient.disableUser(
+                    user.getPingResourceId()
+            );
+        }
 
-    return buildAcceptedResponse(user);
+        user.setPingSyncStatus(PingSyncStatus.SUCCESS);
+        user.setPingLastSyncedAt(Instant.now());
+
+    } catch (RuntimeException ex) {
+        user.setPingSyncStatus(PingSyncStatus.FAILED);
+        user.setPingLastError(ex.getMessage());
+
+        throw new PingIntegrationException(
+                "Failed to synchronize user with Ping",
+                ex
+        );
+    }
+
+    return buildResponse(user);
 }
 ```
 
-But one important production concern: if Postgres succeeds and Ping fails, you need to decide what happens.
-
-Safer production approach:
-
-```text
-1. Save user snapshot in Postgres
-2. Save pending Ping sync record
-3. Return ACCEPTED
-4. Async worker calls Ping
-5. Mark Ping sync SUCCESS / FAILED
-```
-
-For now, during development, synchronous call is okay. But for production, async/outbox is better.
-
-## 9. What I need from the Swagger file
-
-To give you the exact code, I need to see:
-
-* The endpoint path, for example `/users`, `/scim/v2/Users`, `/identity/users`
-* Whether it is `POST`, `PUT`, or `PATCH`
-* The request model name
-* Authentication method
-* Whether `status` is a string, boolean, enum, or nested object
-
-Once you share the Swagger JSON, I can tell you the exact generated API class and exact request object to use.
+The next useful step is to open the generated API class and the `PartnersBEAP74737` model. Those two files will reveal the exact method names and exact property setters for `givenName`, `sn`, `cn`, `mail`, `mobile`, and `status`.
