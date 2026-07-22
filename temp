@@ -1,3 +1,275 @@
+Yes — you can test most of it **without calling Ping** by mocking the generated API client.
+
+You should test in 3 layers:
+
+1. `PingUserMapper` unit test
+2. `PingUserClient` unit test with mocked generated API
+3. Your service/snapshot flow test verifying Ping client is called correctly
+
+## 1. Unit test the mapper
+
+This verifies your fields are mapped correctly:
+
+```java
+@ExtendWith(MockitoExtension.class)
+class PingUserMapperTest {
+
+    private final PingUserMapper mapper = new PingUserMapper();
+
+    @Test
+    void shouldMapUserToPingCreateRequest() {
+        UserEntity user = new UserEntity();
+        user.setFirstName("John");
+        user.setLastName("Doe");
+        user.setEmail("john.doe@example.com");
+        user.setPhoneNumber("+32470000000");
+        user.setStatus("ACTIVE");
+
+        var result = mapper.toPingUser(user);
+
+        assertThat(result.getGivenName()).isEqualTo("John");
+        assertThat(result.getSn()).isEqualTo("Doe");
+        assertThat(result.getCn()).isEqualTo("John Doe");
+        assertThat(result.getMail()).isEqualTo("john.doe@example.com");
+        assertThat(result.getMobile()).isEqualTo("+32470000000");
+        assertThat(result.getStatus()).isEqualTo("ACTIVE");
+    }
+
+    @Test
+    void shouldMapUserToPatchRequest() {
+        UserEntity user = new UserEntity();
+        user.setFirstName("John");
+        user.setLastName("Doe");
+        user.setEmail("john.doe@example.com");
+        user.setPhoneNumber("+32470000000");
+        user.setStatus("ACTIVE");
+
+        var patch = mapper.toPatchRequest(user);
+
+        assertThat(patch.getSchemas()).isNotEmpty();
+        assertThat(patch.getOperations()).hasSize(6);
+
+        assertThat(patch.getOperations())
+                .anySatisfy(operation -> {
+                    assertThat(operation.getPath()).isEqualTo("givenName");
+                    assertThat(operation.getValue()).isEqualTo("John");
+                });
+
+        assertThat(patch.getOperations())
+                .anySatisfy(operation -> {
+                    assertThat(operation.getPath()).isEqualTo("sn");
+                    assertThat(operation.getValue()).isEqualTo("Doe");
+                });
+
+        assertThat(patch.getOperations())
+                .anySatisfy(operation -> {
+                    assertThat(operation.getPath()).isEqualTo("mail");
+                    assertThat(operation.getValue()).isEqualTo("john.doe@example.com");
+                });
+    }
+}
+```
+
+Use these imports:
+
+```java
+import static org.assertj.core.api.Assertions.assertThat;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.junit.jupiter.MockitoExtension;
+```
+
+## 2. Unit test `PingUserClient`
+
+This verifies you call the generated API correctly, without real Ping.
+
+```java
+@ExtendWith(MockitoExtension.class)
+class PingUserClientTest {
+
+    @Mock
+    private PartnersBeAp74737ResourceTypeApi pingApi;
+
+    @Mock
+    private PingUserMapper pingUserMapper;
+
+    @InjectMocks
+    private PingUserClient pingUserClient;
+
+    @Test
+    void shouldCreateUserInPing() {
+        UserEntity user = new UserEntity();
+        user.setUserId("gps000001");
+
+        PartnersBEAP74737Get200ResponseResourcesInner request =
+                new PartnersBEAP74737Get200ResponseResourcesInner();
+
+        PartnersBEAP74737Get200ResponseResourcesInner response =
+                new PartnersBEAP74737Get200ResponseResourcesInner();
+        response.setId("ping-resource-123");
+
+        when(pingUserMapper.toPingUser(user)).thenReturn(request);
+        when(pingApi.partnersBEAP74737Post(request, null, null))
+                .thenReturn(response);
+
+        PartnersBEAP74737Get200ResponseResourcesInner result =
+                pingUserClient.createUser(user);
+
+        assertThat(result.getId()).isEqualTo("ping-resource-123");
+
+        verify(pingUserMapper).toPingUser(user);
+        verify(pingApi).partnersBEAP74737Post(request, null, null);
+    }
+
+    @Test
+    void shouldWrapCreateFailure() {
+        UserEntity user = new UserEntity();
+        user.setUserId("gps000001");
+
+        PartnersBEAP74737Get200ResponseResourcesInner request =
+                new PartnersBEAP74737Get200ResponseResourcesInner();
+
+        when(pingUserMapper.toPingUser(user)).thenReturn(request);
+        when(pingApi.partnersBEAP74737Post(request, null, null))
+                .thenThrow(new RuntimeException("Ping unavailable"));
+
+        assertThatThrownBy(() -> pingUserClient.createUser(user))
+                .isInstanceOf(PingIntegrationException.class)
+                .hasMessageContaining("gps000001");
+    }
+
+    @Test
+    void shouldUpdateUserInPing() {
+        UserEntity user = new UserEntity();
+
+        PartnersBEAP74737IdPatchRequest patchRequest =
+                new PartnersBEAP74737IdPatchRequest();
+
+        when(pingUserMapper.toPatchRequest(user)).thenReturn(patchRequest);
+
+        pingUserClient.updateUser("ping-resource-123", user);
+
+        verify(pingApi).partnersBEAP74737IdPatch(
+                "ping-resource-123",
+                null,
+                null,
+                null,
+                patchRequest
+        );
+    }
+
+    @Test
+    void shouldRejectUpdateWithoutPingResourceId() {
+        UserEntity user = new UserEntity();
+
+        assertThatThrownBy(() -> pingUserClient.updateUser(null, user))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Ping resource id");
+    }
+}
+```
+
+Imports:
+
+```java
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+```
+
+## 3. Test your service flow
+
+Wherever your AS400 snapshot/service decides create/update, mock `PingUserClient`.
+
+Example:
+
+```java
+@ExtendWith(MockitoExtension.class)
+class UserPingSynchronizationServiceTest {
+
+    @Mock
+    private PingUserClient pingUserClient;
+
+    @InjectMocks
+    private UserPingSynchronizationService service;
+
+    @Test
+    void shouldStorePingResourceIdAfterCreate() {
+        UserEntity user = new UserEntity();
+        user.setUserId("gps000001");
+
+        PartnersBEAP74737Get200ResponseResourcesInner pingResponse =
+                new PartnersBEAP74737Get200ResponseResourcesInner();
+        pingResponse.setId("ping-resource-123");
+
+        when(pingUserClient.createUser(user)).thenReturn(pingResponse);
+
+        service.synchronizeCreatedUser(user);
+
+        assertThat(user.getPingResourceId()).isEqualTo("ping-resource-123");
+        verify(pingUserClient).createUser(user);
+    }
+}
+```
+
+## 4. Add tests to your `pom.xml`
+
+Make sure you have these test dependencies:
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-test</artifactId>
+    <scope>test</scope>
+</dependency>
+
+<dependency>
+    <groupId>org.mockito</groupId>
+    <artifactId>mockito-junit-jupiter</artifactId>
+    <scope>test</scope>
+</dependency>
+```
+
+Usually `spring-boot-starter-test` already includes Mockito and AssertJ.
+
+## 5. Run tests
+
+```bash
+mvn test
+```
+
+Or just one test:
+
+```bash
+mvn -Dtest=PingUserMapperTest test
+```
+
+```bash
+mvn -Dtest=PingUserClientTest test
+```
+
+## 6. Optional: fake Ping with WireMock later
+
+When you want a higher-level integration test without real Ping, use WireMock to mock:
+
+```text
+POST /scim/v2/partners-BE-AP74737
+PATCH /scim/v2/partners-BE-AP74737/{id}
+```
+
+But start with the Mockito tests above. They are enough to prove your mapping and generated-client calls are correct without reaching Ping.
+
+
+
+==============================================
 The remaining errors are all in `PingUserMapper` because the generated PATCH model uses **sets and enums**, not lists and strings.
 
 Replace your PATCH code with this:
