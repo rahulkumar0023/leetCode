@@ -1,3 +1,112 @@
+The error confirms the same thing:
+
+```java
+partnersBEAP74737Post(...)
+```
+
+expects:
+
+```java
+PartnersBEAP74737Get200ResponseResourcesInner
+```
+
+but your mapper still returns:
+
+```java
+PartnersBEAP74737
+```
+
+Change both the mapper return type and the local `request` type.
+
+## `PingUserMapper`
+
+```java
+import com.bnpp.pf.partner.repository.ping.client.model
+        .PartnersBEAP74737Get200ResponseResourcesInner;
+
+@Component
+public class PingUserMapper {
+
+    public PartnersBEAP74737Get200ResponseResourcesInner toPingUser(
+            UserEntity user
+    ) {
+        PartnersBEAP74737Get200ResponseResourcesInner request =
+                new PartnersBEAP74737Get200ResponseResourcesInner();
+
+        request.setGivenName(user.getGivenName());
+        request.setSn(user.getSn());
+        request.setCn(user.getCn());
+        request.setMail(user.getMail());
+        request.setMobile(user.getMobile());
+        request.setStatus(user.getStatus());
+
+        return request;
+    }
+}
+```
+
+Use your actual `UserEntity` getters if they are named differently.
+
+## `PingUserClient`
+
+```java
+import com.bnpp.pf.partner.repository.ping.client.model
+        .PartnersBEAP74737Get200ResponseResourcesInner;
+
+@Component
+@AllArgsConstructor
+public class PingUserClient {
+
+    private final PartnersBeAp74737ResourceTypeApi pingApi;
+    private final PingUserMapper pingUserMapper;
+
+    public PartnersBEAP74737Get200ResponseResourcesInner createUser(
+            UserEntity user
+    ) {
+        PartnersBEAP74737Get200ResponseResourcesInner request =
+                pingUserMapper.toPingUser(user);
+
+        try {
+            return pingApi.partnersBEAP74737Post(request);
+        } catch (RuntimeException exception) {
+            throw new PingIntegrationException(
+                    "Failed to create user in Ping: " + user.getUserId(),
+                    exception
+            );
+        }
+    }
+}
+```
+
+Also remove this import:
+
+```java
+import ...PartnersBEAP74737;
+```
+
+The only remaining point to verify is the **return type** of `partnersBEAP74737Post`. Open the generated method declaration. If it returns `void`, change your method to:
+
+```java
+public void createUser(UserEntity user) {
+    PartnersBEAP74737Get200ResponseResourcesInner request =
+            pingUserMapper.toPingUser(user);
+
+    try {
+        pingApi.partnersBEAP74737Post(request);
+    } catch (RuntimeException exception) {
+        throw new PingIntegrationException(
+                "Failed to create user in Ping: " + user.getUserId(),
+                exception
+        );
+    }
+}
+```
+
+Do not use IntelliJ’s “Create method” suggestion here. That would modify or shadow the generated API instead of fixing the request model mismatch.
+
+
+
+-------------------------
 Below is a complete implementation structure for integrating the generated Ping SCIM client into **Partner Repository**.
 
 The generated class names visible in your project are approximately:
