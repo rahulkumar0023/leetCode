@@ -1,4 +1,171 @@
+
+
 Yes, your `PingUserClient` is already correctly wrapping the generated Ping API.
+
+The next step is not to change this class. You need to call:
+
+```java
+pingUserClient.createUser(savedUser);
+```
+
+from the Partner Repository service that actually creates the user.
+
+## Recommended service flow
+
+Suppose your current user creation method looks like:
+
+```java
+@Transactional
+public UserEntity createUser(UserEntity user) {
+    return userRepository.save(user);
+}
+```
+
+Change it to:
+
+```java
+@Service
+@AllArgsConstructor
+public class UserService {
+
+    private final UserRepository userRepository;
+    private final PingUserClient pingUserClient;
+
+    @Transactional
+    public UserEntity createUser(UserEntity user) {
+        UserEntity savedUser = userRepository.save(user);
+
+        PartnersBEAP74737Get200ResponseResourcesInner pingResponse =
+                pingUserClient.createUser(savedUser);
+
+        if (pingResponse == null || pingResponse.getId() == null) {
+            throw new PingIntegrationException(
+                    "Ping returned no resource id for user: "
+                            + savedUser.getUserId()
+            );
+        }
+
+        savedUser.setPingResourceId(pingResponse.getId());
+
+        return userRepository.save(savedUser);
+    }
+}
+```
+
+That gives this sequence:
+
+```text
+1. Create user entity
+2. Save user in Partner Repository
+3. Call Ping
+4. Read Ping resource id
+5. Store Ping resource id on the user
+```
+
+## In your existing create-or-update flow
+
+If one method handles both new and existing users, first determine whether the user already exists:
+
+```java
+@Transactional
+public UserEntity saveUser(UserRequest request) {
+    Optional<UserEntity> existing =
+            userRepository.findByUserId(request.getUserId());
+
+    if (existing.isPresent()) {
+        return updateExistingUser(existing.get(), request);
+    }
+
+    UserEntity newUser = mapNewUser(request);
+    UserEntity savedUser = userRepository.save(newUser);
+
+    PartnersBEAP74737Get200ResponseResourcesInner pingResponse =
+            pingUserClient.createUser(savedUser);
+
+    if (pingResponse == null || pingResponse.getId() == null) {
+        throw new PingIntegrationException(
+                "Ping returned no resource id for user: "
+                        + savedUser.getUserId()
+        );
+    }
+
+    savedUser.setPingResourceId(pingResponse.getId());
+
+    return userRepository.save(savedUser);
+}
+```
+
+This ensures Ping is called only for newly created users.
+
+## Existing-user update
+
+For updates, use the method already present in your client:
+
+```java
+private UserEntity updateExistingUser(
+        UserEntity user,
+        UserRequest request
+) {
+    updateFields(user, request);
+
+    UserEntity savedUser = userRepository.save(user);
+
+    if (savedUser.getPingResourceId() != null) {
+        pingUserClient.updateUser(
+                savedUser.getPingResourceId(),
+                savedUser
+        );
+    }
+
+    return savedUser;
+}
+```
+
+## Verify it with a test
+
+```java
+@ExtendWith(MockitoExtension.class)
+class UserServiceTest {
+
+    @Mock
+    private UserRepository userRepository;
+
+    @Mock
+    private PingUserClient pingUserClient;
+
+    @InjectMocks
+    private UserService userService;
+
+    @Test
+    void shouldCallPingAfterCreatingUser() {
+        UserEntity user = new UserEntity();
+        user.setUserId("gps000001");
+
+        when(userRepository.save(user)).thenReturn(user);
+
+        PartnersBEAP74737Get200ResponseResourcesInner pingResponse =
+                new PartnersBEAP74737Get200ResponseResourcesInner();
+        pingResponse.setId("ping-123");
+
+        when(pingUserClient.createUser(user))
+                .thenReturn(pingResponse);
+
+        UserEntity result = userService.createUser(user);
+
+        verify(userRepository).save(user);
+        verify(pingUserClient).createUser(user);
+
+        assertThat(result.getPingResourceId())
+                .isEqualTo("ping-123");
+    }
+}
+```
+
+The important point is: keep `PingUserClient` as it is, inject it into the user creation service, and invoke `createUser(savedUser)` immediately after the local user has been saved.
+
+---
+
+---Yes, your `PingUserClient` is already correctly wrapping the generated Ping API.
 
 The next step is not to change this class. You need to call:
 
