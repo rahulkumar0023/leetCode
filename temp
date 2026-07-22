@@ -1,3 +1,235 @@
+Now the only remaining failures are from the **generated `ApiClient.java`**, not from your `PingUserClient`.
+
+Your project uses Spring Framework 7, but the generated client still uses APIs removed in Spring 7:
+
+```text
+HttpHeaders.containsKey(...)
+HttpHeaders.entrySet(...)
+UriComponentsBuilder.fromHttpUrl(...)
+```
+
+Spring 7 replacements are:
+
+```text
+containsKey(...)  -> containsHeader(...)
+entrySet()        -> headerSet()
+fromHttpUrl(...)  -> fromUriString(...)
+```
+
+Spring Framework 7 changed `HttpHeaders` so it no longer exposes the old `Map` methods, which matches the errors in your screenshot. ([Home][1])
+
+## Temporary confirmation fix
+
+You can temporarily edit the generated file to prove this is the issue.
+
+In:
+
+```text
+target/generated-sources/openapi/src/main/java/.../invoker/ApiClient.java
+```
+
+### Line around 298
+
+Change:
+
+```java
+if (defaultHeaders.containsKey(name)) {
+```
+
+to:
+
+```java
+if (defaultHeaders.containsHeader(name)) {
+```
+
+### Line around 598
+
+Change:
+
+```java
+UriComponentsBuilder.fromHttpUrl(basePath)
+```
+
+to:
+
+```java
+UriComponentsBuilder.fromUriString(basePath)
+```
+
+### Line around 639
+
+Change:
+
+```java
+headers.entrySet()
+```
+
+to:
+
+```java
+headers.headerSet()
+```
+
+Then run:
+
+```bash
+mvn package
+```
+
+That should remove the three errors shown in the terminal.
+
+However, this is only a test because `mvn clean` deletes `target/generated-sources` and regenerates the broken code.
+
+## Permanent fix: regenerate for Spring Boot 4
+
+Update the OpenAPI Generator Maven plugin. Current generator documentation includes a `useSpringBoot4` option specifically for Spring Boot 4.x generation. ([OpenAPI Generator][2])
+
+Use a current generator version and enable Spring Boot 4 support:
+
+```xml
+<plugin>
+    <groupId>org.openapitools</groupId>
+    <artifactId>openapi-generator-maven-plugin</artifactId>
+    <version>7.23.0</version>
+
+    <executions>
+        <execution>
+            <id>generate-ping-client</id>
+            <phase>generate-sources</phase>
+
+            <goals>
+                <goal>generate</goal>
+            </goals>
+
+            <configuration>
+                <inputSpec>
+                    ${project.basedir}/src/main/openapi/partners-BE-AP74737.json
+                </inputSpec>
+
+                <generatorName>java</generatorName>
+
+                <apiPackage>
+                    com.bnpp.pf.partner.repository.ping.client.api
+                </apiPackage>
+
+                <modelPackage>
+                    com.bnpp.pf.partner.repository.ping.client.model
+                </modelPackage>
+
+                <invokerPackage>
+                    com.bnpp.pf.partner.repository.ping.client.invoker
+                </invokerPackage>
+
+                <configOptions>
+                    <library>restclient</library>
+                    <useJakartaEe>true</useJakartaEe>
+                    <useSpringBoot4>true</useSpringBoot4>
+                    <openApiNullable>false</openApiNullable>
+                    <dateLibrary>java8</dateLibrary>
+                </configOptions>
+            </configuration>
+        </execution>
+    </executions>
+</plugin>
+```
+
+Then run:
+
+```bash
+mvn clean generate-sources
+mvn package
+```
+
+The Maven plugin runs in `generate-sources`, before compilation. ([OpenAPI Generator][3])
+
+## If `useSpringBoot4` does not fix the Java client
+
+The `useSpringBoot4` option may depend on the selected generator/library and generator version. There has been a reported OpenAPI Generator issue specifically about generated Java clients using the removed Spring 7 `HttpHeaders` methods. ([GitHub][4])
+
+In that case, use a custom template override rather than modifying `target`.
+
+Create:
+
+```text
+src/main/openapi/templates/Java/libraries/restclient/ApiClient.mustache
+```
+
+Copy the `ApiClient.mustache` template from the same OpenAPI Generator version, then replace:
+
+```java
+defaultHeaders.containsKey(name)
+```
+
+with:
+
+```java
+defaultHeaders.containsHeader(name)
+```
+
+Replace:
+
+```java
+UriComponentsBuilder.fromHttpUrl(...)
+```
+
+with:
+
+```java
+UriComponentsBuilder.fromUriString(...)
+```
+
+Replace:
+
+```java
+headers.entrySet()
+```
+
+with:
+
+```java
+headers.headerSet()
+```
+
+Then point the plugin to it:
+
+```xml
+<templateDirectory>
+    ${project.basedir}/src/main/openapi/templates
+</templateDirectory>
+```
+
+OpenAPI Generator supports custom templates for cases where generated code must be adapted. ([OpenAPI Generator][5])
+
+## Recommended approach for your project
+
+1. Upgrade the OpenAPI Generator plugin.
+2. Set:
+
+```xml
+<library>restclient</library>
+<useSpringBoot4>true</useSpringBoot4>
+```
+
+3. Run a clean build.
+4. If the same three generated-code errors remain, add the custom template override.
+
+Do not commit edits under:
+
+```text
+target/generated-sources
+```
+
+because they will disappear on the next `mvn clean`.
+
+[1]: https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/http/HttpHeaders.html?utm_source=chatgpt.com "HttpHeaders (Spring Framework 7.0.6 API)"
+[2]: https://openapi-generator.tech/docs/generators/spring/?utm_source=chatgpt.com "Documentation for the spring Generator"
+[3]: https://openapi-generator.tech/docs/plugins/?utm_source=chatgpt.com "Plugins | OpenAPI Generator"
+[4]: https://github.com/OpenAPITools/openapi-generator/issues/21628?utm_source=chatgpt.com "Issue #21628 · OpenAPITools/openapi-generator"
+[5]: https://openapi-generator.tech/docs/customization/?utm_source=chatgpt.com "Customization"
+
+
+
+----------------------------------------
 No, you should **not change `UserEntity` just to match the generated Ping model names**.
 
 Your `UserEntity` should remain your database/domain model. The mismatch is solved in `PingUserMapper`, where you translate your fields to Ping’s fields.
