@@ -1,3 +1,158 @@
+Add the Ping call in the **service method that creates the user**, immediately after the user is saved. Do not put it in the controller or mapper.
+
+A clean synchronous first version looks like this:
+
+```java
+@Service
+@AllArgsConstructor
+public class UserService {
+
+    private final UserRepository userRepository;
+    private final PingUserClient pingUserClient;
+
+    @Transactional
+    public UserEntity createUser(CreateUserRequest request) {
+        UserEntity user = new UserEntity();
+
+        user.setUserId(request.getUserId());
+        user.setFirstName(request.getFirstName());
+        user.setLastName(request.getLastName());
+        user.setEmail(request.getEmail());
+        user.setPhoneNumber(request.getPhoneNumber());
+        user.setStatus(request.getStatus());
+
+        UserEntity savedUser = userRepository.save(user);
+
+        var pingUser = pingUserClient.createUser(savedUser);
+
+        savedUser.setPingResourceId(pingUser.getId());
+
+        return userRepository.save(savedUser);
+    }
+}
+```
+
+But if your user is created inside an existing AS400 snapshot flow, do it there:
+
+```java
+@Transactional
+public void processUserSnapshot(UserSnapshotRequest request) {
+    UserEntity user = saveOrUpdateUser(request);
+
+    if (isNewUser(user)) {
+        var pingUser = pingUserClient.createUser(user);
+        user.setPingResourceId(pingUser.getId());
+    }
+}
+```
+
+A better pattern is to make the result explicit:
+
+```java
+@Transactional
+public void processUserSnapshot(UserSnapshotRequest request) {
+    UserSaveResult result = saveOrUpdateUser(request);
+
+    if (result.created()) {
+        var pingUser = pingUserClient.createUser(result.user());
+        result.user().setPingResourceId(pingUser.getId());
+    }
+}
+```
+
+Example `UserSaveResult`:
+
+```java
+public record UserSaveResult(
+        UserEntity user,
+        boolean created
+) {
+}
+```
+
+Then your save method can decide:
+
+```java
+private UserSaveResult saveOrUpdateUser(UserSnapshotRequest request) {
+    Optional<UserEntity> existingUser =
+            userRepository.findByUserId(request.getUserId());
+
+    if (existingUser.isPresent()) {
+        UserEntity user = existingUser.get();
+
+        user.setFirstName(request.getFirstName());
+        user.setLastName(request.getLastName());
+        user.setEmail(request.getEmail());
+        user.setPhoneNumber(request.getPhoneNumber());
+        user.setStatus(request.getStatus());
+
+        return new UserSaveResult(userRepository.save(user), false);
+    }
+
+    UserEntity user = new UserEntity();
+    user.setUserId(request.getUserId());
+    user.setFirstName(request.getFirstName());
+    user.setLastName(request.getLastName());
+    user.setEmail(request.getEmail());
+    user.setPhoneNumber(request.getPhoneNumber());
+    user.setStatus(request.getStatus());
+
+    return new UserSaveResult(userRepository.save(user), true);
+}
+```
+
+Then Ping is called **only after creation**:
+
+```java
+if (result.created()) {
+    var pingUser = pingUserClient.createUser(result.user());
+    result.user().setPingResourceId(pingUser.getId());
+}
+```
+
+For testing, mock `PingUserClient` and verify it is called only for new users:
+
+```java
+@Test
+void shouldCallPingWhenUserIsCreated() {
+    when(userRepository.findByUserId("gps000001"))
+            .thenReturn(Optional.empty());
+
+    PartnersBEAP74737Get200ResponseResourcesInner pingResponse =
+            new PartnersBEAP74737Get200ResponseResourcesInner();
+    pingResponse.setId("ping-123");
+
+    when(pingUserClient.createUser(any(UserEntity.class)))
+            .thenReturn(pingResponse);
+
+    service.processUserSnapshot(request);
+
+    verify(pingUserClient).createUser(any(UserEntity.class));
+}
+```
+
+And verify it is **not** called when the user already exists:
+
+```java
+@Test
+void shouldNotCallPingWhenUserAlreadyExists() {
+    UserEntity existingUser = new UserEntity();
+    existingUser.setUserId("gps000001");
+    existingUser.setPingResourceId("ping-123");
+
+    when(userRepository.findByUserId("gps000001"))
+            .thenReturn(Optional.of(existingUser));
+
+    service.processUserSnapshot(request);
+
+    verifyNoInteractions(pingUserClient);
+}
+```
+
+Important: later, for production, consider an outbox/async approach so your database save and Ping sync are not tightly coupled. For now, the synchronous service call is fine to prove the integration works.
+
+à)-----------------------------
+-----------------------------
 Yes — you can test most of it **without calling Ping** by mocking the generated API client.
 
 You should test in 3 layers:
