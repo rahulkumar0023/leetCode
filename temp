@@ -1,3 +1,145 @@
+No, you should **not change `UserEntity` just to match the generated Ping model names**.
+
+Your `UserEntity` should remain your database/domain model. The mismatch is solved in `PingUserMapper`, where you translate your fields to Ping’s fields.
+
+From your entity, the mapping can be:
+
+```text
+UserEntity                    Ping
+------------------------------------------
+firstName                     givenName
+lastName                      sn
+username or full name         cn
+email                         mail
+phoneNumber                   mobile
+status                        status
+```
+
+For your current entity, use something like:
+
+```java
+@Component
+public class PingUserMapper {
+
+    public PartnersBEAP74737Get200ResponseResourcesInner toPingUser(
+            UserEntity user
+    ) {
+        PartnersBEAP74737Get200ResponseResourcesInner request =
+                new PartnersBEAP74737Get200ResponseResourcesInner();
+
+        request.setGivenName(user.getFirstName());
+        request.setSn(user.getLastName());
+        request.setCn(buildCommonName(user));
+        request.setMail(user.getEmail());
+        request.setMobile(user.getPhoneNumber());
+        request.setStatus(user.getStatus());
+
+        return request;
+    }
+
+    private String buildCommonName(UserEntity user) {
+        String firstName = user.getFirstName();
+        String lastName = user.getLastName();
+
+        return Stream.of(firstName, lastName)
+                .filter(value -> value != null && !value.isBlank())
+                .collect(Collectors.joining(" "));
+    }
+}
+```
+
+Imports:
+
+```java
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+```
+
+However, confirm what Ping expects for `cn`.
+
+If Ping expects the user login identifier, use:
+
+```java
+request.setCn(user.getUsername());
+```
+
+or:
+
+```java
+request.setCn(user.getUserId());
+```
+
+instead of the full name.
+
+## What may need to change in `UserEntity`
+
+Only add fields when your database genuinely needs them.
+
+For example, you may add:
+
+```java
+@Column(name = "ping_resource_id")
+private String pingResourceId;
+```
+
+because Ping returns its own SCIM resource ID, which is needed later for:
+
+```text
+PATCH /partners-BE-AP74737/{id}
+DELETE /partners-BE-AP74737/{id}
+```
+
+Optionally:
+
+```java
+@Enumerated(EnumType.STRING)
+@Column(name = "ping_sync_status")
+private PingSyncStatus pingSyncStatus;
+
+@Column(name = "ping_last_synced_at")
+private Instant pingLastSyncedAt;
+
+@Column(name = "ping_last_error")
+private String pingLastError;
+```
+
+But do **not** rename fields like:
+
+```java
+firstName -> givenName
+lastName -> sn
+email -> mail
+phoneNumber -> mobile
+```
+
+Those are Ping/LDAP attribute names and should stay confined to your Ping mapper.
+
+One possible issue in your entity is:
+
+```java
+@Column(name = "status", nullable = false)
+private String status;
+```
+
+That is valid, but using an enum is safer:
+
+```java
+@Enumerated(EnumType.STRING)
+@Column(name = "status", nullable = false)
+private UserStatus status;
+```
+
+Then map it:
+
+```java
+request.setStatus(user.getStatus().name());
+```
+
+So the answer is: keep the entity as-is for those six attributes; update the mapper, and only add `pingResourceId` and sync metadata if you need to manage Ping updates and failures.
+
+
+
+-----------
 The error confirms the same thing:
 
 ```java
