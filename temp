@@ -1,3 +1,228 @@
+The remaining errors are all in `PingUserMapper` because the generated PATCH model uses **sets and enums**, not lists and strings.
+
+Replace your PATCH code with this:
+
+```java
+package com.bnpp.pf.partner.repository.ping;
+
+import java.util.LinkedHashSet;
+import java.util.Locale;
+import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import com.bnpp.pf.partner.repository.entity.UserEntity;
+import com.bnpp.pf.partner.repository.ping.client.model.PartnersBEAP74737Get200ResponseResourcesInner;
+import com.bnpp.pf.partner.repository.ping.client.model.PartnersBEAP74737IdPatchRequest;
+import com.bnpp.pf.partner.repository.ping.client.model.PartnersBEAP74737IdPatchRequestOperationsInner;
+
+import org.springframework.stereotype.Component;
+
+@Component
+public class PingUserMapper {
+
+    private static final String SCIM_PATCH_SCHEMA =
+            "urn:ietf:params:scim:api:messages:2.0:PatchOp";
+
+    public PartnersBEAP74737Get200ResponseResourcesInner toPingUser(
+            UserEntity user
+    ) {
+        Objects.requireNonNull(user, "User must not be null");
+
+        PartnersBEAP74737Get200ResponseResourcesInner request =
+                new PartnersBEAP74737Get200ResponseResourcesInner();
+
+        request.setGivenName(trimToNull(user.getFirstName()));
+        request.setSn(trimToNull(user.getLastName()));
+        request.setCn(buildCommonName(user));
+        request.setMail(trimToNull(user.getEmail()));
+        request.setMobile(trimToNull(user.getPhoneNumber()));
+        request.setStatus(mapStatus(user.getStatus()));
+
+        return request;
+    }
+
+    public PartnersBEAP74737IdPatchRequest toPatchRequest(
+            UserEntity user
+    ) {
+        Objects.requireNonNull(user, "User must not be null");
+
+        PartnersBEAP74737IdPatchRequest request =
+                new PartnersBEAP74737IdPatchRequest();
+
+        /*
+         * The generated model expects:
+         * Set<PartnersBEAP74737IdPatchRequest.SchemasEnum>
+         */
+        request.setSchemas(Set.of(
+                PartnersBEAP74737IdPatchRequest.SchemasEnum.fromValue(
+                        SCIM_PATCH_SCHEMA
+                )
+        ));
+
+        /*
+         * The generated model expects a Set, not a List.
+         * LinkedHashSet keeps the operation order predictable.
+         */
+        Set<PartnersBEAP74737IdPatchRequestOperationsInner> operations =
+                new LinkedHashSet<>();
+
+        addReplaceOperation(
+                operations,
+                "givenName",
+                trimToNull(user.getFirstName())
+        );
+
+        addReplaceOperation(
+                operations,
+                "sn",
+                trimToNull(user.getLastName())
+        );
+
+        addReplaceOperation(
+                operations,
+                "cn",
+                buildCommonName(user)
+        );
+
+        addReplaceOperation(
+                operations,
+                "mail",
+                trimToNull(user.getEmail())
+        );
+
+        addReplaceOperation(
+                operations,
+                "mobile",
+                trimToNull(user.getPhoneNumber())
+        );
+
+        addReplaceOperation(
+                operations,
+                "status",
+                mapStatus(user.getStatus())
+        );
+
+        request.setOperations(operations);
+
+        return request;
+    }
+
+    private void addReplaceOperation(
+            Set<PartnersBEAP74737IdPatchRequestOperationsInner> operations,
+            String path,
+            Object value
+    ) {
+        if (value == null) {
+            return;
+        }
+
+        PartnersBEAP74737IdPatchRequestOperationsInner operation =
+                new PartnersBEAP74737IdPatchRequestOperationsInner();
+
+        /*
+         * The generated setter expects OpEnum, not String.
+         */
+        operation.setOp(
+                PartnersBEAP74737IdPatchRequestOperationsInner.OpEnum
+                        .fromValue("replace")
+        );
+
+        operation.setPath(path);
+        operation.setValue(value);
+
+        operations.add(operation);
+    }
+
+    private String buildCommonName(UserEntity user) {
+        return Stream.of(
+                        user.getFirstName(),
+                        user.getLastName()
+                )
+                .map(this::trimToNull)
+                .filter(Objects::nonNull)
+                .collect(Collectors.joining(" "));
+    }
+
+    private String mapStatus(Object status) {
+        if (status == null) {
+            return null;
+        }
+
+        String normalizedStatus = status.toString()
+                .trim()
+                .toUpperCase(Locale.ROOT);
+
+        return switch (normalizedStatus) {
+            case "ACTIVE" -> "ACTIVE";
+            case "INACTIVE", "DISABLED", "DELETED" -> "INACTIVE";
+            default -> throw new IllegalArgumentException(
+                    "Unsupported Ping status: " + status
+            );
+        };
+    }
+
+    private String trimToNull(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+
+        return value.trim();
+    }
+}
+```
+
+The three compiler errors correspond to these corrections:
+
+```java
+// Wrong
+request.setSchemas(List.of(SCIM_PATCH_SCHEMA));
+
+// Correct
+request.setSchemas(Set.of(
+    PartnersBEAP74737IdPatchRequest.SchemasEnum.fromValue(SCIM_PATCH_SCHEMA)
+));
+```
+
+```java
+// Wrong
+List<PartnersBEAP74737IdPatchRequestOperationsInner> operations;
+
+// Correct
+Set<PartnersBEAP74737IdPatchRequestOperationsInner> operations;
+```
+
+```java
+// Wrong
+operation.setOp("replace");
+
+// Correct
+operation.setOp(
+    PartnersBEAP74737IdPatchRequestOperationsInner.OpEnum.fromValue("replace")
+);
+```
+
+You can also use this if the generated enum contains the constant:
+
+```java
+operation.setOp(
+    PartnersBEAP74737IdPatchRequestOperationsInner.OpEnum.REPLACE
+);
+```
+
+After replacing the mapper, run:
+
+```bash
+mvn clean package
+```
+
+The warnings about `RestClient.Builder.messageConverters(...)` are deprecation warnings from generated code; they do not cause this build failure.
+
+
+
+----------------------
+------------------------
 Great — since the build works now, here is the clean final version for the **Partner Repository → Ping SCIM integration**.
 
 I’m using your generated classes:
