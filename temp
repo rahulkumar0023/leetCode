@@ -1,158 +1,606 @@
-The failure is not in the test assertion. It occurs while creating the client:
+Before adding tests, there is a logic issue in the current service: these flags are initialized but never updated:
 
-```text
-RuntimeException: No Bearer authentication configured!
+```java
+boolean anySalesPointChanged = false;
+boolean anyRelationshipCreated = false;
+boolean anyRelationshipChanged = false;
 ```
 
-Your generated `ApiClient.setBearerToken(...)` only works when the OpenAPI-generated client contains an authentication scheme of type `HttpBearerAuth`. This generated client apparently does not.
+Also, the result of `updateRelationship(...)` is currently ignored. That means the `RECORD_UPDATED` branch and part of the `RECORD_CREATED` branch may never execute.
 
-Use a default `Authorization` header instead.
+## 1. Fix the relationship flags first
 
-## Update `PingClientConfiguration`
+Replace the relationship section with:
+
+```java
+Optional<PersonSalesPointRelationshipEntity> existingRelationship =
+        relationshipRepository
+                .findByPersonUserIdAndSalesPointIdAndRelationshipType(
+                        user.getUserId(),
+                        salesPoint.getSalesPointId(),
+                        relationshipType
+                );
+
+boolean relationshipCreated = existingRelationship.isEmpty();
+
+PersonSalesPointRelationshipEntity relationship =
+        existingRelationship.orElseGet(
+                PersonSalesPointRelationshipEntity::new
+        );
+
+boolean relationshipChanged = updateRelationship(
+        relationship,
+        user,
+        salesPoint,
+        relationshipType,
+        workingRelationship
+);
+
+relationshipRepository.save(relationship);
+
+anyRelationshipCreated |= relationshipCreated;
+anyRelationshipChanged |= relationshipChanged;
+```
+
+This is important:
+
+```java
+anyRelationshipCreated |= relationshipCreated;
+anyRelationshipChanged |= relationshipChanged;
+```
+
+Without those two lines, your response calculation is incorrect.
+
+For the sales point, at minimum track whether it was created:
+
+```java
+Optional<SalesPointEntity> existingSalesPoint =
+        salesPointRepository.findBySalesPointId(
+                pointOfSalesRequest.getId()
+        );
+
+boolean salesPointCreated = existingSalesPoint.isEmpty();
+
+SalesPointEntity salesPoint =
+        existingSalesPoint.orElseGet(SalesPointEntity::new);
+
+// Populate or update the sales-point fields here.
+salesPoint.setSalesPointId(pointOfSalesRequest.getId());
+
+salesPoint = salesPointRepository.save(salesPoint);
+
+anySalesPointChanged |= salesPointCreated;
+```
+
+If the sales-point request contains other mutable fields, use an `updateSalesPoint(...)` method that returns whether anything changed.
+
+---
+
+# 2. Initial `UserSynchronizationServiceTest`
+
+This covers the most important flows:
+
+* new user created
+* existing user with no changes
+* relationship updated
+* Ping enabled and successful
+* Ping enabled and failing
+
+Adjust field names only where your DTO/entity differs.
+
+```java
+package com.bnpp.pf.partner.repository.service;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import java.time.Duration;
+import java.util.List;
+import java.util.Optional;
+
+import com.bnpp.pf.partner.repository.dto.as400.As400PointOfSalesRequest;
+import com.bnpp.pf.partner.repository.dto.as400.As400SyncCode;
+import com.bnpp.pf.partner.repository.dto.as400.As400SyncResponse;
+import com.bnpp.pf.partner.repository.dto.as400.As400UserSnapshotRequest;
+import com.bnpp.pf.partner.repository.dto.as400.As400WorkingRelationshipRequest;
+import com.bnpp.pf.partner.repository.entity.PersonSalesPointRelationshipEntity;
+import com.bnpp.pf.partner.repository.entity.SalesPointEntity;
+import com.bnpp.pf.partner.repository.entity.UserEntity;
+import com.bnpp.pf.partner.repository.ping.PingUserClient;
+import com.bnpp.pf.partner.repository.ping.config.PingScimProperties;
+import com.bnpp.pf.partner.repository.repository.PersonSalesPointRelationshipRepository;
+import com.bnpp.pf.partner.repository.repository.SalesPointRepository;
+import com.bnpp.pf.partner.repository.repository.UserRepository;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+@ExtendWith(MockitoExtension.class)
+class UserSynchronizationServiceTest {
+
+    @Mock
+    private UserRepository userRepository;
+
+    @Mock
+    private SalesPointRepository salesPointRepository;
+
+    @Mock
+    private PersonSalesPointRelationshipRepository relationshipRepository;
+
+    @Mock
+    private PingUserClient pingUserClient;
+
+    @Mock
+    private As400UserSnapshotRequest request;
+
+    @Mock
+    private As400PointOfSalesRequest pointOfSalesRequest;
+
+    @Mock
+    private As400WorkingRelationshipRequest workingRelationship;
+
+    private UserSynchronizationService service;
+
+    @BeforeEach
+    void setUp() {
+        service = createService(false);
+
+        when(request.getMetadata().getCorrelationId())
+                .thenReturn("correlation-123");
+
+        when(request.getSource().getGpsGroupNumber())
+                .thenReturn(" TESTUSER ");
+
+        when(request.getSource().getSourcePersonalId())
+                .thenReturn("personal-123");
+
+        when(request.getSource().getEntity())
+                .thenReturn("BE");
+
+        when(request.getPerson().getFirstName())
+                .thenReturn("Test");
+
+        when(request.getPerson().getSurname())
+                .thenReturn("User");
+
+        when(request.getPerson().getEmail())
+                .thenReturn("test.user@example.com");
+
+        when(request.getPerson().getPhoneNumber())
+                .thenReturn("+32123456789");
+
+        when(request.getPerson().getLanguage())
+                .thenReturn("EN");
+
+        when(request.getPerson().getStatus())
+                .thenReturn("40");
+
+        when(request.getPointOfSales())
+                .thenReturn(List.of(pointOfSalesRequest));
+
+        when(pointOfSalesRequest.getId())
+                .thenReturn("POS-001");
+
+        when(pointOfSalesRequest.getWorkingRelationship())
+                .thenReturn(workingRelationship);
+
+        when(workingRelationship.getRelationshipTypes())
+                .thenReturn(List.of("SELLER"));
+
+        when(workingRelationship.getStatus())
+                .thenReturn("ACTIVE");
+
+        when(userRepository.save(any(UserEntity.class)))
+                .thenAnswer(invocation ->
+                        invocation.getArgument(0)
+                );
+
+        when(salesPointRepository.save(any(SalesPointEntity.class)))
+                .thenAnswer(invocation -> {
+                    SalesPointEntity salesPoint =
+                            invocation.getArgument(0);
+
+                    if (salesPoint.getSalesPointId() == null) {
+                        salesPoint.setSalesPointId("POS-001");
+                    }
+
+                    return salesPoint;
+                });
+
+        when(relationshipRepository.save(
+                any(PersonSalesPointRelationshipEntity.class)
+        )).thenAnswer(invocation ->
+                invocation.getArgument(0)
+        );
+    }
+
+    @Test
+    void shouldCreateNewUserAndReturnRecordCreated() {
+        when(userRepository.findByGpsGroupNumber("testuser"))
+                .thenReturn(Optional.empty());
+
+        when(salesPointRepository.findBySalesPointId("POS-001"))
+                .thenReturn(Optional.empty());
+
+        when(relationshipRepository
+                .findByPersonUserIdAndSalesPointIdAndRelationshipType(
+                        "testuser",
+                        "POS-001",
+                        "SELLER"
+                ))
+                .thenReturn(Optional.empty());
+
+        As400SyncResponse result = service.synchronize(request);
+
+        assertNotNull(result);
+        assertEquals("ACCEPTED", result.getStatus());
+        assertEquals(As400SyncCode.RECORD_CREATED, result.getCode());
+        assertEquals(
+                "correlation-123",
+                result.getCorrelationId()
+        );
+        assertEquals(
+                "testuser",
+                result.getPartnerRepositoryRecordId()
+        );
+
+        verify(userRepository).save(any(UserEntity.class));
+        verify(relationshipRepository)
+                .save(any(PersonSalesPointRelationshipEntity.class));
+
+        verify(pingUserClient, never())
+                .createUser(any(UserEntity.class));
+    }
+
+    @Test
+    void shouldReturnNoChangeForUnchangedExistingData() {
+        UserEntity existingUser = existingUser();
+
+        SalesPointEntity existingSalesPoint =
+                new SalesPointEntity();
+        existingSalesPoint.setSalesPointId("POS-001");
+
+        PersonSalesPointRelationshipEntity existingRelationship =
+                new PersonSalesPointRelationshipEntity();
+
+        existingRelationship.setPersonUserId("testuser");
+        existingRelationship.setSalesPointId("POS-001");
+        existingRelationship.setRelationshipType("SELLER");
+        existingRelationship.setOrgUnitId("POS-001");
+        existingRelationship.setStatus("ACTIVE");
+
+        when(userRepository.findByGpsGroupNumber("testuser"))
+                .thenReturn(Optional.of(existingUser));
+
+        when(salesPointRepository.findBySalesPointId("POS-001"))
+                .thenReturn(Optional.of(existingSalesPoint));
+
+        when(relationshipRepository
+                .findByPersonUserIdAndSalesPointIdAndRelationshipType(
+                        "testuser",
+                        "POS-001",
+                        "SELLER"
+                ))
+                .thenReturn(Optional.of(existingRelationship));
+
+        As400SyncResponse result = service.synchronize(request);
+
+        assertEquals(As400SyncCode.NO_CHANGE, result.getCode());
+        assertEquals(
+                "Snapshot received but no effective change was detected.",
+                result.getMessage()
+        );
+
+        verify(pingUserClient, never())
+                .createUser(any(UserEntity.class));
+    }
+
+    @Test
+    void shouldReturnRecordUpdatedWhenRelationshipChanges() {
+        UserEntity existingUser = existingUser();
+
+        SalesPointEntity existingSalesPoint =
+                new SalesPointEntity();
+        existingSalesPoint.setSalesPointId("POS-001");
+
+        PersonSalesPointRelationshipEntity existingRelationship =
+                new PersonSalesPointRelationshipEntity();
+
+        existingRelationship.setPersonUserId("testuser");
+        existingRelationship.setSalesPointId("POS-001");
+        existingRelationship.setRelationshipType("SELLER");
+        existingRelationship.setOrgUnitId("POS-001");
+        existingRelationship.setStatus("INACTIVE");
+
+        when(userRepository.findByGpsGroupNumber("testuser"))
+                .thenReturn(Optional.of(existingUser));
+
+        when(salesPointRepository.findBySalesPointId("POS-001"))
+                .thenReturn(Optional.of(existingSalesPoint));
+
+        when(relationshipRepository
+                .findByPersonUserIdAndSalesPointIdAndRelationshipType(
+                        "testuser",
+                        "POS-001",
+                        "SELLER"
+                ))
+                .thenReturn(Optional.of(existingRelationship));
+
+        As400SyncResponse result = service.synchronize(request);
+
+        assertEquals(
+                As400SyncCode.RECORD_UPDATED,
+                result.getCode()
+        );
+
+        assertEquals(
+                "ACTIVE",
+                existingRelationship.getStatus()
+        );
+
+        verify(relationshipRepository)
+                .save(existingRelationship);
+    }
+
+    @Test
+    void shouldSynchronizeNewUserWithPingWhenEnabled() {
+        service = createService(true);
+
+        when(userRepository.findByGpsGroupNumber("testuser"))
+                .thenReturn(Optional.empty());
+
+        when(salesPointRepository.findBySalesPointId("POS-001"))
+                .thenReturn(Optional.empty());
+
+        when(relationshipRepository
+                .findByPersonUserIdAndSalesPointIdAndRelationshipType(
+                        anyString(),
+                        anyString(),
+                        anyString()
+                ))
+                .thenReturn(Optional.empty());
+
+        As400SyncResponse result = service.synchronize(request);
+
+        assertEquals(
+                As400SyncCode.RECORD_CREATED,
+                result.getCode()
+        );
+
+        verify(pingUserClient)
+                .createUser(any(UserEntity.class));
+    }
+
+    @Test
+    void shouldMarkPingSynchronizationAsFailedAndRethrow() {
+        service = createService(true);
+
+        RuntimeException pingException =
+                new RuntimeException("Ping unavailable");
+
+        when(userRepository.findByGpsGroupNumber("testuser"))
+                .thenReturn(Optional.empty());
+
+        when(salesPointRepository.findBySalesPointId("POS-001"))
+                .thenReturn(Optional.empty());
+
+        when(relationshipRepository
+                .findByPersonUserIdAndSalesPointIdAndRelationshipType(
+                        anyString(),
+                        anyString(),
+                        anyString()
+                ))
+                .thenReturn(Optional.empty());
+
+        org.mockito.Mockito.doThrow(pingException)
+                .when(pingUserClient)
+                .createUser(any(UserEntity.class));
+
+        RuntimeException result = assertThrows(
+                RuntimeException.class,
+                () -> service.synchronize(request)
+        );
+
+        assertSame(pingException, result);
+
+        verify(userRepository)
+                .save(any(UserEntity.class));
+    }
+
+    private UserSynchronizationService createService(
+            boolean pingEnabled
+    ) {
+        PingScimProperties properties =
+                new PingScimProperties(
+                        pingEnabled,
+                        "https://ping.example.com",
+                        null,
+                        null,
+                        null,
+                        Duration.ofSeconds(5),
+                        Duration.ofSeconds(10)
+                );
+
+        return new UserSynchronizationService(
+                userRepository,
+                salesPointRepository,
+                relationshipRepository,
+                pingUserClient,
+                properties
+        );
+    }
+
+    private UserEntity existingUser() {
+        UserEntity user = new UserEntity();
+
+        user.setUserId("testuser");
+        user.setUsername("testuser");
+        user.setGpsGroupNumber("testuser");
+        user.setSourcePersonalId("personal-123");
+        user.setEntity("BE");
+        user.setFirstName("Test");
+        user.setLastName("User");
+        user.setEmail("test.user@example.com");
+        user.setPhoneNumber("+32123456789");
+        user.setLanguage("EN");
+        user.setStatus("40");
+
+        return user;
+    }
+}
+```
+
+## Potential Mockito issue with nested DTO calls
+
+The test above uses calls such as:
+
+```java
+request.getMetadata().getCorrelationId()
+```
+
+Your `request` mock will return `null` unless the nested objects are separately mocked.
+
+The simplest fix is to declare the request with deep stubs:
+
+```java
+@Mock(answer = Answers.RETURNS_DEEP_STUBS)
+private As400UserSnapshotRequest request;
+```
+
+Required import:
+
+```java
+import org.mockito.Answers;
+```
+
+Then this works:
+
+```java
+when(request.getMetadata().getCorrelationId())
+        .thenReturn("correlation-123");
+```
+
+Alternatively, create separate mocks for metadata, source and person. Separate mocks are cleaner, but deep stubs keep this first test class shorter.
+
+---
+
+# 3. Improve the disabled Ping block formatting
+
+Your current code has this on one line:
+
+```java
+if (!enabled) {
+    log.info(...);return;
+}
+```
+
+Change it to:
+
+```java
+if (!enabled) {
+    log.info(
+            "Ping SCIM integration is disabled. Skipping userId={}",
+            user.getUserId()
+    );
+    return;
+}
+```
+
+This avoids formatting and Sonar readability issues.
+
+---
+
+# 4. Use a constant for the maximum error length
 
 Replace:
 
 ```java
-apiClient.setBearerToken(properties.bearerToken());
+int maximumLength = 2000;
 ```
 
-with:
+with a class constant:
 
 ```java
-apiClient.addDefaultHeader(
-        "Authorization",
-        "Bearer " + bearerToken
-);
+private static final int MAXIMUM_PING_ERROR_LENGTH = 2000;
 ```
 
-Final version:
+Then:
 
 ```java
-@Configuration
-@EnableConfigurationProperties(PingScimProperties.class)
-public class PingClientConfiguration {
+private String limitErrorMessage(String message) {
+    if (message == null) {
+        return null;
+    }
 
-    @Bean
-    public ApiClient pingApiClient(
-            PingScimProperties properties
-    ) {
-        ApiClient apiClient = new ApiClient();
-        apiClient.setBasePath(properties.baseUrl());
-
-        String bearerToken = properties.bearerToken();
-
-        if (bearerToken != null && !bearerToken.isBlank()) {
-            apiClient.addDefaultHeader(
-                    "Authorization",
-                    "Bearer " + bearerToken
+    return message.length() <= MAXIMUM_PING_ERROR_LENGTH
+            ? message
+            : message.substring(
+                    0,
+                    MAXIMUM_PING_ERROR_LENGTH
             );
-        }
-
-        return apiClient;
-    }
-
-    @Bean
-    public PartnersBeAp74737ResourceTypeApi
-            partnersBeAp74737ResourceTypeApi(
-                    ApiClient pingApiClient
-            ) {
-        return new PartnersBeAp74737ResourceTypeApi(
-                pingApiClient
-        );
-    }
 }
 ```
 
-This is appropriate when the server requires a bearer token but the generated OpenAPI specification did not declare bearer authentication correctly.
-
-## Updated test
-
-Do not call `getBearerToken()` or inspect an authentication object. Test that the configuration completes without throwing and that the base path is set:
+You can cover all three branches through Ping failure tests:
 
 ```java
 @Test
-void shouldCreateApiClientWithBearerToken() {
-    PingScimProperties properties = properties(
-            "https://ping.example.com",
-            "test-token"
+void shouldLimitLongPingErrorMessage() {
+    service = createService(true);
+
+    String longMessage = "x".repeat(2500);
+
+    when(userRepository.findByGpsGroupNumber("testuser"))
+            .thenReturn(Optional.empty());
+
+    when(salesPointRepository.findBySalesPointId("POS-001"))
+            .thenReturn(Optional.empty());
+
+    when(relationshipRepository
+            .findByPersonUserIdAndSalesPointIdAndRelationshipType(
+                    anyString(),
+                    anyString(),
+                    anyString()
+            ))
+            .thenReturn(Optional.empty());
+
+    org.mockito.Mockito.doThrow(
+            new RuntimeException(longMessage)
+    ).when(pingUserClient)
+            .createUser(any(UserEntity.class));
+
+    assertThrows(
+            RuntimeException.class,
+            () -> service.synchronize(request)
     );
 
-    ApiClient result =
-            configuration.pingApiClient(properties);
+    org.mockito.ArgumentCaptor<UserEntity> captor =
+            org.mockito.ArgumentCaptor.forClass(UserEntity.class);
 
-    assertNotNull(result);
+    verify(userRepository, org.mockito.Mockito.atLeast(2))
+            .save(captor.capture());
+
+    UserEntity savedUser =
+            captor.getAllValues()
+                    .get(captor.getAllValues().size() - 1);
+
+    assertEquals("FAILED", savedUser.getPingSyncStatus());
+    assertNotNull(savedUser.getPingLastError());
     assertEquals(
-            "https://ping.example.com",
-            result.getBasePath()
+            2000,
+            savedUser.getPingLastError().length()
     );
 }
 ```
 
-Keep the blank and null tests:
-
-```java
-@Test
-void shouldCreateApiClientWhenBearerTokenIsBlank() {
-    PingScimProperties properties = properties(
-            "https://ping.example.com",
-            " "
-    );
-
-    ApiClient result =
-            configuration.pingApiClient(properties);
-
-    assertNotNull(result);
-    assertEquals(
-            "https://ping.example.com",
-            result.getBasePath()
-    );
-}
-
-@Test
-void shouldCreateApiClientWhenBearerTokenIsNull() {
-    PingScimProperties properties = properties(
-            "https://ping.example.com",
-            null
-    );
-
-    ApiClient result =
-            configuration.pingApiClient(properties);
-
-    assertNotNull(result);
-    assertEquals(
-            "https://ping.example.com",
-            result.getBasePath()
-    );
-}
-```
-
-## Why this happened
-
-The generated client was likely produced from an OpenAPI definition that does not contain something equivalent to:
-
-```yaml
-components:
-  securitySchemes:
-    bearerAuth:
-      type: http
-      scheme: bearer
-```
-
-Therefore, this fails:
-
-```java
-apiClient.setBearerToken(token);
-```
-
-because the generated client cannot find a registered bearer authentication handler.
-
-Using:
-
-```java
-apiClient.addDefaultHeader(
-    "Authorization",
-    "Bearer " + token
-);
-```
-
-will send the same HTTP header without relying on the generated authentication metadata. Do not log `apiClient`, the header map, or the token.
+The key production fix is the aggregation of the relationship flags. Without that fix, tests for `RECORD_UPDATED` will correctly fail because that response branch is currently unreachable.
