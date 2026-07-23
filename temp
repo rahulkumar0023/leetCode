@@ -1,4 +1,139 @@
+That’s fine — `UserRequest` was only an example name. In **your code**, you should use the class that receives the incoming user data from AS400 or your controller.
 
+From your screenshots, you already have:
+
+```java
+UserEntity
+```
+
+So for now, the simplest version is: call Ping after saving a `UserEntity`.
+
+## Use your existing `UserEntity`
+
+In the service where you currently create/save the user, inject `PingUserClient`:
+
+```java
+@Service
+@AllArgsConstructor
+public class UserService {
+
+    private final UserRepository userRepository;
+    private final PingUserClient pingUserClient;
+
+    @Transactional
+    public UserEntity createUser(UserEntity user) {
+        UserEntity savedUser = userRepository.save(user);
+
+        var pingResponse = pingUserClient.createUser(savedUser);
+
+        if (pingResponse == null || pingResponse.getId() == null) {
+            throw new PingIntegrationException(
+                    "Ping returned no resource id for user: "
+                            + savedUser.getUserId()
+            );
+        }
+
+        savedUser.setPingResourceId(pingResponse.getId());
+
+        return userRepository.save(savedUser);
+    }
+}
+```
+
+If your `UserEntity` does **not** yet have this field:
+
+```java
+private String pingResourceId;
+```
+
+then either add it, or skip storing the Ping id for now.
+
+## If your real incoming class is different
+
+Look at the method where user creation starts. It may be something like:
+
+```java
+createUser(UserEntity user)
+```
+
+or:
+
+```java
+createUser(UserSnapshot snapshot)
+```
+
+or:
+
+```java
+saveUser(As400UserDto dto)
+```
+
+Whatever that parameter class is, use that instead of `UserRequest`.
+
+For example, if you already have `UserEntity`:
+
+```java
+@Transactional
+public UserEntity save(UserEntity user) {
+    boolean isNewUser = user.getId() == null;
+
+    UserEntity savedUser = userRepository.save(user);
+
+    if (isNewUser) {
+        var pingResponse = pingUserClient.createUser(savedUser);
+        savedUser.setPingResourceId(pingResponse.getId());
+        savedUser = userRepository.save(savedUser);
+    }
+
+    return savedUser;
+}
+```
+
+## If user is created through AS400 snapshot
+
+Then the pattern is:
+
+```java
+@Transactional
+public UserEntity processSnapshot(SomeExistingSnapshotClass snapshot) {
+    Optional<UserEntity> existingUser =
+            userRepository.findByUserId(snapshot.getUserId());
+
+    if (existingUser.isPresent()) {
+        UserEntity user = existingUser.get();
+
+        // update fields here
+        user.setFirstName(snapshot.getFirstName());
+        user.setLastName(snapshot.getLastName());
+        user.setEmail(snapshot.getEmail());
+        user.setPhoneNumber(snapshot.getPhoneNumber());
+        user.setStatus(snapshot.getStatus());
+
+        return userRepository.save(user);
+    }
+
+    UserEntity user = new UserEntity();
+    user.setUserId(snapshot.getUserId());
+    user.setFirstName(snapshot.getFirstName());
+    user.setLastName(snapshot.getLastName());
+    user.setEmail(snapshot.getEmail());
+    user.setPhoneNumber(snapshot.getPhoneNumber());
+    user.setStatus(snapshot.getStatus());
+
+    UserEntity savedUser = userRepository.save(user);
+
+    var pingResponse = pingUserClient.createUser(savedUser);
+    savedUser.setPingResourceId(pingResponse.getId());
+
+    return userRepository.save(savedUser);
+}
+```
+
+So no new `UserRequest` class is required. Replace `SomeExistingSnapshotClass` with whatever class you already use for the incoming AS400 payload.
+
+
+
+:::::---
 
 Yes, your `PingUserClient` is already correctly wrapping the generated Ping API.
 
