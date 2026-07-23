@@ -1,104 +1,112 @@
-Your build is failing because this mapper test expects the Ping request’s `cn` field to contain `"John Doe"`, but the mapper returns `null`:
+The controller implementation has changed to return **translation keys**, but your tests still expect the old translated French text.
+
+Your controller now adds:
+
+```java
+mv.addObject("pageTitleKey", "error.technical.pageTitle");
+mv.addObject("titleKey", "error.technical.title");
+mv.addObject("messageKey", "error.technical.message");
+mv.addObject("strongMessageKey", "error.technical.strongMessage");
+```
+
+But the test is still checking:
+
+```java
+.containsEntry("pageTitle", "Erreur technique")
+.containsEntry("title", "Oups, un problème technique est survenu.")
+.containsEntry("message", "Nous n'avons pas pu charger...")
+```
+
+That is why Maven says:
 
 ```text
-PingUserMapperTest.shouldMapUserToPingCreateRequest:25
-expected: "John Doe"
-but was: null
+could not find the following map entries:
+["pageTitle"="Erreur technique"]
 ```
 
-Make sure your create mapper explicitly sets `cn`:
+## Update `ErrorControllerTest`
 
-```java
-public PartnersBEAP74737Get200ResponseResourcesInner toPingUser(
-        UserEntity user
-) {
-    Objects.requireNonNull(user, "User must not be null");
-
-    PartnersBEAP74737Get200ResponseResourcesInner request =
-            new PartnersBEAP74737Get200ResponseResourcesInner();
-
-    request.setSchemas(Set.of(
-            PartnersBEAP74737Get200ResponseResourcesInner.SchemasEnum
-                    .fromValue(RESOURCE_SCHEMA)
-    ));
-
-    request.setGivenName(trimToNull(user.getFirstName()));
-    request.setSn(trimToNull(user.getLastName()));
-    request.setCn(buildCommonName(user)); // This is currently missing or ineffective
-    request.setMail(trimToNull(user.getEmail()));
-    request.setMobile(trimToNull(user.getPhoneNumber()));
-    request.setStatus(mapStatus(user.getStatus()));
-
-    return request;
-}
-```
-
-With:
-
-```java
-private String buildCommonName(UserEntity user) {
-    return Stream.of(
-                    user.getFirstName(),
-                    user.getLastName()
-            )
-            .map(this::trimToNull)
-            .filter(Objects::nonNull)
-            .collect(Collectors.joining(" "));
-}
-```
-
-Required import:
-
-```java
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
-```
-
-Your test should resemble:
+Use the translation keys returned by the controller.
 
 ```java
 @Test
-void shouldMapUserToPingCreateRequest() {
-    UserEntity user = new UserEntity();
-    user.setFirstName("John");
-    user.setLastName("Doe");
-    user.setEmail("john.doe@example.com");
-    user.setPhoneNumber("123456789");
-    user.setStatus("40");
+void technicalError_shouldReturnTechnicalErrorPage() {
+    ModelAndView result = errorController.technicalError();
 
-    var result = mapper.toPingUser(user);
+    assertThat(result.getViewName()).isEqualTo("views/ui-error");
 
-    assertThat(result.getGivenName()).isEqualTo("John");
-    assertThat(result.getSn()).isEqualTo("Doe");
-    assertThat(result.getCn()).isEqualTo("John Doe");
-    assertThat(result.getMail()).isEqualTo("john.doe@example.com");
-    assertThat(result.getMobile()).isEqualTo("123456789");
-    assertThat(result.getStatus()).isEqualTo("ACTIVE");
+    assertThat(result.getModel())
+            .containsEntry("pageTitleKey", "error.technical.pageTitle")
+            .containsEntry("iconPath", "/images/icons/tools.svg")
+            .containsEntry("titleKey", "error.technical.title")
+            .containsEntry("messageKey", "error.technical.message")
+            .containsEntry(
+                    "strongMessageKey",
+                    "error.technical.strongMessage"
+            );
 }
 ```
 
-Also verify that the test sets both `firstName` and `lastName`. If your entity actually uses differently named fields, such as `givenName` or `surname`, then `buildCommonName()` must use those real entity getters.
+And for the no-sales-point error:
 
-The later error:
+```java
+@Test
+void noSalesPoint_shouldReturnNoSalesPointErrorPage() {
+    ModelAndView result = errorController.noSalesPoint();
+
+    assertThat(result.getViewName()).isEqualTo("views/ui-error");
+
+    assertThat(result.getModel())
+            .containsEntry(
+                    "pageTitleKey",
+                    "error.noSalesPoint.pageTitle"
+            )
+            .containsEntry(
+                    "iconPath",
+                    "/images/icons/warning.svg"
+            )
+            .containsEntry(
+                    "titleKey",
+                    "error.noSalesPoint.title"
+            )
+            .containsEntry(
+                    "messageKey",
+                    "error.noSalesPoint.message"
+            )
+            .containsEntry(
+                    "strongMessageKey",
+                    "error.noSalesPoint.strongMessage"
+            );
+}
+```
+
+## Why this is the correct test now
+
+The controller should not decide whether the content is French, Dutch, or another language. It now sends message keys to the Thymeleaf template, and Spring resolves them according to the active locale.
+
+Your template should therefore use expressions like:
+
+```html
+<title th:text="#{${pageTitleKey}}"></title>
+
+<h1 th:text="#{${titleKey}}"></h1>
+
+<p th:text="#{${messageKey}}"></p>
+
+<strong th:text="#{${strongMessageKey}}"></strong>
+```
+
+So the responsibilities are now:
 
 ```text
-ls: target/*SNAPSHOT.jar: No such file or directory
+Controller test:
+checks the correct translation keys
+
+Message bundle:
+contains the translated text
+
+Template:
+resolves the key using the current locale
 ```
 
-is only a consequence of the Maven test failure. Maven never produced the JAR, so the Docker build cannot find it. Fix the mapper test first, then run:
-
-```bash
-mvn clean test
-```
-
-and after it passes:
-
-```bash
-mvn clean package
-```
-
-The output also reports `Errors: 8`, so after fixing `cn`, inspect the full Surefire reports for any remaining errors:
-
-```bash
-grep -R "error\|failure" target/surefire-reports
-```
+The two failing tests shown in the terminal are therefore fixed by updating the assertions, not by changing `ErrorController`.
