@@ -1,3 +1,75 @@
+Your test fails because the mocked Ping response has **no ID**.
+
+You create the response here:
+
+```java
+PartnersBEAP74737Get200ResponseResourcesInner pingResponse =
+        new PartnersBEAP74737Get200ResponseResourcesInner();
+```
+
+But the line that sets the ID is commented out:
+
+```java
+// pingResponse.setId("ping-resource-123");
+```
+
+Your service then checks:
+
+```java
+if (pingResponse == null || pingResponse.getId() == null) {
+    throw new PingIntegrationException(...);
+}
+```
+
+That is why Maven reports:
+
+```text
+Ping returned no resource id for user: gps000001
+```
+
+Fix the test:
+
+```java
+@Test
+void shouldCallPingAfterCreatingUser() {
+    UserEntity user = new UserEntity();
+    user.setUserId("gps000001");
+
+    when(userRepository.save(user)).thenReturn(user);
+
+    PartnersBEAP74737Get200ResponseResourcesInner pingResponse =
+            new PartnersBEAP74737Get200ResponseResourcesInner();
+
+    pingResponse.setId("ping-resource-123");
+
+    when(pingUserClient.createUser(user)).thenReturn(pingResponse);
+
+    UserEntity result = userService.createUser(user);
+
+    verify(userRepository).save(user);
+    verify(pingUserClient).createUser(user);
+
+    assertThat(result.getPingResourceId())
+            .isEqualTo("ping-resource-123");
+}
+```
+
+If `setId(...)` does not accept a `String`, check the generated model. The ID may be typed as `Long`. In that case use:
+
+```java
+pingResponse.setId(123L);
+```
+
+and make your entity field match the generated ID type, or convert it before storing:
+
+```java
+savedUser.setPingResourceId(String.valueOf(pingResponse.getId()));
+```
+
+Your terminal confirms the production logic is behaving correctly; the mock response was simply incomplete.
+
+
+-------------
 Yes — update two things:
 
 1. Use a larger DB column for `ping_resource_id`
