@@ -1,453 +1,195 @@
-Yes — add a config flag and only call Ping when it is enabled.
+Yes — this is the actual snapshot flow. Since `synchronize(...)` already has a `userCreated` boolean, call Ping there only when:
 
-## 1. Add flag in `application.yml`
+```java
+userCreated && pingScimProperties.enabled()
+```
+
+Do not put the web-service call inside `populateNewUser(...)`; that method should only populate fields.
+
+Inject these dependencies into `UserSynchronizationService`:
+
+```java
+private final PingUserClient pingUserClient;
+private final PingScimProperties pingScimProperties;
+```
+
+Then, after the user and relationships have been saved, but before the response-building blocks around line 66, add:
+
+```java
+if (userCreated) {
+    synchronizeNewUserWithPing(user);
+}
+```
+
+Your flow should look approximately like this:
+
+```java
+@Transactional
+public As400SyncResponse synchronize(As400UserSnapshotRequest request) {
+
+    // Your existing validation and lookup logic...
+
+    boolean userCreated = false;
+    boolean anyRelationshipCreated = false;
+    boolean anySalesPointChanged = false;
+    boolean anyRelationshipChanged = false;
+
+    UserEntity user;
+
+    // Your existing logic that creates or loads the user...
+    // When a new user is created:
+    //
+    // user = new UserEntity();
+    // populateNewUser(user, request);
+    // user = userRepository.save(user);
+    // userCreated = true;
+
+    // Your existing sales-point and relationship logic...
+
+    if (userCreated) {
+        synchronizeNewUserWithPing(user);
+    }
+
+    if (userCreated || anyRelationshipCreated) {
+        return As400SyncResponse.builder()
+                .status("ACCEPTED")
+                .code(As400SyncCode.RECORD_CREATED)
+                .message("User snapshot created successfully.")
+                .correlationId(correlationId)
+                .partnerRepositoryRecordId(user.getUserId())
+                .build();
+    }
+
+    if (anySalesPointChanged || anyRelationshipChanged) {
+        return As400SyncResponse.builder()
+                .status("ACCEPTED")
+                .code(As400SyncCode.RECORD_UPDATED)
+                .message("User snapshot updated successfully.")
+                .correlationId(correlationId)
+                .partnerRepositoryRecordId(user.getUserId())
+                .build();
+    }
+
+    return As400SyncResponse.builder()
+            .status("ACCEPTED")
+            .code(As400SyncCode.NO_CHANGE)
+            .message("Snapshot received but no effective change was detected.")
+            .correlationId(correlationId)
+            .partnerRepositoryRecordId(user.getUserId())
+            .build();
+}
+```
+
+Add this private method to the same service:
+
+```java
+private void synchronizeNewUserWithPing(UserEntity user) {
+    if (!pingScimProperties.enabled()) {
+        log.info(
+                "Ping SCIM integration is disabled. Skipping userId={}",
+                user.getUserId()
+        );
+        return;
+    }
+
+    log.info(
+            "Ping SCIM integration enabled. Creating userId={} in Ping",
+            user.getUserId()
+    );
+
+    try {
+        pingUserClient.createUser(user);
+
+        user.setPingSyncStatus("SUCCESS");
+        user.setPingLastSyncedAt(Instant.now());
+        user.setPingLastError(null);
+
+        userRepository.save(user);
+
+        log.info(
+                "Ping user creation completed for userId={}",
+                user.getUserId()
+        );
+    } catch (RuntimeException exception) {
+        user.setPingSyncStatus("FAILED");
+        user.setPingLastError(limitErrorMessage(exception.getMessage()));
+        userRepository.save(user);
+
+        log.error(
+                "Ping user creation failed for userId={}",
+                user.getUserId(),
+                exception
+        );
+
+        throw exception;
+    }
+}
+```
+
+Add a helper so an unexpectedly long exception does not exceed the database column:
+
+```java
+private String limitErrorMessage(String message) {
+    if (message == null) {
+        return null;
+    }
+
+    int maximumLength = 2000;
+    return message.length() <= maximumLength
+            ? message
+            : message.substring(0, maximumLength);
+}
+```
+
+Required imports:
+
+```java
+import java.time.Instant;
+
+import lombok.extern.slf4j.Slf4j;
+```
+
+And make sure the class has:
+
+```java
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class UserSynchronizationService {
+```
+
+Your properties:
 
 ```yaml
 ping:
   scim:
     enabled: ${PING_SCIM_ENABLED:false}
-    base-url: ${PING_SCIM_BASE_URL:}
-    bearer-token: ${PING_SCIM_BEARER_TOKEN:}
-    username: ${PING_SCIM_USERNAME:}
-    password: ${PING_SCIM_PASSWORD:}
-    connect-timeout: 5s
-    read-timeout: 10s
 ```
 
-Keep it `false` by default so local/dev does not call Ping unless you explicitly enable it.
+For local testing without Ping:
 
-## 2. Update `PingScimProperties`
+```yaml
+PING_SCIM_ENABLED: "false"
+```
+
+To enable the real call later:
+
+```yaml
+PING_SCIM_ENABLED: "true"
+```
+
+The important placement is:
 
 ```java
-package com.bnpp.pf.partner.repository.ping;
-
-import java.time.Duration;
-
-import org.springframework.boot.context.properties.ConfigurationProperties;
-
-@ConfigurationProperties(prefix = "ping.scim")
-public record PingScimProperties(
-        boolean enabled,
-        String baseUrl,
-        String bearerToken,
-        String username,
-        String password,
-        Duration connectTimeout,
-        Duration readTimeout
-) {
+if (userCreated) {
+    synchronizeNewUserWithPing(user);
 }
 ```
 
-## 3. Use the flag before calling Ping
-
-In the service where you create the user:
+immediately before your existing:
 
 ```java
-@Service
-@AllArgsConstructor
-@Slf4j
-public class UserService {
-
-    private final UserRepository userRepository;
-    private final PingUserClient pingUserClient;
-    private final PingScimProperties pingScimProperties;
-
-    @Transactional
-    public UserEntity createUser(UserEntity user) {
-        UserEntity savedUser = userRepository.save(user);
-
-        if (!pingScimProperties.enabled()) {
-            log.info(
-                    "Ping SCIM integration is disabled. Skipping Ping create for userId={}",
-                    savedUser.getUserId()
-            );
-            return savedUser;
-        }
-
-        try {
-            pingUserClient.createUser(savedUser);
-
-            savedUser.setPingSyncStatus("SUCCESS");
-            savedUser.setPingLastSyncedAt(Instant.now());
-            savedUser.setPingLastError(null);
-
-            return userRepository.save(savedUser);
-        } catch (RuntimeException exception) {
-            savedUser.setPingSyncStatus("FAILED");
-            savedUser.setPingLastError(exception.getMessage());
-
-            userRepository.save(savedUser);
-
-            throw exception;
-        }
-    }
-}
+if (userCreated || anyRelationshipCreated) {
 ```
 
-Imports:
-
-```java
-import java.time.Instant;
-
-import lombok.AllArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-```
-
-## 4. If your snapshot flow has create/update branches
-
-Put the same guard only around the Ping call:
-
-```java
-if (pingScimProperties.enabled()) {
-    pingUserClient.createUser(savedUser);
-
-    savedUser.setPingSyncStatus("SUCCESS");
-    savedUser.setPingLastSyncedAt(Instant.now());
-    savedUser.setPingLastError(null);
-
-    savedUser = userRepository.save(savedUser);
-} else {
-    log.info(
-            "Ping SCIM integration is disabled. Skipping Ping create for userId={}",
-            savedUser.getUserId()
-    );
-}
-```
-
-For update:
-
-```java
-if (pingScimProperties.enabled()
-        && savedUser.getPingResourceId() != null
-        && !savedUser.getPingResourceId().isBlank()) {
-    pingUserClient.updateUser(savedUser.getPingResourceId(), savedUser);
-
-    savedUser.setPingSyncStatus("SUCCESS");
-    savedUser.setPingLastSyncedAt(Instant.now());
-    savedUser.setPingLastError(null);
-
-    savedUser = userRepository.save(savedUser);
-}
-```
-
-## 5. Update the test
-
-When you want to verify Ping is called:
-
-```java
-when(pingScimProperties.enabled()).thenReturn(true);
-```
-
-When you want to verify Ping is skipped:
-
-```java
-when(pingScimProperties.enabled()).thenReturn(false);
-
-userService.createUser(user);
-
-verifyNoInteractions(pingUserClient);
-```
-
-So your service test class needs:
-
-```java
-@Mock
-private PingScimProperties pingScimProperties;
-```
-
-This way local/default behavior is safe, and Ping is called only when:
-
-```bash
-PING_SCIM_ENABLED=true
-```
-
-
-
-------------------
-Your snapshot endpoint is succeeding with `200 OK`, but the logs do not show any evidence that `PingUserClient.createUser(...)` is being called.
-
-That usually means the Ping integration was added to a different method than the one used by:
-
-```text
-POST /internal/users/snapshots
-```
-
-The most likely flow is:
-
-```text
-Controller
-  -> snapshot service
-  -> save/update user
-```
-
-while you added the Ping call to a separate `createUser(...)` method that the snapshot flow never uses.
-
-## 1. Add a log at the beginning of `PingUserClient.createUser`
-
-```java
-import lombok.extern.slf4j.Slf4j;
-
-@Slf4j
-@Component
-@AllArgsConstructor
-public class PingUserClient {
-
-    private final PartnersBeAp74737ResourceTypeApi pingApi;
-    private final PingUserMapper pingUserMapper;
-
-    public PartnersBEAP74737Get200ResponseResourcesInner createUser(
-            UserEntity user
-    ) {
-        log.info(
-                "Calling Ping create API for userId={}",
-                user.getUserId()
-        );
-
-        var request = pingUserMapper.toPingUser(user);
-
-        try {
-            var response = pingApi.partnersBEAP74737Post(
-                    request,
-                    null,
-                    null
-            );
-
-            log.info(
-                    "Ping create API completed for userId={}",
-                    user.getUserId()
-            );
-
-            return response;
-        } catch (RuntimeException exception) {
-            log.error(
-                    "Ping create API failed for userId={}",
-                    user.getUserId(),
-                    exception
-            );
-
-            throw new PingIntegrationException(
-                    "Failed to create user in Ping: " + user.getUserId(),
-                    exception
-            );
-        }
-    }
-}
-```
-
-After redeploying, submit the snapshot again. If you do not see:
-
-```text
-Calling Ping create API for userId=...
-```
-
-then the snapshot flow is not reaching this method.
-
-## 2. Put the Ping call in the snapshot creation branch
-
-Find the method handling the snapshot request. It likely contains logic similar to:
-
-```java
-Optional<UserEntity> existingUser =
-        userRepository.findByUserId(userId);
-```
-
-The Ping call must be added to the branch that creates a new `UserEntity`.
-
-```java
-@Transactional
-public UserEntity processSnapshot(UserSnapshot snapshot) {
-    Optional<UserEntity> existingUser =
-            userRepository.findByUserId(
-                    snapshot.getSource().getGpsGroupNumber()
-            );
-
-    if (existingUser.isPresent()) {
-        return updateExistingUser(
-                existingUser.get(),
-                snapshot
-        );
-    }
-
-    UserEntity newUser = mapToUserEntity(snapshot);
-    UserEntity savedUser = userRepository.save(newUser);
-
-    log.info(
-            "New partner-repository user created, calling Ping. userId={}",
-            savedUser.getUserId()
-    );
-
-    pingUserClient.createUser(savedUser);
-
-    savedUser.setPingSyncStatus("SUCCESS");
-    savedUser.setPingLastSyncedAt(Instant.now());
-    savedUser.setPingLastError(null);
-
-    return userRepository.save(savedUser);
-}
-```
-
-The important part is:
-
-```java
-pingUserClient.createUser(savedUser);
-```
-
-inside the actual snapshot flow.
-
-## 3. Check whether the user already exists
-
-You sent the snapshot twice. The logs show two successful requests:
-
-```text
-15:31:34 POST ... 200 OK
-15:32:26 POST ... 200 OK
-```
-
-If the first request already created the user, the second request may follow the update branch, not the create branch.
-
-Add logging around the existence check:
-
-```java
-boolean userExists =
-        userRepository.existsByUserId(userId);
-
-log.info(
-        "Processing snapshot userId={}, existingUser={}",
-        userId,
-        userExists
-);
-```
-
-For a clean creation test, use a new unique value, for example:
-
-```json
-"gps_group_number": "GPS000099"
-```
-
-Do not keep testing with the same user ID if Ping is only called for new users.
-
-## 4. Your request status may cause a mapper problem
-
-Your payload contains:
-
-```json
-"status": "40"
-```
-
-But the mapper we discussed accepted values like:
-
-```text
-ACTIVE
-INACTIVE
-DISABLED
-DELETED
-```
-
-If Ping is eventually called, this code may fail:
-
-```java
-mapStatus(user.getStatus())
-```
-
-because `"40"` is unsupported.
-
-Map the AS400 status explicitly:
-
-```java
-private String mapStatus(Object status) {
-    if (status == null) {
-        return null;
-    }
-
-    String value = status.toString().trim();
-
-    return switch (value) {
-        case "40" -> "ACTIVE";
-        case "50", "60", "INACTIVE", "DISABLED", "DELETED" -> "INACTIVE";
-        case "ACTIVE" -> "ACTIVE";
-        default -> throw new IllegalArgumentException(
-                "Unsupported user status for Ping: " + value
-        );
-    };
-}
-```
-
-Use the real AS400 status mapping agreed by your business team.
-
-## 5. Confirm Spring injected the real `PingUserClient`
-
-Your snapshot service must have it as a constructor dependency:
-
-```java
-@Service
-@AllArgsConstructor
-@Slf4j
-public class UserService {
-
-    private final UserRepository userRepository;
-    private final PingUserClient pingUserClient;
-}
-```
-
-If you manually instantiate the service anywhere with:
-
-```java
-new UserService(...)
-```
-
-the Ping dependency may not be present. The service should always be created by Spring.
-
-## 6. Add logs before and after the generated API call
-
-Use this sequence:
-
-```java
-log.info("Before local user save: {}", user.getUserId());
-
-UserEntity savedUser = userRepository.save(user);
-
-log.info("After local user save: {}", savedUser.getUserId());
-
-log.info("Before Ping create call: {}", savedUser.getUserId());
-
-pingUserClient.createUser(savedUser);
-
-log.info("After Ping create call: {}", savedUser.getUserId());
-```
-
-That will identify exactly where the flow stops.
-
-## 7. Your current logs only prove the endpoint succeeded
-
-This line:
-
-```text
-POST /partner-repository/internal/users/snapshots ... 200 OK
-```
-
-only proves that the HTTP request completed. It does not prove that:
-
-* a new user was inserted;
-* the create branch was used;
-* Ping was called;
-* Ping returned successfully.
-
-Also, this startup line:
-
-```text
-Liquibase did not run because 'shouldRun' property was set to false
-```
-
-is separate. It means your new Ping columns may not have been created by Liquibase in this environment. Check the database schema before relying on fields such as:
-
-```text
-ping_resource_id
-ping_sync_status
-ping_last_synced_at
-ping_last_error
-```
-
-The first correction is to locate the service method behind `/internal/users/snapshots` and place the Ping call directly in its new-user branch.
+This guarantees Ping is called only when the snapshot actually creates a new Partner Repository user.
