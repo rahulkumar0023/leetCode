@@ -1,71 +1,36 @@
-The Mockito stubbing is now correct, but the `RestClient` mock is still **not being injected** into `PartnerRepositoryClient`.
+There are **two separate test failures**.
 
-The error confirms it:
+### 1. `getUserById()` still uses `WebClient`
+
+The error says:
 
 ```text
-Cannot invoke RestClient.get()
-because this.partnerRepoClient is null
+Cannot invoke WebClient.RequestHeadersUriSpec.uri(...)
+because the return value of webClient.get() is null
 ```
 
-Avoid `@InjectMocks` here and construct the class explicitly.
+So `getUserById()` is not using `RestClient`; it still uses the existing `webClient`.
+
+Keep both clients mocked:
 
 ```java
-@ExtendWith(MockitoExtension.class)
-class PartnerRepositoryClientTest {
+@Mock
+private WebClient webClient;
 
-    @Mock
-    private WebClient webClient;
+@Mock
+private WebClient.RequestHeadersUriSpec<?> webClientRequestUriSpec;
 
-    @Mock
-    private RestClient partnerRepoClient;
+@Mock
+private WebClient.RequestHeadersSpec<?> webClientRequestHeadersSpec;
 
-    @Mock
-    private RestClient.RequestHeadersUriSpec<?> requestHeadersUriSpec;
+@Mock
+private WebClient.ResponseSpec webClientResponseSpec;
 
-    @Mock
-    private RestClient.RequestHeadersSpec<?> requestHeadersSpec;
-
-    @Mock
-    private RestClient.ResponseSpec responseSpec;
-
-    private PartnerRepositoryClient partnerRepositoryClient;
-
-    @BeforeEach
-    void setUp() {
-        partnerRepositoryClient =
-                new PartnerRepositoryClient(
-                        webClient,
-                        partnerRepoClient
-                );
-
-        ReflectionTestUtils.setField(
-                partnerRepositoryClient,
-                "baseUrl",
-                "http://partner-repository"
-        );
-    }
-}
+@Mock
+private RestClient partnerRepoClient;
 ```
 
-Remove:
-
-```java
-@InjectMocks
-private PartnerRepositoryClient partnerRepositoryClient;
-```
-
-The constructor order must match the fields in your production class. Based on your class, it is probably:
-
-```java
-public PartnerRepositoryClient(
-        WebClient webClient,
-        RestClient partnerRepoClient
-)
-```
-
-If IntelliJ reports a different constructor, use the exact order it suggests.
-
-Your successful user test should then remain:
+Use the WebClient chain for `shouldGetUserByIdSuccessfully()`:
 
 ```java
 @Test
@@ -74,22 +39,22 @@ void shouldGetUserByIdSuccessfully() {
     expectedResponse.setUserId("testuser");
     expectedResponse.setUsername("testuser");
 
-    doReturn(requestHeadersUriSpec)
-            .when(partnerRepoClient)
+    doReturn(webClientRequestUriSpec)
+            .when(webClient)
             .get();
 
-    doReturn(requestHeadersSpec)
-            .when(requestHeadersUriSpec)
+    doReturn(webClientRequestHeadersSpec)
+            .when(webClientRequestUriSpec)
             .uri(
                     "http://partner-repository/users/{userId}",
                     "testuser"
             );
 
-    when(requestHeadersSpec.retrieve())
-            .thenReturn(responseSpec);
+    when(webClientRequestHeadersSpec.retrieve())
+            .thenReturn(webClientResponseSpec);
 
-    when(responseSpec.body(UserResponse.class))
-            .thenReturn(expectedResponse);
+    when(webClientResponseSpec.bodyToMono(UserResponse.class))
+            .thenReturn(Mono.just(expectedResponse));
 
     UserResponse result =
             partnerRepositoryClient.getUserById("testuser");
@@ -99,43 +64,96 @@ void shouldGetUserByIdSuccessfully() {
 }
 ```
 
-However, check the production implementation carefully. Earlier, your class appeared to contain both:
+Required import:
 
 ```java
-private final WebClient webClient;
-private final RestClient partnerRepoClient;
+import reactor.core.publisher.Mono;
 ```
 
-If both `getApp()` and `getUserById()` now use `partnerRepoClient`, then `WebClient` may no longer be needed. In that case, remove the unused `WebClient` field from production:
+Your production class is therefore mixed at the moment:
 
 ```java
-@RequiredArgsConstructor
-@Component
-public class PartnerRepositoryClient {
+getApp(...)       -> RestClient
+getUserById(...)  -> WebClient
+```
 
-    private final RestClient partnerRepoClient;
+So the tests must reflect that.
 
-    @Value("${partner-repository.base-url}")
-    private String baseUrl;
+---
 
-    // methods
+### 2. The dummy method name is wrong
+
+The second error says:
+
+```text
+NoSuchMethod:
+GlobalExceptionHandlerTest.dummyEndpoint(String)
+```
+
+Your test calls:
+
+```java
+.getDeclaredMethod("dummyEndpoint", String.class);
+```
+
+but the helper method shown lower in the class appears to have a different name, likely:
+
+```java
+dummyMethod(...)
+```
+
+Make the names exactly match.
+
+Use:
+
+```java
+@SuppressWarnings("unused")
+private void dummyEndpoint(
+        @RequestHeader("APP_ID") String appId
+) {
 }
 ```
 
-Then the test setup becomes:
+Then keep:
 
 ```java
-@BeforeEach
-void setUp() {
-    partnerRepositoryClient =
-            new PartnerRepositoryClient(partnerRepoClient);
+Method method = GlobalExceptionHandlerTest.class
+        .getDeclaredMethod("dummyEndpoint", String.class);
+```
 
-    ReflectionTestUtils.setField(
-            partnerRepositoryClient,
-            "baseUrl",
-            "http://partner-repository"
-    );
+The corrected test is:
+
+```java
+@Test
+void shouldHandleMissingRequestHeaderException() throws Exception {
+    Method method = GlobalExceptionHandlerTest.class
+            .getDeclaredMethod(
+                    "dummyEndpoint",
+                    String.class
+            );
+
+    MethodParameter methodParameter =
+            new MethodParameter(method, 0);
+
+    MissingRequestHeaderException exception =
+            new MissingRequestHeaderException(
+                    "APP_ID",
+                    methodParameter
+            );
+
+    Map<String, String> response =
+            handler.handleMissingRequestHeader(exception);
+
+    assertNotNull(response);
+    assertTrue(response.containsKey("message"));
+    assertTrue(response.get("message").contains("APP_ID"));
+}
+
+@SuppressWarnings("unused")
+private void dummyEndpoint(
+        @RequestHeader("APP_ID") String appId
+) {
 }
 ```
 
-The `dump files` message at the bottom is just Maven Surefire reporting the failed test run; it is not the root problem.
+After these changes, the two current errors should be resolved.
