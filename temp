@@ -1,3 +1,91 @@
+Your test now fails because `userRepository.save(user)` is called **twice**, but the test expects it only once.
+
+The failure shows the same entity after it was updated with:
+
+```text
+pingSyncStatus=SUCCESS
+pingResourceId=ping-resource-123
+```
+
+Your service flow is effectively:
+
+```java
+UserEntity savedUser = userRepository.save(user);   // first save
+
+// call Ping and update fields
+
+return userRepository.save(savedUser);              // second save
+```
+
+So this verification is wrong:
+
+```java
+verify(userRepository).save(user);
+```
+
+Change it to:
+
+```java
+verify(userRepository, times(2)).save(user);
+```
+
+Full corrected test:
+
+```java
+@Test
+void shouldCallPingAfterCreatingUser() {
+    UserEntity user = new UserEntity();
+    user.setUserId("gps000001");
+
+    when(userRepository.save(user)).thenReturn(user);
+
+    PartnersBEAP74737Get200ResponseResourcesInner pingResponse =
+            new PartnersBEAP74737Get200ResponseResourcesInner();
+
+    Meta meta = new Meta();
+    meta.setLocation(
+            "https://ping.example/scim/v2/partners-BE-AP74737/ping-resource-123"
+    );
+    pingResponse.setMeta(meta);
+
+    when(pingUserClient.createUser(user)).thenReturn(pingResponse);
+
+    UserEntity result = userService.createUser(user);
+
+    verify(userRepository, times(2)).save(user);
+    verify(pingUserClient).createUser(user);
+
+    assertThat(result.getPingResourceId())
+            .isEqualTo("ping-resource-123");
+
+    assertThat(result.getPingSyncStatus())
+            .isEqualTo("SUCCESS");
+
+    assertThat(result.getPingLastSyncedAt())
+            .isNotNull();
+
+    assertThat(result.getPingLastError())
+            .isNull();
+}
+```
+
+Imports:
+
+```java
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+```
+
+A slightly better test avoids depending too much on the exact number of saves:
+
+```java
+verify(userRepository, atLeastOnce()).save(user);
+verify(pingUserClient).createUser(user);
+```
+
+But because your current design intentionally saves before and after Ping, `times(2)` is precise and valid.
+
+
 That means `meta` is probably **read-only in the generated model**, so don’t use `setMeta(...)` in your test.
 
 For now, use a field that **does have a setter** in the response model. From your screenshot, `cn` has both getter/setter:
