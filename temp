@@ -1,129 +1,104 @@
-Do **not hardcode the bearer token** in Java, `application.yml`, Helm values committed to Git, or the generated client.
+Your build is failing because this mapper test expects the Ping request’s `cn` field to contain `"John Doe"`, but the mapper returns `null`:
 
-Also, the token shown in your screenshot should be treated as exposed. Ask the Ping/API team to **revoke or rotate it** before continuing. OWASP recommends invalidating exposed tokens and injecting replacements through a secrets manager. ([OWASP Foundation][1])
-
-First confirm with the Ping team which authentication model this API uses:
-
-* **Static token:** store it as a secret and inject it at runtime.
-* **OAuth access token:** Partner Repository should obtain tokens from the token endpoint using the configured client credentials, cache them until expiry, and refresh them automatically. Ping’s SCIM configuration supports both static token authentication and OAuth client-credentials-based token acquisition. ([Ping Identity Documentation][2])
-
-## Temporary implementation with a Kubernetes Secret
-
-Keep your application config as a placeholder only:
-
-```yaml
-ping:
-  scim:
-    enabled: ${PING_SCIM_ENABLED:false}
-    base-url: ${PING_SCIM_BASE_URL:}
-    bearer-token: ${PING_SCIM_BEARER_TOKEN:}
+```text
+PingUserMapperTest.shouldMapUserToPingCreateRequest:25
+expected: "John Doe"
+but was: null
 ```
 
-Create a Kubernetes Secret outside Git:
-
-```bash
-kubectl create secret generic partner-repository-ping \
-  --from-literal=PING_SCIM_BEARER_TOKEN='<new-rotated-token>'
-```
-
-Inject it into your deployment:
-
-```yaml
-env:
-  - name: PING_SCIM_ENABLED
-    value: "true"
-
-  - name: PING_SCIM_BASE_URL
-    value: "https://apis-be-d.pf.staging.echonet/be/ds_scim_b2b_boost/v1"
-
-  - name: PING_SCIM_BEARER_TOKEN
-    valueFrom:
-      secretKeyRef:
-        name: partner-repository-ping
-        key: PING_SCIM_BEARER_TOKEN
-```
-
-Kubernetes supports injecting Secret values through environment variables or mounted volumes. Secrets should be used for confidential values; ConfigMaps and ordinary Helm values should not contain the token. ([Kubernetes][3])
-
-Your Java configuration can then use the injected value:
+Make sure your create mapper explicitly sets `cn`:
 
 ```java
-@Bean
-public ApiClient pingApiClient(PingScimProperties properties) {
-    ApiClient apiClient = new ApiClient();
-    apiClient.setBasePath(properties.baseUrl());
-
-    if (properties.bearerToken() != null
-            && !properties.bearerToken().isBlank()) {
-        apiClient.setBearerToken(properties.bearerToken());
-    }
-
-    return apiClient;
-}
-```
-
-## Validate the base URL
-
-The curl shows this full endpoint:
-
-```text
-https://apis-be-d.pf.staging.echonet/be/ds_scim_b2b_boost/v1/partners-BE-AP74737
-```
-
-Since the generated method already appends:
-
-```text
-/partners-BE-AP74737
-```
-
-configure only:
-
-```yaml
-PING_SCIM_BASE_URL: "https://apis-be-d.pf.staging.echonet/be/ds_scim_b2b_boost/v1"
-```
-
-Otherwise you may accidentally call:
-
-```text
-.../partners-BE-AP74737/partners-BE-AP74737
-```
-
-## Add the required schema to create requests
-
-The curl body includes:
-
-```json
-"schemas": [
-  "urn:pingidentity:schemas:partners-BE-AP74737:1.0"
-]
-```
-
-Make sure your create mapper includes it:
-
-```java
-private static final String RESOURCE_SCHEMA =
-        "urn:pingidentity:schemas:partners-BE-AP74737:1.0";
-
 public PartnersBEAP74737Get200ResponseResourcesInner toPingUser(
         UserEntity user
 ) {
+    Objects.requireNonNull(user, "User must not be null");
+
     PartnersBEAP74737Get200ResponseResourcesInner request =
             new PartnersBEAP74737Get200ResponseResourcesInner();
 
-    request.setSchemas(Set.of(RESOURCE_SCHEMA));
-    request.setCn(user.getUserId());
-    request.setMail(user.getEmail());
-    request.setGivenName(user.getFirstName());
-    request.setMobile(user.getPhoneNumber());
-    request.setSn(user.getLastName());
+    request.setSchemas(Set.of(
+            PartnersBEAP74737Get200ResponseResourcesInner.SchemasEnum
+                    .fromValue(RESOURCE_SCHEMA)
+    ));
+
+    request.setGivenName(trimToNull(user.getFirstName()));
+    request.setSn(trimToNull(user.getLastName()));
+    request.setCn(buildCommonName(user)); // This is currently missing or ineffective
+    request.setMail(trimToNull(user.getEmail()));
+    request.setMobile(trimToNull(user.getPhoneNumber()));
     request.setStatus(mapStatus(user.getStatus()));
 
     return request;
 }
 ```
 
-Finally, avoid logging the request headers, full generated `ApiClient`, or bearer token. Log only endpoint path, user ID, result status, and sanitized error details.
+With:
 
-[1]: https://owasp.org/www-project-mcp-top-10/2025/MCP01-2025-Token-Mismanagement-and-Secret-Exposure?utm_source=chatgpt.com "MCP01:2025 - Token Mismanagement and Secret Exposure"
-[2]: https://docs.pingidentity.com/openicf/connector-reference/scim.html?utm_source=chatgpt.com "SCIM connector | ICF 1.5.20.35"
-[3]: https://kubernetes.io/docs/concepts/configuration/secret/?utm_source=chatgpt.com "Secrets"
+```java
+private String buildCommonName(UserEntity user) {
+    return Stream.of(
+                    user.getFirstName(),
+                    user.getLastName()
+            )
+            .map(this::trimToNull)
+            .filter(Objects::nonNull)
+            .collect(Collectors.joining(" "));
+}
+```
+
+Required import:
+
+```java
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+```
+
+Your test should resemble:
+
+```java
+@Test
+void shouldMapUserToPingCreateRequest() {
+    UserEntity user = new UserEntity();
+    user.setFirstName("John");
+    user.setLastName("Doe");
+    user.setEmail("john.doe@example.com");
+    user.setPhoneNumber("123456789");
+    user.setStatus("40");
+
+    var result = mapper.toPingUser(user);
+
+    assertThat(result.getGivenName()).isEqualTo("John");
+    assertThat(result.getSn()).isEqualTo("Doe");
+    assertThat(result.getCn()).isEqualTo("John Doe");
+    assertThat(result.getMail()).isEqualTo("john.doe@example.com");
+    assertThat(result.getMobile()).isEqualTo("123456789");
+    assertThat(result.getStatus()).isEqualTo("ACTIVE");
+}
+```
+
+Also verify that the test sets both `firstName` and `lastName`. If your entity actually uses differently named fields, such as `givenName` or `surname`, then `buildCommonName()` must use those real entity getters.
+
+The later error:
+
+```text
+ls: target/*SNAPSHOT.jar: No such file or directory
+```
+
+is only a consequence of the Maven test failure. Maven never produced the JAR, so the Docker build cannot find it. Fix the mapper test first, then run:
+
+```bash
+mvn clean test
+```
+
+and after it passes:
+
+```bash
+mvn clean package
+```
+
+The output also reports `Errors: 8`, so after fixing `cn`, inspect the full Surefire reports for any remaining errors:
+
+```bash
+grep -R "error\|failure" target/surefire-reports
+```
