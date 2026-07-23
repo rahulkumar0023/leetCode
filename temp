@@ -1,340 +1,158 @@
-Start with the three small classes because they are straightforward and will immediately remove several `0%` entries.
-
-## 1. `As400UserSyncControllerTest`
-
-A direct unit test is enough. Mock the service and verify that the controller returns the same response.
-
-```java
-package com.bnpp.pf.partner.repository.controller;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
-
-import com.bnpp.pf.partner.repository.dto.as400.As400SyncResponse;
-import com.bnpp.pf.partner.repository.dto.as400.As400UserSnapshotRequest;
-import com.bnpp.pf.partner.repository.service.UserSynchronizationService;
-
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
-
-@ExtendWith(MockitoExtension.class)
-class As400UserSyncControllerTest {
-
-    @Mock
-    private UserSynchronizationService userSynchronizationService;
-
-    private As400UserSyncController controller;
-
-    @BeforeEach
-    void setUp() {
-        controller = new As400UserSyncController(
-                userSynchronizationService
-        );
-    }
-
-    @Test
-    void shouldSynchronizeUserSuccessfully() {
-        As400UserSnapshotRequest request =
-                new As400UserSnapshotRequest();
-
-        As400SyncResponse expectedResponse =
-                As400SyncResponse.builder()
-                        .status("ACCEPTED")
-                        .message("User synchronized")
-                        .build();
-
-        when(userSynchronizationService.synchronize(request))
-                .thenReturn(expectedResponse);
-
-        ResponseEntity<As400SyncResponse> response =
-                controller.synchronizeUser(request);
-
-        assertEquals(HttpStatus.OK, response.getStatusCode());
-        assertSame(expectedResponse, response.getBody());
-
-        verify(userSynchronizationService)
-                .synchronize(request);
-    }
-}
-```
-
-If `As400UserSnapshotRequest` is a record or has no default constructor, instantiate it using its actual constructor or builder.
-
-This should give essentially full coverage for the controller.
-
----
-
-## 2. `PingClientConfigurationTest`
-
-You need to cover:
-
-* bearer token present
-* bearer token blank
-* bearer token null
-* generated API bean creation
-
-```java
-package com.bnpp.pf.partner.repository.ping.client;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-
-import java.time.Duration;
-
-import com.bnpp.pf.partner.repository.ping.client.api
-        .PartnersBeAp74737ResourceTypeApi;
-import com.bnpp.pf.partner.repository.ping.client.invoker.ApiClient;
-import com.bnpp.pf.partner.repository.ping.config.PingScimProperties;
-
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-
-class PingClientConfigurationTest {
-
-    private PingClientConfiguration configuration;
-
-    @BeforeEach
-    void setUp() {
-        configuration = new PingClientConfiguration();
-    }
-
-    @Test
-    void shouldCreateApiClientWithBearerToken() {
-        PingScimProperties properties = properties(
-                "https://ping.example.com",
-                "test-token"
-        );
-
-        ApiClient result =
-                configuration.pingApiClient(properties);
-
-        assertNotNull(result);
-        assertEquals(
-                "https://ping.example.com",
-                result.getBasePath()
-        );
-    }
-
-    @Test
-    void shouldCreateApiClientWhenBearerTokenIsBlank() {
-        PingScimProperties properties = properties(
-                "https://ping.example.com",
-                " "
-        );
-
-        ApiClient result =
-                configuration.pingApiClient(properties);
-
-        assertNotNull(result);
-        assertEquals(
-                "https://ping.example.com",
-                result.getBasePath()
-        );
-    }
-
-    @Test
-    void shouldCreateApiClientWhenBearerTokenIsNull() {
-        PingScimProperties properties = properties(
-                "https://ping.example.com",
-                null
-        );
-
-        ApiClient result =
-                configuration.pingApiClient(properties);
-
-        assertNotNull(result);
-        assertEquals(
-                "https://ping.example.com",
-                result.getBasePath()
-        );
-    }
-
-    @Test
-    void shouldCreatePartnersResourceTypeApi() {
-        ApiClient apiClient = new ApiClient();
-
-        PartnersBeAp74737ResourceTypeApi result =
-                configuration.partnersBeAp74737ResourceTypeApi(
-                        apiClient
-                );
-
-        assertNotNull(result);
-    }
-
-    private PingScimProperties properties(
-            String baseUrl,
-            String bearerToken
-    ) {
-        return new PingScimProperties(
-                true,
-                baseUrl,
-                "username",
-                "password",
-                bearerToken,
-                Duration.ofSeconds(5),
-                Duration.ofSeconds(10)
-        );
-    }
-}
-```
-
-The exact generated class name must match your project. In the screenshot it appears similar to:
-
-```java
-PartnersBeAp74737ResourceTypeApi
-```
-
-Use IntelliJ auto-import for the precise spelling.
-
-### Verifying the bearer token
-
-Your generated `ApiClient` may not expose a `getBearerToken()` method. If it does, add:
-
-```java
-assertEquals("test-token", result.getBearerToken());
-```
-
-If it does not, do not use reflection merely for coverage. Testing the branch by invoking the method is sufficient for JaCoCo.
-
----
-
-## 3. `PingScimPropertiesTest`
-
-Because it is a record, one constructor/accessor test covers the generated record methods that Sonar is reporting.
-
-```java
-package com.bnpp.pf.partner.repository.ping.config;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-
-import java.time.Duration;
-
-import org.junit.jupiter.api.Test;
-
-class PingScimPropertiesTest {
-
-    @Test
-    void shouldExposeConfiguredProperties() {
-        Duration connectTimeout = Duration.ofSeconds(5);
-        Duration readTimeout = Duration.ofSeconds(10);
-
-        PingScimProperties properties =
-                new PingScimProperties(
-                        false,
-                        "https://ping.example.com",
-                        "username",
-                        "password",
-                        "bearer-token",
-                        connectTimeout,
-                        readTimeout
-                );
-
-        assertFalse(properties.enabled());
-        assertEquals(
-                "https://ping.example.com",
-                properties.baseUrl()
-        );
-        assertEquals("username", properties.username());
-        assertEquals("password", properties.password());
-        assertEquals(
-                "bearer-token",
-                properties.bearerToken()
-        );
-        assertEquals(
-                connectTimeout,
-                properties.connectTimeout()
-        );
-        assertEquals(
-                readTimeout,
-                properties.readTimeout()
-        );
-    }
-}
-```
-
-This test is acceptable, although testing configuration records has relatively low business value. It is mainly useful because Sonar currently includes the record in coverage calculation.
-
----
-
-# Small production-code optimization
-
-Your configuration currently has:
-
-```java
-if (properties.bearerToken() != null
-        && !properties.bearerToken().isBlank()) {
-    apiClient.setBearerToken(properties.bearerToken());
-}
-```
-
-You can make it slightly cleaner by storing the value once:
-
-```java
-@Bean
-public ApiClient pingApiClient(
-        PingScimProperties properties
-) {
-    ApiClient apiClient = new ApiClient();
-    apiClient.setBasePath(properties.baseUrl());
-
-    String bearerToken = properties.bearerToken();
-
-    if (bearerToken != null && !bearerToken.isBlank()) {
-        apiClient.setBearerToken(bearerToken);
-    }
-
-    return apiClient;
-}
-```
-
-This avoids calling the accessor three times and makes the test branches clearer.
-
-A more reusable version would be:
-
-```java
-private boolean hasText(String value) {
-    return value != null && !value.isBlank();
-}
-```
-
-But for one condition, the local variable is enough.
-
----
-
-# Optional: exclude pure configuration properties from coverage
-
-If your team does not require tests for simple records or generated/configuration classes, you can exclude them from JaCoCo or Sonar. For example:
-
-```xml
-<configuration>
-    <excludes>
-        <exclude>
-            **/config/*Properties.class
-        </exclude>
-        <exclude>
-            **/ping/client/generated/**
-        </exclude>
-    </excludes>
-</configuration>
-```
-
-Do not exclude:
+The failure is not in the test assertion. It occurs while creating the client:
 
 ```text
-UserSynchronizationService
-UserService
-PingUserClient
-PingUserMapper
+RuntimeException: No Bearer authentication configured!
 ```
 
-Those contain real business behavior and should be tested.
+Your generated `ApiClient.setBearerToken(...)` only works when the OpenAPI-generated client contains an authentication scheme of type `HttpBearerAuth`. This generated client apparently does not.
 
-The next highest-value target is `UserSynchronizationService`, since it has 118 uncovered lines and 34 uncovered branches. That class will require scenario-based tests rather than simple coverage tests.
+Use a default `Authorization` header instead.
+
+## Update `PingClientConfiguration`
+
+Replace:
+
+```java
+apiClient.setBearerToken(properties.bearerToken());
+```
+
+with:
+
+```java
+apiClient.addDefaultHeader(
+        "Authorization",
+        "Bearer " + bearerToken
+);
+```
+
+Final version:
+
+```java
+@Configuration
+@EnableConfigurationProperties(PingScimProperties.class)
+public class PingClientConfiguration {
+
+    @Bean
+    public ApiClient pingApiClient(
+            PingScimProperties properties
+    ) {
+        ApiClient apiClient = new ApiClient();
+        apiClient.setBasePath(properties.baseUrl());
+
+        String bearerToken = properties.bearerToken();
+
+        if (bearerToken != null && !bearerToken.isBlank()) {
+            apiClient.addDefaultHeader(
+                    "Authorization",
+                    "Bearer " + bearerToken
+            );
+        }
+
+        return apiClient;
+    }
+
+    @Bean
+    public PartnersBeAp74737ResourceTypeApi
+            partnersBeAp74737ResourceTypeApi(
+                    ApiClient pingApiClient
+            ) {
+        return new PartnersBeAp74737ResourceTypeApi(
+                pingApiClient
+        );
+    }
+}
+```
+
+This is appropriate when the server requires a bearer token but the generated OpenAPI specification did not declare bearer authentication correctly.
+
+## Updated test
+
+Do not call `getBearerToken()` or inspect an authentication object. Test that the configuration completes without throwing and that the base path is set:
+
+```java
+@Test
+void shouldCreateApiClientWithBearerToken() {
+    PingScimProperties properties = properties(
+            "https://ping.example.com",
+            "test-token"
+    );
+
+    ApiClient result =
+            configuration.pingApiClient(properties);
+
+    assertNotNull(result);
+    assertEquals(
+            "https://ping.example.com",
+            result.getBasePath()
+    );
+}
+```
+
+Keep the blank and null tests:
+
+```java
+@Test
+void shouldCreateApiClientWhenBearerTokenIsBlank() {
+    PingScimProperties properties = properties(
+            "https://ping.example.com",
+            " "
+    );
+
+    ApiClient result =
+            configuration.pingApiClient(properties);
+
+    assertNotNull(result);
+    assertEquals(
+            "https://ping.example.com",
+            result.getBasePath()
+    );
+}
+
+@Test
+void shouldCreateApiClientWhenBearerTokenIsNull() {
+    PingScimProperties properties = properties(
+            "https://ping.example.com",
+            null
+    );
+
+    ApiClient result =
+            configuration.pingApiClient(properties);
+
+    assertNotNull(result);
+    assertEquals(
+            "https://ping.example.com",
+            result.getBasePath()
+    );
+}
+```
+
+## Why this happened
+
+The generated client was likely produced from an OpenAPI definition that does not contain something equivalent to:
+
+```yaml
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+```
+
+Therefore, this fails:
+
+```java
+apiClient.setBearerToken(token);
+```
+
+because the generated client cannot find a registered bearer authentication handler.
+
+Using:
+
+```java
+apiClient.addDefaultHeader(
+    "Authorization",
+    "Bearer " + token
+);
+```
+
+will send the same HTTP header without relying on the generated authentication metadata. Do not log `apiClient`, the header map, or the token.
