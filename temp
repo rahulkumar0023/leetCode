@@ -1,74 +1,133 @@
-The failure is because your test never calls the method under test.
-
-You stub these calls:
+Add tests for the remaining three methods in `GlobalExceptionHandler`: `IllegalArgumentException`, `TechnicalException`, and generic `Exception`.
 
 ```java
-when(pingUserMapper.toPingUser(user)).thenReturn(request);
-when(pingApi.partnersBEAP74737Post(request, null, null))
-        .thenReturn(response);
-```
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-Then immediately verify them:
+import java.lang.reflect.Method;
+import java.util.Map;
 
-```java
-verify(pingUserMapper).toPingUser(user);
-verify(pingApi).partnersBEAP74737Post(request, null, null);
-```
+import org.junit.jupiter.api.Test;
+import org.springframework.core.MethodParameter;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.MissingRequestHeaderException;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.servlet.ModelAndView;
 
-But `pingUserClient.createUser(user)` is missing, so Mockito correctly reports:
+class GlobalExceptionHandlerTest {
 
-```text
-Wanted but not invoked:
-pingUserMapper.toPingUser(...)
-Actually, there were zero interactions with this mock.
-```
+    private final GlobalExceptionHandler handler =
+            new GlobalExceptionHandler();
 
-Update the test:
+    @Test
+    void shouldHandleMissingRequestHeaderException() throws Exception {
+        Method method = GlobalExceptionHandlerTest.class
+                .getDeclaredMethod("dummyEndpoint", String.class);
 
-```java
-@Test
-void shouldCreateUserInPing() {
-    UserEntity user = new UserEntity();
-    user.setUserId("gps000001");
+        MethodParameter methodParameter =
+                new MethodParameter(method, 0);
 
-    PartnersBEAP74737Get200ResponseResourcesInner request =
-            new PartnersBEAP74737Get200ResponseResourcesInner();
+        MissingRequestHeaderException exception =
+                new MissingRequestHeaderException(
+                        "APP_ID",
+                        methodParameter
+                );
 
-    PartnersBEAP74737Get200ResponseResourcesInner response =
-            new PartnersBEAP74737Get200ResponseResourcesInner();
+        Map<String, String> response =
+                handler.handleMissingRequestHeader(exception);
 
-    when(pingUserMapper.toPingUser(user))
-            .thenReturn(request);
+        assertNotNull(response);
+        assertTrue(response.containsKey("message"));
+        assertNotNull(response.get("message"));
+        assertTrue(response.get("message").contains("APP_ID"));
+    }
 
-    when(pingApi.partnersBEAP74737Post(request, null, null))
-            .thenReturn(response);
+    @Test
+    void shouldHandleIllegalArgumentException() {
+        IllegalArgumentException exception =
+                new IllegalArgumentException("Invalid APP_ID");
 
-    // Missing call
-    pingUserClient.createUser(user);
+        ResponseEntity<Map<String, Object>> response =
+                handler.handleIllegalArgumentException(exception);
 
-    verify(pingUserMapper).toPingUser(user);
-    verify(pingApi).partnersBEAP74737Post(request, null, null);
+        assertNotNull(response);
+        assertEquals(400, response.getStatusCode().value());
+        assertNotNull(response.getBody());
+        assertEquals(
+                "Invalid APP_ID",
+                response.getBody().get("message")
+        );
+    }
+
+    @Test
+    void shouldRedirectToTechnicalErrorForTechnicalException() {
+        TechnicalException exception =
+                new TechnicalException("Technical failure");
+
+        ModelAndView response =
+                handler.handleGenericUiException(exception);
+
+        assertNotNull(response);
+        assertEquals(
+                "redirect:/error/technical",
+                response.getViewName()
+        );
+    }
+
+    @Test
+    void shouldRedirectToTechnicalErrorForGenericException() {
+        ModelAndView response = handler.handleGeneric();
+
+        assertNotNull(response);
+        assertEquals(
+                "redirect:/error/technical",
+                response.getViewName()
+        );
+    }
+
+    @SuppressWarnings("unused")
+    private void dummyEndpoint(
+            @RequestHeader("APP_ID") String appId
+    ) {
+        // Used only to construct MethodParameter in the test.
+    }
 }
 ```
 
-You can also assert the returned value when `createUser` returns the Ping response:
+One possible adjustment: your `TechnicalException` constructor may not accept a message. In that case, create it using the constructor available in your class, for example:
 
 ```java
-var result = pingUserClient.createUser(user);
-
-assertThat(result).isSameAs(response);
+TechnicalException exception = new TechnicalException();
 ```
 
-Then keep the verifications:
+or:
 
 ```java
-verify(pingUserMapper).toPingUser(user);
-verify(pingApi).partnersBEAP74737Post(request, null, null);
-verifyNoMoreInteractions(pingUserMapper, pingApi);
+TechnicalException exception =
+        new TechnicalException(
+                "Technical failure",
+                new RuntimeException("Root cause")
+        );
 ```
 
-The important missing line is:
+You can also simplify and strengthen the generic handler so the exception is logged:
 
 ```java
-pingUserClient.createUser(user);
+@ExceptionHandler(Exception.class)
+public ModelAndView handleGeneric(Exception exception) {
+    log.error("Unhandled application error", exception);
+    return new ModelAndView("redirect:/error/technical");
+}
 ```
+
+Then update the test call:
+
+```java
+ModelAndView response =
+        handler.handleGeneric(
+                new RuntimeException("Unexpected failure")
+        );
+```
+
+This covers every method currently visible in the handler.
