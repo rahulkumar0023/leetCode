@@ -1,70 +1,129 @@
-The Ping call is now being reached. The failure happens before the HTTP request is sent, inside your mapper:
+Do **not hardcode the bearer token** in Java, `application.yml`, Helm values committed to Git, or the generated client.
 
-```text
-IllegalArgumentException: Unsupported Ping status: 40
-at PingUserMapper.mapStatus(...)
+Also, the token shown in your screenshot should be treated as exposed. Ask the Ping/API team to **revoke or rotate it** before continuing. OWASP recommends invalidating exposed tokens and injecting replacements through a secrets manager. ([OWASP Foundation][1])
+
+First confirm with the Ping team which authentication model this API uses:
+
+* **Static token:** store it as a secret and inject it at runtime.
+* **OAuth access token:** Partner Repository should obtain tokens from the token endpoint using the configured client credentials, cache them until expiry, and refresh them automatically. Ping’s SCIM configuration supports both static token authentication and OAuth client-credentials-based token acquisition. ([Ping Identity Documentation][2])
+
+## Temporary implementation with a Kubernetes Secret
+
+Keep your application config as a placeholder only:
+
+```yaml
+ping:
+  scim:
+    enabled: ${PING_SCIM_ENABLED:false}
+    base-url: ${PING_SCIM_BASE_URL:}
+    bearer-token: ${PING_SCIM_BEARER_TOKEN:}
 ```
 
-Your snapshot payload sends:
+Create a Kubernetes Secret outside Git:
 
-```json
-"status": "40"
+```bash
+kubectl create secret generic partner-repository-ping \
+  --from-literal=PING_SCIM_BEARER_TOKEN='<new-rotated-token>'
 ```
 
-but `mapStatus(...)` only supports values such as `ACTIVE` and `INACTIVE`.
+Inject it into your deployment:
 
-Update the mapper to translate the AS400 numeric status into Ping’s expected status.
+```yaml
+env:
+  - name: PING_SCIM_ENABLED
+    value: "true"
+
+  - name: PING_SCIM_BASE_URL
+    value: "https://apis-be-d.pf.staging.echonet/be/ds_scim_b2b_boost/v1"
+
+  - name: PING_SCIM_BEARER_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: partner-repository-ping
+        key: PING_SCIM_BEARER_TOKEN
+```
+
+Kubernetes supports injecting Secret values through environment variables or mounted volumes. Secrets should be used for confidential values; ConfigMaps and ordinary Helm values should not contain the token. ([Kubernetes][3])
+
+Your Java configuration can then use the injected value:
 
 ```java
-private String mapStatus(Object status) {
-    if (status == null) {
-        return null;
+@Bean
+public ApiClient pingApiClient(PingScimProperties properties) {
+    ApiClient apiClient = new ApiClient();
+    apiClient.setBasePath(properties.baseUrl());
+
+    if (properties.bearerToken() != null
+            && !properties.bearerToken().isBlank()) {
+        apiClient.setBearerToken(properties.bearerToken());
     }
 
-    String value = status.toString().trim().toUpperCase(Locale.ROOT);
-
-    return switch (value) {
-        // AS400 statuses
-        case "40" -> "ACTIVE";
-
-        // Replace these with the confirmed business mappings
-        case "50", "60" -> "INACTIVE";
-
-        // Already normalized values
-        case "ACTIVE" -> "ACTIVE";
-        case "INACTIVE", "DISABLED", "DELETED" -> "INACTIVE";
-
-        default -> throw new IllegalArgumentException(
-                "Unsupported Ping status: " + status
-        );
-    };
+    return apiClient;
 }
 ```
 
-The exact meaning of `40`, `50`, and `60` should come from the AS400 status specification. Do not assume the inactive mappings unless they are confirmed. For now, your current test payload clearly requires:
+## Validate the base URL
 
-```java
-case "40" -> "ACTIVE";
-```
-
-Also add a mapper test:
-
-```java
-@Test
-void shouldMapAs400Status40ToActive() {
-    UserEntity user = new UserEntity();
-    user.setStatus("40");
-
-    var result = mapper.toPingUser(user);
-
-    assertThat(result.getStatus()).isEqualTo("ACTIVE");
-}
-```
-
-After redeploying, the expected log sequence should progress beyond:
+The curl shows this full endpoint:
 
 ```text
-Creating userId=... in Ping
+https://apis-be-d.pf.staging.echonet/be/ds_scim_b2b_boost/v1/partners-BE-AP74737
 ```
 
-and either show a successful Ping response or the next actual HTTP/authentication error.
+Since the generated method already appends:
+
+```text
+/partners-BE-AP74737
+```
+
+configure only:
+
+```yaml
+PING_SCIM_BASE_URL: "https://apis-be-d.pf.staging.echonet/be/ds_scim_b2b_boost/v1"
+```
+
+Otherwise you may accidentally call:
+
+```text
+.../partners-BE-AP74737/partners-BE-AP74737
+```
+
+## Add the required schema to create requests
+
+The curl body includes:
+
+```json
+"schemas": [
+  "urn:pingidentity:schemas:partners-BE-AP74737:1.0"
+]
+```
+
+Make sure your create mapper includes it:
+
+```java
+private static final String RESOURCE_SCHEMA =
+        "urn:pingidentity:schemas:partners-BE-AP74737:1.0";
+
+public PartnersBEAP74737Get200ResponseResourcesInner toPingUser(
+        UserEntity user
+) {
+    PartnersBEAP74737Get200ResponseResourcesInner request =
+            new PartnersBEAP74737Get200ResponseResourcesInner();
+
+    request.setSchemas(Set.of(RESOURCE_SCHEMA));
+    request.setCn(user.getUserId());
+    request.setMail(user.getEmail());
+    request.setGivenName(user.getFirstName());
+    request.setMobile(user.getPhoneNumber());
+    request.setSn(user.getLastName());
+    request.setStatus(mapStatus(user.getStatus()));
+
+    return request;
+}
+```
+
+Finally, avoid logging the request headers, full generated `ApiClient`, or bearer token. Log only endpoint path, user ID, result status, and sanitized error details.
+
+[1]: https://owasp.org/www-project-mcp-top-10/2025/MCP01-2025-Token-Mismanagement-and-Secret-Exposure?utm_source=chatgpt.com "MCP01:2025 - Token Mismanagement and Secret Exposure"
+[2]: https://docs.pingidentity.com/openicf/connector-reference/scim.html?utm_source=chatgpt.com "SCIM connector | ICF 1.5.20.35"
+[3]: https://kubernetes.io/docs/concepts/configuration/secret/?utm_source=chatgpt.com "Secrets"
