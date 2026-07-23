@@ -1,3 +1,172 @@
+Yes — add a config flag and only call Ping when it is enabled.
+
+## 1. Add flag in `application.yml`
+
+```yaml
+ping:
+  scim:
+    enabled: ${PING_SCIM_ENABLED:false}
+    base-url: ${PING_SCIM_BASE_URL:}
+    bearer-token: ${PING_SCIM_BEARER_TOKEN:}
+    username: ${PING_SCIM_USERNAME:}
+    password: ${PING_SCIM_PASSWORD:}
+    connect-timeout: 5s
+    read-timeout: 10s
+```
+
+Keep it `false` by default so local/dev does not call Ping unless you explicitly enable it.
+
+## 2. Update `PingScimProperties`
+
+```java
+package com.bnpp.pf.partner.repository.ping;
+
+import java.time.Duration;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+
+@ConfigurationProperties(prefix = "ping.scim")
+public record PingScimProperties(
+        boolean enabled,
+        String baseUrl,
+        String bearerToken,
+        String username,
+        String password,
+        Duration connectTimeout,
+        Duration readTimeout
+) {
+}
+```
+
+## 3. Use the flag before calling Ping
+
+In the service where you create the user:
+
+```java
+@Service
+@AllArgsConstructor
+@Slf4j
+public class UserService {
+
+    private final UserRepository userRepository;
+    private final PingUserClient pingUserClient;
+    private final PingScimProperties pingScimProperties;
+
+    @Transactional
+    public UserEntity createUser(UserEntity user) {
+        UserEntity savedUser = userRepository.save(user);
+
+        if (!pingScimProperties.enabled()) {
+            log.info(
+                    "Ping SCIM integration is disabled. Skipping Ping create for userId={}",
+                    savedUser.getUserId()
+            );
+            return savedUser;
+        }
+
+        try {
+            pingUserClient.createUser(savedUser);
+
+            savedUser.setPingSyncStatus("SUCCESS");
+            savedUser.setPingLastSyncedAt(Instant.now());
+            savedUser.setPingLastError(null);
+
+            return userRepository.save(savedUser);
+        } catch (RuntimeException exception) {
+            savedUser.setPingSyncStatus("FAILED");
+            savedUser.setPingLastError(exception.getMessage());
+
+            userRepository.save(savedUser);
+
+            throw exception;
+        }
+    }
+}
+```
+
+Imports:
+
+```java
+import java.time.Instant;
+
+import lombok.AllArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+```
+
+## 4. If your snapshot flow has create/update branches
+
+Put the same guard only around the Ping call:
+
+```java
+if (pingScimProperties.enabled()) {
+    pingUserClient.createUser(savedUser);
+
+    savedUser.setPingSyncStatus("SUCCESS");
+    savedUser.setPingLastSyncedAt(Instant.now());
+    savedUser.setPingLastError(null);
+
+    savedUser = userRepository.save(savedUser);
+} else {
+    log.info(
+            "Ping SCIM integration is disabled. Skipping Ping create for userId={}",
+            savedUser.getUserId()
+    );
+}
+```
+
+For update:
+
+```java
+if (pingScimProperties.enabled()
+        && savedUser.getPingResourceId() != null
+        && !savedUser.getPingResourceId().isBlank()) {
+    pingUserClient.updateUser(savedUser.getPingResourceId(), savedUser);
+
+    savedUser.setPingSyncStatus("SUCCESS");
+    savedUser.setPingLastSyncedAt(Instant.now());
+    savedUser.setPingLastError(null);
+
+    savedUser = userRepository.save(savedUser);
+}
+```
+
+## 5. Update the test
+
+When you want to verify Ping is called:
+
+```java
+when(pingScimProperties.enabled()).thenReturn(true);
+```
+
+When you want to verify Ping is skipped:
+
+```java
+when(pingScimProperties.enabled()).thenReturn(false);
+
+userService.createUser(user);
+
+verifyNoInteractions(pingUserClient);
+```
+
+So your service test class needs:
+
+```java
+@Mock
+private PingScimProperties pingScimProperties;
+```
+
+This way local/default behavior is safe, and Ping is called only when:
+
+```bash
+PING_SCIM_ENABLED=true
+```
+
+
+
+------------------
 Your snapshot endpoint is succeeding with `200 OK`, but the logs do not show any evidence that `PingUserClient.createUser(...)` is being called.
 
 That usually means the Ping integration was added to a different method than the one used by:
