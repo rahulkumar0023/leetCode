@@ -1,3 +1,254 @@
+Yes — update two things:
+
+1. Use a larger DB column for `ping_resource_id`
+2. Fix `partnersBEAP74737IdPatch(...)` to use only the 4 generated parameters
+
+## 1. Liquibase YAML
+
+Create a new changelog file, for example:
+
+```text
+src/main/resources/db/changelog/changes/20260722-add-ping-fields-to-user.yaml
+```
+
+Use this:
+
+```yaml
+databaseChangeLog:
+  - changeSet:
+      id: 20260722-01-add-ping-fields-to-user
+      author: rahulkumar
+      changes:
+        - addColumn:
+            tableName: users
+            columns:
+              - column:
+                  name: ping_resource_id
+                  type: varchar(1024)
+              - column:
+                  name: ping_sync_status
+                  type: varchar(20)
+              - column:
+                  name: ping_last_synced_at
+                  type: timestamp with time zone
+              - column:
+                  name: ping_last_error
+                  type: varchar(2000)
+      rollback:
+        - dropColumn:
+            tableName: users
+            columnName: ping_resource_id
+        - dropColumn:
+            tableName: users
+            columnName: ping_sync_status
+        - dropColumn:
+            tableName: users
+            columnName: ping_last_synced_at
+        - dropColumn:
+            tableName: users
+            columnName: ping_last_error
+
+  - changeSet:
+      id: 20260722-02-add-users-ping-resource-id-index
+      author: rahulkumar
+      changes:
+        - createIndex:
+            tableName: users
+            indexName: ux_users_ping_resource_id
+            unique: true
+            columns:
+              - column:
+                  name: ping_resource_id
+      rollback:
+        - dropIndex:
+            tableName: users
+            indexName: ux_users_ping_resource_id
+```
+
+If you are using PostgreSQL and you want the index to ignore `NULL` values explicitly, use SQL instead of `createIndex`:
+
+```yaml
+databaseChangeLog:
+  - changeSet:
+      id: 20260722-01-add-ping-fields-to-user
+      author: rahulkumar
+      changes:
+        - addColumn:
+            tableName: users
+            columns:
+              - column:
+                  name: ping_resource_id
+                  type: varchar(1024)
+              - column:
+                  name: ping_sync_status
+                  type: varchar(20)
+              - column:
+                  name: ping_last_synced_at
+                  type: timestamp with time zone
+              - column:
+                  name: ping_last_error
+                  type: varchar(2000)
+      rollback:
+        - dropColumn:
+            tableName: users
+            columnName: ping_resource_id
+        - dropColumn:
+            tableName: users
+            columnName: ping_sync_status
+        - dropColumn:
+            tableName: users
+            columnName: ping_last_synced_at
+        - dropColumn:
+            tableName: users
+            columnName: ping_last_error
+
+  - changeSet:
+      id: 20260722-02-add-users-ping-resource-id-index
+      author: rahulkumar
+      changes:
+        - sql:
+            dbms: postgresql
+            sql: >
+              CREATE UNIQUE INDEX ux_users_ping_resource_id
+              ON users (ping_resource_id)
+              WHERE ping_resource_id IS NOT NULL;
+      rollback:
+        - sql:
+            dbms: postgresql
+            sql: >
+              DROP INDEX IF EXISTS ux_users_ping_resource_id;
+```
+
+Use the PostgreSQL version if your database is Postgres.
+
+Then include it in your master changelog:
+
+```yaml
+databaseChangeLog:
+  - include:
+      file: db/changelog/changes/20260722-add-ping-fields-to-user.yaml
+```
+
+Change `users` if your actual table name is different.
+
+## 2. Update `UserEntity`
+
+Add these fields:
+
+```java
+@Column(name = "ping_resource_id", length = 1024)
+private String pingResourceId;
+
+@Column(name = "ping_sync_status", length = 20)
+private String pingSyncStatus;
+
+@Column(name = "ping_last_synced_at")
+private Instant pingLastSyncedAt;
+
+@Column(name = "ping_last_error", length = 2000)
+private String pingLastError;
+```
+
+Import:
+
+```java
+import java.time.Instant;
+import jakarta.persistence.Column;
+```
+
+If you are using Lombok getters/setters, nothing else is needed.
+
+## 3. Fix `updateUser` because PATCH has only 4 parameters
+
+Use this version:
+
+```java
+public void updateUser(
+        String pingResourceId,
+        UserEntity user
+) {
+    validatePingResourceId(pingResourceId);
+
+    PartnersBEAP74737IdPatchRequest request =
+            pingUserMapper.toPatchRequest(user);
+
+    try {
+        pingApi.partnersBEAP74737IdPatch(
+                pingResourceId,
+                null,
+                null,
+                request
+        );
+    } catch (RuntimeException exception) {
+        throw new PingIntegrationException(
+                "Failed to update user in Ping: " + pingResourceId,
+                exception
+        );
+    }
+}
+```
+
+So the call is:
+
+```java
+pingApi.partnersBEAP74737IdPatch(
+        pingResourceId,
+        null,
+        null,
+        request
+);
+```
+
+not:
+
+```java
+pingApi.partnersBEAP74737IdPatch(
+        pingResourceId,
+        null,
+        null,
+        null,
+        request
+);
+```
+
+## 4. Keep create as 3 parameters
+
+Your create method can remain:
+
+```java
+return pingApi.partnersBEAP74737Post(
+        request,
+        null,
+        null
+);
+```
+
+## 5. When storing Ping ID
+
+After create:
+
+```java
+PartnersBEAP74737Get200ResponseResourcesInner pingResponse =
+        pingUserClient.createUser(savedUser);
+
+if (pingResponse == null || pingResponse.getId() == null) {
+    throw new PingIntegrationException(
+            "Ping returned no resource id for user: "
+                    + savedUser.getUserId()
+    );
+}
+
+savedUser.setPingResourceId(pingResponse.getId());
+savedUser.setPingSyncStatus("SUCCESS");
+savedUser.setPingLastSyncedAt(Instant.now());
+savedUser.setPingLastError(null);
+```
+
+`varchar(1024)` should be safe unless Ping returns an unusually huge URL-like ID. If it still exceeds that, switch the Liquibase type and entity column to `text`.
+
+
+
+----------------
 Yes. Below is the full set of changes you need for **Partner Repository → Ping SCIM API integration**, using your **existing `UserEntity`** and the generated Ping client.
 
 I’ll keep it aligned with the classes you already have:
