@@ -1,75 +1,71 @@
-The red underline is caused by the wildcard generic types:
+The Mockito stubbing is now correct, but the `RestClient` mock is still **not being injected** into `PartnerRepositoryClient`.
 
-```java
-RestClient.RequestHeadersUriSpec<?>
-RestClient.RequestHeadersSpec<?>
+The error confirms it:
+
+```text
+Cannot invoke RestClient.get()
+because this.partnerRepoClient is null
 ```
 
-Mockito cannot resolve the captured `?` type in `thenReturn(...)`.
-
-Use `doReturn(...).when(...)` for these chained RestClient mocks.
+Avoid `@InjectMocks` here and construct the class explicitly.
 
 ```java
-@Test
-void shouldGetAppSuccessfully() {
-    String appId = "B2BOOST_BE";
-    AppConfigResponse expectedResponse = new AppConfigResponse();
+@ExtendWith(MockitoExtension.class)
+class PartnerRepositoryClientTest {
 
-    doReturn(requestHeadersUriSpec)
-            .when(partnerRepoClient)
-            .get();
+    @Mock
+    private WebClient webClient;
 
-    doReturn(requestHeadersSpec)
-            .when(requestHeadersUriSpec)
-            .uri(
-                    "http://partner-repository/apps/{appId}",
-                    appId
-            );
+    @Mock
+    private RestClient partnerRepoClient;
 
-    when(requestHeadersSpec.retrieve())
-            .thenReturn(responseSpec);
+    @Mock
+    private RestClient.RequestHeadersUriSpec<?> requestHeadersUriSpec;
 
-    when(responseSpec.body(AppConfigResponse.class))
-            .thenReturn(expectedResponse);
+    @Mock
+    private RestClient.RequestHeadersSpec<?> requestHeadersSpec;
 
-    AppConfigResponse result =
-            partnerRepositoryClient.getApp(appId);
+    @Mock
+    private RestClient.ResponseSpec responseSpec;
 
-    assertSame(expectedResponse, result);
+    private PartnerRepositoryClient partnerRepositoryClient;
 
-    verify(partnerRepoClient).get();
-    verify(requestHeadersUriSpec).uri(
-            "http://partner-repository/apps/{appId}",
-            appId
-    );
-    verify(requestHeadersSpec).retrieve();
-    verify(responseSpec).body(AppConfigResponse.class);
+    @BeforeEach
+    void setUp() {
+        partnerRepositoryClient =
+                new PartnerRepositoryClient(
+                        webClient,
+                        partnerRepoClient
+                );
+
+        ReflectionTestUtils.setField(
+                partnerRepositoryClient,
+                "baseUrl",
+                "http://partner-repository"
+        );
+    }
 }
 ```
 
-Add this static import:
+Remove:
 
 ```java
-import static org.mockito.Mockito.doReturn;
+@InjectMocks
+private PartnerRepositoryClient partnerRepositoryClient;
 ```
 
-Keep your mocks as:
+The constructor order must match the fields in your production class. Based on your class, it is probably:
 
 ```java
-@Mock
-private RestClient partnerRepoClient;
-
-@Mock
-private RestClient.RequestHeadersUriSpec<?> requestHeadersUriSpec;
-
-@Mock
-private RestClient.RequestHeadersSpec<?> requestHeadersSpec;
-
-@Mock
-private RestClient.ResponseSpec responseSpec;
+public PartnerRepositoryClient(
+        WebClient webClient,
+        RestClient partnerRepoClient
+)
 ```
 
-Use the same fix in the user test:
+If IntelliJ reports a different constructor, use the exact order it suggests.
+
+Your successful user test should then remain:
 
 ```java
 @Test
@@ -103,4 +99,43 @@ void shouldGetUserByIdSuccessfully() {
 }
 ```
 
-The production code does not need changing. This is only Mockito struggling with Spring RestClient’s self-referencing wildcard generics.
+However, check the production implementation carefully. Earlier, your class appeared to contain both:
+
+```java
+private final WebClient webClient;
+private final RestClient partnerRepoClient;
+```
+
+If both `getApp()` and `getUserById()` now use `partnerRepoClient`, then `WebClient` may no longer be needed. In that case, remove the unused `WebClient` field from production:
+
+```java
+@RequiredArgsConstructor
+@Component
+public class PartnerRepositoryClient {
+
+    private final RestClient partnerRepoClient;
+
+    @Value("${partner-repository.base-url}")
+    private String baseUrl;
+
+    // methods
+}
+```
+
+Then the test setup becomes:
+
+```java
+@BeforeEach
+void setUp() {
+    partnerRepositoryClient =
+            new PartnerRepositoryClient(partnerRepoClient);
+
+    ReflectionTestUtils.setField(
+            partnerRepositoryClient,
+            "baseUrl",
+            "http://partner-repository"
+    );
+}
+```
+
+The `dump files` message at the bottom is just Maven Surefire reporting the failed test run; it is not the root problem.
