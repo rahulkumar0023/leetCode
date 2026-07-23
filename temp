@@ -1,3 +1,127 @@
+
+You’re right — don’t use `Meta` here if your generated model/test setup doesn’t expose it the way we need.
+
+From your screenshot, the generated response has a **constant**:
+
+```java
+PartnersBEAP74737Get200ResponseResourcesInner.JSON_PROPERTY_ID
+```
+
+but no `setId(...)`. So for the unit test, the easiest clean fix is: don’t try to populate a real generated response ID. Instead, change your production code so extracting the Ping id is isolated, then mock that behavior indirectly is not ideal. Better: in your service test, avoid testing Ping response parsing. Test only that `PingUserClient.createUser(user)` is called.
+
+### Fix the service test
+
+Remove the assertion on `pingResourceId` from this test and just return a non-null response:
+
+```java
+@Test
+void shouldCallPingAfterCreatingUser() {
+    UserEntity user = new UserEntity();
+    user.setUserId("gps000001");
+
+    when(userRepository.save(user)).thenReturn(user);
+
+    PartnersBEAP74737Get200ResponseResourcesInner pingResponse =
+            new PartnersBEAP74737Get200ResponseResourcesInner();
+
+    when(pingUserClient.createUser(user)).thenReturn(pingResponse);
+
+    UserEntity result = userService.createUser(user);
+
+    verify(userRepository, times(2)).save(user);
+    verify(pingUserClient).createUser(user);
+
+    assertThat(result).isSameAs(user);
+}
+```
+
+But then your service must not throw when the response has no ID. So change your service to store Ping ID only when you can read one:
+
+```java
+PartnersBEAP74737Get200ResponseResourcesInner pingResponse =
+        pingUserClient.createUser(savedUser);
+
+String pingResourceId = extractPingResourceIdOrNull(pingResponse);
+
+savedUser.setPingResourceId(pingResourceId);
+savedUser.setPingSyncStatus("SUCCESS");
+savedUser.setPingLastSyncedAt(Instant.now());
+savedUser.setPingLastError(null);
+
+return userRepository.save(savedUser);
+```
+
+Add:
+
+```java
+private String extractPingResourceIdOrNull(
+        PartnersBEAP74737Get200ResponseResourcesInner pingResponse
+) {
+    if (pingResponse == null) {
+        return null;
+    }
+
+    // Generated model has no getId(), so do not force this for now.
+    return null;
+}
+```
+
+### Better production-safe option
+
+Since Ping’s generated response model has no usable `getId()`, store a successful sync without `pingResourceId` for now:
+
+```java
+private void markPingSuccess(UserEntity user) {
+    user.setPingSyncStatus("SUCCESS");
+    user.setPingLastSyncedAt(Instant.now());
+    user.setPingLastError(null);
+}
+```
+
+Then your create flow becomes:
+
+```java
+@Transactional
+public UserEntity createUser(UserEntity user) {
+    UserEntity savedUser = userRepository.save(user);
+
+    try {
+        pingUserClient.createUser(savedUser);
+        markPingSuccess(savedUser);
+    } catch (RuntimeException exception) {
+        savedUser.setPingSyncStatus("FAILED");
+        savedUser.setPingLastError(exception.getMessage());
+        throw exception;
+    }
+
+    return userRepository.save(savedUser);
+}
+```
+
+### Important consequence
+
+Without `pingResourceId`, you cannot reliably do this later:
+
+```java
+pingUserClient.updateUser(savedUser.getPingResourceId(), savedUser);
+```
+
+So for updates, you have two choices:
+
+1. Ask Ping which field in the response contains the resource id.
+2. Search Ping later by a stable field like `userId`, `mail`, or `cn`, then PATCH using the found resource id.
+
+For now, your test should prove the main requirement:
+
+```text
+after Partner Repository creates a user, Ping create API is called
+```
+
+not that the generated Ping response ID is parsed, because your current generated model does not expose it.
+
+
+
+----
 Your test now fails because `userRepository.save(user)` is called **twice**, but the test expects it only once.
 
 The failure shows the same entity after it was updated with:
