@@ -1,125 +1,200 @@
-The uncovered section is the successful path inside `getApp(...)`:
+Your test is mocking **`WebClient`**, but `PartnerRepositoryClient` now uses **Spring `RestClient`**.
 
-```java
-validateAppId(appId);
+That is why the error says:
 
-return partnerRepoClient.get()
-        .uri(baseUrl + "/apps/{appId}", appId)
-        .retrieve()
-        .bodyToMono(AppConfigResponse.class)
-        .block();
+```text
+Cannot invoke "org.springframework.web.client.RestClient.get()"
+because "partnerRepoClient" is null
 ```
 
-Your null and blank tests only cover `validateAppId(...)`. Add this success test to `PartnerRepositoryClientTest`:
+Mockito cannot inject the `WebClient` mock into a `RestClient` field, so the internal client remains `null`.
+
+Replace the WebClient mocks with RestClient mocks.
 
 ```java
-@Test
-void shouldGetAppSuccessfully() {
-    String appId = "B2BOOST_BE";
-    AppConfigResponse expectedResponse = new AppConfigResponse();
-
-    when(webClient.get())
-            .thenReturn(requestHeadersUriSpec);
-
-    when(requestHeadersUriSpec.uri(
-            "http://partner-repository/apps/{appId}",
-            appId
-    )).thenReturn(requestHeadersSpec);
-
-    when(requestHeadersSpec.retrieve())
-            .thenReturn(responseSpec);
-
-    when(responseSpec.bodyToMono(AppConfigResponse.class))
-            .thenReturn(Mono.just(expectedResponse));
-
-    AppConfigResponse result =
-            partnerRepositoryClient.getApp(appId);
-
-    assertSame(expectedResponse, result);
-
-    verify(webClient).get();
-    verify(requestHeadersUriSpec).uri(
-            "http://partner-repository/apps/{appId}",
-            appId
-    );
-    verify(requestHeadersSpec).retrieve();
-    verify(responseSpec).bodyToMono(AppConfigResponse.class);
-}
-```
-
-Add this static import if it is missing:
-
-```java
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.web.client.RestClient;
+
+@ExtendWith(MockitoExtension.class)
+class PartnerRepositoryClientTest {
+
+    @Mock
+    private RestClient partnerRepoClient;
+
+    @Mock
+    private RestClient.RequestHeadersUriSpec<?> requestHeadersUriSpec;
+
+    @Mock
+    private RestClient.RequestHeadersSpec<?> requestHeadersSpec;
+
+    @Mock
+    private RestClient.ResponseSpec responseSpec;
+
+    @InjectMocks
+    private PartnerRepositoryClient partnerRepositoryClient;
+
+    @BeforeEach
+    void setUp() {
+        ReflectionTestUtils.setField(
+                partnerRepositoryClient,
+                "baseUrl",
+                "http://partner-repository"
+        );
+    }
+
+    @Test
+    void shouldGetAppSuccessfully() {
+        String appId = "B2BOOST_BE";
+        AppConfigResponse expectedResponse = new AppConfigResponse();
+
+        when(partnerRepoClient.get())
+                .thenReturn(requestHeadersUriSpec);
+
+        when(requestHeadersUriSpec.uri(
+                "http://partner-repository/apps/{appId}",
+                appId
+        )).thenReturn(requestHeadersSpec);
+
+        when(requestHeadersSpec.retrieve())
+                .thenReturn(responseSpec);
+
+        when(responseSpec.body(AppConfigResponse.class))
+                .thenReturn(expectedResponse);
+
+        AppConfigResponse result =
+                partnerRepositoryClient.getApp(appId);
+
+        assertSame(expectedResponse, result);
+
+        verify(partnerRepoClient).get();
+        verify(requestHeadersUriSpec).uri(
+                "http://partner-repository/apps/{appId}",
+                appId
+        );
+        verify(requestHeadersSpec).retrieve();
+        verify(responseSpec).body(AppConfigResponse.class);
+    }
+
+    @Test
+    void shouldGetUserByIdSuccessfully() {
+        String userId = "testuser";
+
+        UserResponse expectedResponse = new UserResponse();
+        expectedResponse.setUserId(userId);
+        expectedResponse.setUsername(userId);
+
+        when(partnerRepoClient.get())
+                .thenReturn(requestHeadersUriSpec);
+
+        when(requestHeadersUriSpec.uri(
+                "http://partner-repository/users/{userId}",
+                userId
+        )).thenReturn(requestHeadersSpec);
+
+        when(requestHeadersSpec.retrieve())
+                .thenReturn(responseSpec);
+
+        when(responseSpec.body(UserResponse.class))
+                .thenReturn(expectedResponse);
+
+        UserResponse result =
+                partnerRepositoryClient.getUserById(userId);
+
+        assertEquals("testuser", result.getUserId());
+        assertEquals("testuser", result.getUsername());
+
+        verify(partnerRepoClient).get();
+        verify(requestHeadersUriSpec).uri(
+                "http://partner-repository/users/{userId}",
+                userId
+        );
+        verify(requestHeadersSpec).retrieve();
+        verify(responseSpec).body(UserResponse.class);
+    }
+
+    @Test
+    void shouldThrowWhenGetAppAppIdIsBlank() {
+        IllegalArgumentException exception = assertThrows(
+                IllegalArgumentException.class,
+                () -> partnerRepositoryClient.getApp(" ")
+        );
+
+        assertEquals(
+                "appId must not be blank",
+                exception.getMessage()
+        );
+
+        verifyNoInteractions(partnerRepoClient);
+    }
+
+    @Test
+    void shouldThrowWhenGetAppAppIdIsNull() {
+        IllegalArgumentException exception = assertThrows(
+                IllegalArgumentException.class,
+                () -> partnerRepositoryClient.getApp(null)
+        );
+
+        assertEquals(
+                "appId must not be blank",
+                exception.getMessage()
+        );
+
+        verifyNoInteractions(partnerRepoClient);
+    }
+}
 ```
 
-You can also use `assertNotNull(result)`, but `assertSame(...)` is stronger here because it confirms that the exact response emitted by the mocked `Mono` is returned.
-
-Your completed test class should now have these three `getApp` cases:
+Remove these old WebClient-related imports and mocks:
 
 ```java
-@Test
-void shouldGetAppSuccessfully() {
-    String appId = "B2BOOST_BE";
-    AppConfigResponse expectedResponse = new AppConfigResponse();
-
-    when(webClient.get())
-            .thenReturn(requestHeadersUriSpec);
-
-    when(requestHeadersUriSpec.uri(
-            "http://partner-repository/apps/{appId}",
-            appId
-    )).thenReturn(requestHeadersSpec);
-
-    when(requestHeadersSpec.retrieve())
-            .thenReturn(responseSpec);
-
-    when(responseSpec.bodyToMono(AppConfigResponse.class))
-            .thenReturn(Mono.just(expectedResponse));
-
-    AppConfigResponse result =
-            partnerRepositoryClient.getApp(appId);
-
-    assertSame(expectedResponse, result);
-
-    verify(webClient).get();
-    verify(requestHeadersUriSpec).uri(
-            "http://partner-repository/apps/{appId}",
-            appId
-    );
-    verify(requestHeadersSpec).retrieve();
-    verify(responseSpec).bodyToMono(AppConfigResponse.class);
-}
-
-@Test
-void shouldThrowWhenGetAppAppIdIsBlank() {
-    IllegalArgumentException exception = assertThrows(
-            IllegalArgumentException.class,
-            () -> partnerRepositoryClient.getApp(" ")
-    );
-
-    assertEquals(
-            "appId must not be blank",
-            exception.getMessage()
-    );
-
-    verifyNoInteractions(webClient);
-}
-
-@Test
-void shouldThrowWhenGetAppAppIdIsNull() {
-    IllegalArgumentException exception = assertThrows(
-            IllegalArgumentException.class,
-            () -> partnerRepositoryClient.getApp(null)
-    );
-
-    assertEquals(
-            "appId must not be blank",
-            exception.getMessage()
-    );
-
-    verifyNoInteractions(webClient);
-}
+import reactor.core.publisher.Mono;
+import org.springframework.web.reactive.function.client.WebClient;
 ```
 
-This should cover all the red lines shown for `getApp(...)`.
+Also remove:
+
+```java
+@Mock
+private WebClient webClient;
+
+@Mock
+private WebClient.RequestHeadersUriSpec requestHeadersUriSpec;
+
+@Mock
+private WebClient.RequestHeadersSpec requestHeadersSpec;
+
+@Mock
+private WebClient.ResponseSpec responseSpec;
+```
+
+The key change is:
+
+```java
+// Old WebClient
+responseSpec.bodyToMono(AppConfigResponse.class)
+        .thenReturn(Mono.just(expectedResponse));
+
+// New RestClient
+responseSpec.body(AppConfigResponse.class)
+        .thenReturn(expectedResponse);
+```
+
+And the mock must have the same name/type used by the production constructor:
+
+```java
+@Mock
+private RestClient partnerRepoClient;
+```
