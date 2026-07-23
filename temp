@@ -1,3 +1,874 @@
+Yes. Below is the full set of changes you need for **Partner Repository → Ping SCIM API integration**, using your **existing `UserEntity`** and the generated Ping client.
+
+I’ll keep it aligned with the classes you already have:
+
+```java
+PingUserClient
+PingUserMapper
+PingIntegrationException
+PingScimProperties
+PingClientConfiguration
+PartnersBeAp74737ResourceTypeApi
+PartnersBEAP74737Get200ResponseResourcesInner
+PartnersBEAP74737IdPatchRequest
+PartnersBEAP74737IdPatchRequestOperationsInner
+```
+
+---
+
+## 1. Add Ping config to `application.yml`
+
+Add this:
+
+```yaml
+ping:
+  scim:
+    base-url: ${PING_SCIM_BASE_URL}
+    bearer-token: ${PING_SCIM_BEARER_TOKEN:}
+    username: ${PING_SCIM_USERNAME:}
+    password: ${PING_SCIM_PASSWORD:}
+    connect-timeout: 5s
+    read-timeout: 10s
+```
+
+Your base URL should be:
+
+```text
+https://<ping-host>/scim/v2
+```
+
+Not:
+
+```text
+https://<ping-host>/scim/v2/partners-BE-AP74737
+```
+
+The generated API already adds `/partners-BE-AP74737`.
+
+---
+
+## 2. `PingScimProperties.java`
+
+```java
+package com.bnpp.pf.partner.repository.ping;
+
+import java.time.Duration;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+
+@ConfigurationProperties(prefix = "ping.scim")
+public record PingScimProperties(
+        String baseUrl,
+        String bearerToken,
+        String username,
+        String password,
+        Duration connectTimeout,
+        Duration readTimeout
+) {
+}
+```
+
+---
+
+## 3. `PingClientConfiguration.java`
+
+Use your actual generated package names. From your screenshots, your imports look like:
+
+```java
+com.bnpp.pf.partner.repository.ping.client.api.PartnersBeAp74737ResourceTypeApi
+com.bnpp.pf.partner.repository.ping.client.invoker.ApiClient
+```
+
+Final code:
+
+```java
+package com.bnpp.pf.partner.repository.ping;
+
+import com.bnpp.pf.partner.repository.ping.client.api.PartnersBeAp74737ResourceTypeApi;
+import com.bnpp.pf.partner.repository.ping.client.invoker.ApiClient;
+
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.util.StringUtils;
+
+@Configuration
+@EnableConfigurationProperties(PingScimProperties.class)
+public class PingClientConfiguration {
+
+    @Bean
+    public ApiClient pingApiClient(PingScimProperties properties) {
+        ApiClient apiClient = new ApiClient();
+
+        apiClient.setBasePath(properties.baseUrl());
+
+        if (StringUtils.hasText(properties.bearerToken())) {
+            apiClient.setBearerToken(properties.bearerToken());
+        }
+
+        if (StringUtils.hasText(properties.username())) {
+            apiClient.setUsername(properties.username());
+            apiClient.setPassword(properties.password());
+        }
+
+        return apiClient;
+    }
+
+    @Bean
+    public PartnersBeAp74737ResourceTypeApi partnersBeAp74737ResourceTypeApi(
+            ApiClient pingApiClient
+    ) {
+        return new PartnersBeAp74737ResourceTypeApi(pingApiClient);
+    }
+}
+```
+
+If your generated `ApiClient` does not have `setBearerToken`, use the generated method it provides, for example:
+
+```java
+apiClient.setApiKey(properties.bearerToken());
+apiClient.setApiKeyPrefix("Bearer");
+```
+
+---
+
+## 4. `PingIntegrationException.java`
+
+```java
+package com.bnpp.pf.partner.repository.ping;
+
+public class PingIntegrationException extends RuntimeException {
+
+    public PingIntegrationException(String message) {
+        super(message);
+    }
+
+    public PingIntegrationException(String message, Throwable cause) {
+        super(message, cause);
+    }
+}
+```
+
+---
+
+## 5. `PingUserMapper.java`
+
+This maps your internal `UserEntity` to the generated Ping SCIM model.
+
+```java
+package com.bnpp.pf.partner.repository.ping;
+
+import java.util.LinkedHashSet;
+import java.util.Locale;
+import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import com.bnpp.pf.partner.repository.entity.UserEntity;
+import com.bnpp.pf.partner.repository.ping.client.model.PartnersBEAP74737Get200ResponseResourcesInner;
+import com.bnpp.pf.partner.repository.ping.client.model.PartnersBEAP74737IdPatchRequest;
+import com.bnpp.pf.partner.repository.ping.client.model.PartnersBEAP74737IdPatchRequestOperationsInner;
+
+import org.springframework.stereotype.Component;
+
+@Component
+public class PingUserMapper {
+
+    private static final String SCIM_PATCH_SCHEMA =
+            "urn:ietf:params:scim:api:messages:2.0:PatchOp";
+
+    public PartnersBEAP74737Get200ResponseResourcesInner toPingUser(
+            UserEntity user
+    ) {
+        Objects.requireNonNull(user, "User must not be null");
+
+        PartnersBEAP74737Get200ResponseResourcesInner request =
+                new PartnersBEAP74737Get200ResponseResourcesInner();
+
+        request.setGivenName(trimToNull(user.getFirstName()));
+        request.setSn(trimToNull(user.getLastName()));
+        request.setCn(buildCommonName(user));
+        request.setMail(trimToNull(user.getEmail()));
+        request.setMobile(trimToNull(user.getPhoneNumber()));
+        request.setStatus(mapStatus(user.getStatus()));
+
+        return request;
+    }
+
+    public PartnersBEAP74737IdPatchRequest toPatchRequest(UserEntity user) {
+        Objects.requireNonNull(user, "User must not be null");
+
+        PartnersBEAP74737IdPatchRequest request =
+                new PartnersBEAP74737IdPatchRequest();
+
+        request.setSchemas(Set.of(
+                PartnersBEAP74737IdPatchRequest.SchemasEnum.fromValue(
+                        SCIM_PATCH_SCHEMA
+                )
+        ));
+
+        Set<PartnersBEAP74737IdPatchRequestOperationsInner> operations =
+                new LinkedHashSet<>();
+
+        addReplaceOperation(
+                operations,
+                "givenName",
+                trimToNull(user.getFirstName())
+        );
+
+        addReplaceOperation(
+                operations,
+                "sn",
+                trimToNull(user.getLastName())
+        );
+
+        addReplaceOperation(
+                operations,
+                "cn",
+                buildCommonName(user)
+        );
+
+        addReplaceOperation(
+                operations,
+                "mail",
+                trimToNull(user.getEmail())
+        );
+
+        addReplaceOperation(
+                operations,
+                "mobile",
+                trimToNull(user.getPhoneNumber())
+        );
+
+        addReplaceOperation(
+                operations,
+                "status",
+                mapStatus(user.getStatus())
+        );
+
+        request.setOperations(operations);
+
+        return request;
+    }
+
+    private void addReplaceOperation(
+            Set<PartnersBEAP74737IdPatchRequestOperationsInner> operations,
+            String path,
+            Object value
+    ) {
+        if (value == null) {
+            return;
+        }
+
+        PartnersBEAP74737IdPatchRequestOperationsInner operation =
+                new PartnersBEAP74737IdPatchRequestOperationsInner();
+
+        operation.setOp(
+                PartnersBEAP74737IdPatchRequestOperationsInner.OpEnum
+                        .fromValue("replace")
+        );
+
+        operation.setPath(path);
+        operation.setValue(value);
+
+        operations.add(operation);
+    }
+
+    private String buildCommonName(UserEntity user) {
+        return Stream.of(
+                        user.getFirstName(),
+                        user.getLastName()
+                )
+                .map(this::trimToNull)
+                .filter(Objects::nonNull)
+                .collect(Collectors.joining(" "));
+    }
+
+    private String mapStatus(Object status) {
+        if (status == null) {
+            return null;
+        }
+
+        String normalizedStatus = status.toString()
+                .trim()
+                .toUpperCase(Locale.ROOT);
+
+        return switch (normalizedStatus) {
+            case "ACTIVE" -> "ACTIVE";
+            case "INACTIVE", "DISABLED", "DELETED" -> "INACTIVE";
+            default -> throw new IllegalArgumentException(
+                    "Unsupported Ping status: " + status
+            );
+        };
+    }
+
+    private String trimToNull(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+
+        return value.trim();
+    }
+}
+```
+
+Important: confirm `cn` with Ping.
+
+If Ping expects the login/user id, change both create and patch mapping from:
+
+```java
+buildCommonName(user)
+```
+
+to:
+
+```java
+trimToNull(user.getUserId())
+```
+
+---
+
+## 6. `PingUserClient.java`
+
+Your generated API requires optional SCIM parameters, so you correctly pass `null`.
+
+Final code:
+
+```java
+package com.bnpp.pf.partner.repository.ping;
+
+import com.bnpp.pf.partner.repository.entity.UserEntity;
+import com.bnpp.pf.partner.repository.ping.client.api.PartnersBeAp74737ResourceTypeApi;
+import com.bnpp.pf.partner.repository.ping.client.model.PartnersBEAP74737Get200ResponseResourcesInner;
+import com.bnpp.pf.partner.repository.ping.client.model.PartnersBEAP74737IdPatchRequest;
+
+import lombok.AllArgsConstructor;
+
+import org.springframework.stereotype.Component;
+
+@Component
+@AllArgsConstructor
+public class PingUserClient {
+
+    private final PartnersBeAp74737ResourceTypeApi pingApi;
+    private final PingUserMapper pingUserMapper;
+
+    public PartnersBEAP74737Get200ResponseResourcesInner createUser(
+            UserEntity user
+    ) {
+        PartnersBEAP74737Get200ResponseResourcesInner request =
+                pingUserMapper.toPingUser(user);
+
+        try {
+            return pingApi.partnersBEAP74737Post(
+                    request,
+                    null,
+                    null
+            );
+        } catch (RuntimeException exception) {
+            throw new PingIntegrationException(
+                    "Failed to create user in Ping: " + user.getUserId(),
+                    exception
+            );
+        }
+    }
+
+    public void updateUser(
+            String pingResourceId,
+            UserEntity user
+    ) {
+        validatePingResourceId(pingResourceId);
+
+        PartnersBEAP74737IdPatchRequest request =
+                pingUserMapper.toPatchRequest(user);
+
+        try {
+            pingApi.partnersBEAP74737IdPatch(
+                    pingResourceId,
+                    null,
+                    null,
+                    null,
+                    request
+            );
+        } catch (RuntimeException exception) {
+            throw new PingIntegrationException(
+                    "Failed to update user in Ping: " + pingResourceId,
+                    exception
+            );
+        }
+    }
+
+    public void deleteUser(String pingResourceId) {
+        validatePingResourceId(pingResourceId);
+
+        try {
+            pingApi.partnersBEAP74737IdDelete(pingResourceId);
+        } catch (RuntimeException exception) {
+            throw new PingIntegrationException(
+                    "Failed to delete user in Ping: " + pingResourceId,
+                    exception
+            );
+        }
+    }
+
+    private void validatePingResourceId(String pingResourceId) {
+        if (pingResourceId == null || pingResourceId.isBlank()) {
+            throw new IllegalArgumentException(
+                    "Ping resource id must not be empty"
+            );
+        }
+    }
+}
+```
+
+If `partnersBEAP74737IdDelete(...)` requires extra optional arguments, pass `null` the same way you did for POST/PATCH.
+
+---
+
+## 7. Add Ping fields to `UserEntity`
+
+You do **not** need to rename existing fields to Ping names.
+
+Do not change:
+
+```java
+firstName
+lastName
+email
+phoneNumber
+status
+```
+
+Only add Ping sync fields if you want to update users later.
+
+```java
+@Column(name = "ping_resource_id", length = 255)
+private String pingResourceId;
+
+@Column(name = "ping_last_synced_at")
+private Instant pingLastSyncedAt;
+
+@Column(name = "ping_last_error", length = 2000)
+private String pingLastError;
+```
+
+Imports:
+
+```java
+import java.time.Instant;
+
+import jakarta.persistence.Column;
+```
+
+Optional status tracking:
+
+```java
+@Enumerated(EnumType.STRING)
+@Column(name = "ping_sync_status", length = 20)
+private PingSyncStatus pingSyncStatus;
+```
+
+```java
+public enum PingSyncStatus {
+    PENDING,
+    SUCCESS,
+    FAILED
+}
+```
+
+---
+
+## 8. Database migration
+
+Add columns to your user table. Adjust table name if yours is not `users`.
+
+```sql
+ALTER TABLE users
+    ADD COLUMN ping_resource_id VARCHAR(255),
+    ADD COLUMN ping_last_synced_at TIMESTAMP WITH TIME ZONE,
+    ADD COLUMN ping_last_error VARCHAR(2000);
+
+CREATE UNIQUE INDEX ux_users_ping_resource_id
+    ON users (ping_resource_id)
+    WHERE ping_resource_id IS NOT NULL;
+```
+
+If you add `ping_sync_status`:
+
+```sql
+ALTER TABLE users
+    ADD COLUMN ping_sync_status VARCHAR(20);
+```
+
+---
+
+## 9. Integrate with existing user creation code
+
+Find the service method where your `UserEntity` is created and saved.
+
+It may currently look like this:
+
+```java
+@Transactional
+public UserEntity createUser(UserEntity user) {
+    return userRepository.save(user);
+}
+```
+
+Change it to call Ping after saving locally:
+
+```java
+@Transactional
+public UserEntity createUser(UserEntity user) {
+    UserEntity savedUser = userRepository.save(user);
+
+    PartnersBEAP74737Get200ResponseResourcesInner pingResponse =
+            pingUserClient.createUser(savedUser);
+
+    if (pingResponse == null || pingResponse.getId() == null) {
+        throw new PingIntegrationException(
+                "Ping returned no resource id for user: "
+                        + savedUser.getUserId()
+        );
+    }
+
+    savedUser.setPingResourceId(pingResponse.getId());
+    savedUser.setPingLastSyncedAt(Instant.now());
+    savedUser.setPingLastError(null);
+
+    return userRepository.save(savedUser);
+}
+```
+
+Add dependencies to that service:
+
+```java
+private final UserRepository userRepository;
+private final PingUserClient pingUserClient;
+```
+
+And imports:
+
+```java
+import java.time.Instant;
+
+import com.bnpp.pf.partner.repository.ping.PingIntegrationException;
+import com.bnpp.pf.partner.repository.ping.PingUserClient;
+import com.bnpp.pf.partner.repository.ping.client.model.PartnersBEAP74737Get200ResponseResourcesInner;
+```
+
+---
+
+## 10. If your code has create-or-update in one method
+
+If your existing flow receives user data and checks whether the user already exists, do this:
+
+```java
+@Transactional
+public UserEntity saveOrUpdateUser(UserEntity incomingUser) {
+    return userRepository.findByUserId(incomingUser.getUserId())
+            .map(existingUser -> updateExistingUser(existingUser, incomingUser))
+            .orElseGet(() -> createNewUser(incomingUser));
+}
+
+private UserEntity createNewUser(UserEntity incomingUser) {
+    UserEntity savedUser = userRepository.save(incomingUser);
+
+    PartnersBEAP74737Get200ResponseResourcesInner pingResponse =
+            pingUserClient.createUser(savedUser);
+
+    if (pingResponse == null || pingResponse.getId() == null) {
+        throw new PingIntegrationException(
+                "Ping returned no resource id for user: "
+                        + savedUser.getUserId()
+        );
+    }
+
+    savedUser.setPingResourceId(pingResponse.getId());
+    savedUser.setPingLastSyncedAt(Instant.now());
+    savedUser.setPingLastError(null);
+
+    return userRepository.save(savedUser);
+}
+
+private UserEntity updateExistingUser(
+        UserEntity existingUser,
+        UserEntity incomingUser
+) {
+    existingUser.setFirstName(incomingUser.getFirstName());
+    existingUser.setLastName(incomingUser.getLastName());
+    existingUser.setEmail(incomingUser.getEmail());
+    existingUser.setPhoneNumber(incomingUser.getPhoneNumber());
+    existingUser.setStatus(incomingUser.getStatus());
+
+    UserEntity savedUser = userRepository.save(existingUser);
+
+    if (savedUser.getPingResourceId() != null
+            && !savedUser.getPingResourceId().isBlank()) {
+        pingUserClient.updateUser(
+                savedUser.getPingResourceId(),
+                savedUser
+        );
+
+        savedUser.setPingLastSyncedAt(Instant.now());
+        savedUser.setPingLastError(null);
+
+        return userRepository.save(savedUser);
+    }
+
+    return savedUser;
+}
+```
+
+This gives:
+
+```text
+new user      -> save DB -> POST Ping -> store Ping id
+existing user -> save DB -> PATCH Ping, if Ping id exists
+```
+
+---
+
+## 11. If update should not call Ping yet
+
+If you only want Ping call after creation for now, keep update simple:
+
+```java
+private UserEntity updateExistingUser(
+        UserEntity existingUser,
+        UserEntity incomingUser
+) {
+    existingUser.setFirstName(incomingUser.getFirstName());
+    existingUser.setLastName(incomingUser.getLastName());
+    existingUser.setEmail(incomingUser.getEmail());
+    existingUser.setPhoneNumber(incomingUser.getPhoneNumber());
+    existingUser.setStatus(incomingUser.getStatus());
+
+    return userRepository.save(existingUser);
+}
+```
+
+Then only `createNewUser(...)` calls Ping.
+
+---
+
+## 12. Add tests without calling Ping
+
+### `PingUserMapperTest`
+
+```java
+import static org.assertj.core.api.Assertions.assertThat;
+
+import com.bnpp.pf.partner.repository.entity.UserEntity;
+import com.bnpp.pf.partner.repository.ping.PingUserMapper;
+
+import org.junit.jupiter.api.Test;
+
+class PingUserMapperTest {
+
+    private final PingUserMapper mapper = new PingUserMapper();
+
+    @Test
+    void shouldMapUserToPingCreateRequest() {
+        UserEntity user = new UserEntity();
+        user.setFirstName("John");
+        user.setLastName("Doe");
+        user.setEmail("john.doe@example.com");
+        user.setPhoneNumber("+32470000000");
+        user.setStatus("ACTIVE");
+
+        var result = mapper.toPingUser(user);
+
+        assertThat(result.getGivenName()).isEqualTo("John");
+        assertThat(result.getSn()).isEqualTo("Doe");
+        assertThat(result.getCn()).isEqualTo("John Doe");
+        assertThat(result.getMail()).isEqualTo("john.doe@example.com");
+        assertThat(result.getMobile()).isEqualTo("+32470000000");
+        assertThat(result.getStatus()).isEqualTo("ACTIVE");
+    }
+
+    @Test
+    void shouldMapUserToPatchRequest() {
+        UserEntity user = new UserEntity();
+        user.setFirstName("John");
+        user.setLastName("Doe");
+        user.setEmail("john.doe@example.com");
+        user.setPhoneNumber("+32470000000");
+        user.setStatus("ACTIVE");
+
+        var result = mapper.toPatchRequest(user);
+
+        assertThat(result.getSchemas()).isNotEmpty();
+        assertThat(result.getOperations()).hasSize(6);
+
+        assertThat(result.getOperations())
+                .anySatisfy(operation -> {
+                    assertThat(operation.getPath()).isEqualTo("givenName");
+                    assertThat(operation.getValue()).isEqualTo("John");
+                });
+
+        assertThat(result.getOperations())
+                .anySatisfy(operation -> {
+                    assertThat(operation.getPath()).isEqualTo("mail");
+                    assertThat(operation.getValue()).isEqualTo("john.doe@example.com");
+                });
+    }
+}
+```
+
+### `PingUserClientTest`
+
+```java
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import com.bnpp.pf.partner.repository.entity.UserEntity;
+import com.bnpp.pf.partner.repository.ping.PingIntegrationException;
+import com.bnpp.pf.partner.repository.ping.PingUserClient;
+import com.bnpp.pf.partner.repository.ping.PingUserMapper;
+import com.bnpp.pf.partner.repository.ping.client.api.PartnersBeAp74737ResourceTypeApi;
+import com.bnpp.pf.partner.repository.ping.client.model.PartnersBEAP74737Get200ResponseResourcesInner;
+import com.bnpp.pf.partner.repository.ping.client.model.PartnersBEAP74737IdPatchRequest;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+@ExtendWith(MockitoExtension.class)
+class PingUserClientTest {
+
+    @Mock
+    private PartnersBeAp74737ResourceTypeApi pingApi;
+
+    @Mock
+    private PingUserMapper pingUserMapper;
+
+    @InjectMocks
+    private PingUserClient pingUserClient;
+
+    @Test
+    void shouldCreateUserInPing() {
+        UserEntity user = new UserEntity();
+        user.setUserId("gps000001");
+
+        PartnersBEAP74737Get200ResponseResourcesInner request =
+                new PartnersBEAP74737Get200ResponseResourcesInner();
+
+        PartnersBEAP74737Get200ResponseResourcesInner response =
+                new PartnersBEAP74737Get200ResponseResourcesInner();
+        response.setId("ping-resource-123");
+
+        when(pingUserMapper.toPingUser(user)).thenReturn(request);
+        when(pingApi.partnersBEAP74737Post(request, null, null))
+                .thenReturn(response);
+
+        PartnersBEAP74737Get200ResponseResourcesInner result =
+                pingUserClient.createUser(user);
+
+        assertThat(result.getId()).isEqualTo("ping-resource-123");
+
+        verify(pingUserMapper).toPingUser(user);
+        verify(pingApi).partnersBEAP74737Post(request, null, null);
+    }
+
+    @Test
+    void shouldWrapCreateFailure() {
+        UserEntity user = new UserEntity();
+        user.setUserId("gps000001");
+
+        PartnersBEAP74737Get200ResponseResourcesInner request =
+                new PartnersBEAP74737Get200ResponseResourcesInner();
+
+        when(pingUserMapper.toPingUser(user)).thenReturn(request);
+        when(pingApi.partnersBEAP74737Post(request, null, null))
+                .thenThrow(new RuntimeException("Ping unavailable"));
+
+        assertThatThrownBy(() -> pingUserClient.createUser(user))
+                .isInstanceOf(PingIntegrationException.class)
+                .hasMessageContaining("gps000001");
+    }
+
+    @Test
+    void shouldUpdateUserInPing() {
+        UserEntity user = new UserEntity();
+
+        PartnersBEAP74737IdPatchRequest request =
+                new PartnersBEAP74737IdPatchRequest();
+
+        when(pingUserMapper.toPatchRequest(user)).thenReturn(request);
+
+        pingUserClient.updateUser("ping-resource-123", user);
+
+        verify(pingApi).partnersBEAP74737IdPatch(
+                "ping-resource-123",
+                null,
+                null,
+                null,
+                request
+        );
+    }
+}
+```
+
+---
+
+## 13. Add one service test to prove Ping is called after creation
+
+Example:
+
+```java
+@Test
+void shouldCallPingAfterCreatingUser() {
+    UserEntity user = new UserEntity();
+    user.setUserId("gps000001");
+
+    when(userRepository.save(user)).thenReturn(user);
+
+    PartnersBEAP74737Get200ResponseResourcesInner pingResponse =
+            new PartnersBEAP74737Get200ResponseResourcesInner();
+    pingResponse.setId("ping-resource-123");
+
+    when(pingUserClient.createUser(user)).thenReturn(pingResponse);
+
+    UserEntity result = userService.createUser(user);
+
+    verify(userRepository).save(user);
+    verify(pingUserClient).createUser(user);
+
+    assertThat(result.getPingResourceId()).isEqualTo("ping-resource-123");
+}
+```
+
+Adapt `userService.createUser(user)` to your actual service method name.
+
+---
+
+## 14. Final integration checklist
+
+```text
+[ ] Ping Swagger JSON is generated during Maven build
+[ ] Generated code compiles after Spring Boot 4 / template fix
+[ ] PingScimProperties is registered
+[ ] PingClientConfiguration creates ApiClient
+[ ] PingUserMapper maps UserEntity -> Ping model
+[ ] PingUserClient wraps generated API
+[ ] UserEntity has pingResourceId if updates/deletes are needed
+[ ] User creation service calls pingUserClient.createUser(savedUser)
+[ ] Ping response id is stored in user.pingResourceId
+[ ] Tests mock Ping; no real Ping call needed
+```
+
+The main existing-code change is this: wherever Partner Repository creates a new `UserEntity`, call `pingUserClient.createUser(savedUser)` immediately after saving the user, then store `pingResponse.getId()` back on the entity.
+
+
+
+----------------------------------------------------
 That’s fine — `UserRequest` was only an example name. In **your code**, you should use the class that receives the incoming user data from AS400 or your controller.
 
 From your screenshots, you already have:
