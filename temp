@@ -1,3 +1,172 @@
+
+Exactly. Your generated Ping response model has **no direct `id` field or `setId()` method**.
+
+The generated class contains:
+
+```java
+private Meta meta;
+```
+
+and the Ping resource identifier is most likely inside that nested `Meta` object, typically as:
+
+```java
+meta.getLocation()
+```
+
+or possibly another property inside `Meta`.
+
+That is why IntelliJ only offers setters such as:
+
+```java
+setCn(...)
+setMail(...)
+setMeta(...)
+setGivenName(...)
+```
+
+and not `setId(...)`.
+
+## Fix the unit test
+
+Create and attach a generated `Meta` object instead of calling `setId()`:
+
+```java
+@Test
+void shouldCallPingAfterCreatingUser() {
+    UserEntity user = new UserEntity();
+    user.setUserId("gps000001");
+
+    when(userRepository.save(user)).thenReturn(user);
+
+    PartnersBEAP74737Get200ResponseResourcesInner pingResponse =
+            new PartnersBEAP74737Get200ResponseResourcesInner();
+
+    Meta meta = new Meta();
+    meta.setLocation(
+            "https://ping.example/scim/v2/partners-BE-AP74737/ping-resource-123"
+    );
+
+    pingResponse.setMeta(meta);
+
+    when(pingUserClient.createUser(user)).thenReturn(pingResponse);
+
+    UserEntity result = userService.createUser(user);
+
+    verify(userRepository).save(user);
+    verify(pingUserClient).createUser(user);
+
+    assertThat(result.getPingResourceId())
+            .isEqualTo("ping-resource-123");
+}
+```
+
+Use the generated `Meta` import:
+
+```java
+import com.bnpp.pf.partner.repository.ping.client.model.Meta;
+```
+
+## Update production code
+
+Your current service probably does something like:
+
+```java
+pingResponse.getId()
+```
+
+That will not work with this generated model.
+
+Instead, extract the resource ID from `meta.location`:
+
+```java
+private String extractPingResourceId(
+        PartnersBEAP74737Get200ResponseResourcesInner pingResponse
+) {
+    if (pingResponse == null
+            || pingResponse.getMeta() == null
+            || pingResponse.getMeta().getLocation() == null
+            || pingResponse.getMeta().getLocation().isBlank()) {
+        throw new PingIntegrationException(
+                "Ping returned no resource location"
+        );
+    }
+
+    String location = pingResponse.getMeta().getLocation();
+
+    int lastSlash = location.lastIndexOf('/');
+
+    if (lastSlash < 0 || lastSlash == location.length() - 1) {
+        throw new PingIntegrationException(
+                "Ping returned an invalid resource location: " + location
+        );
+    }
+
+    return location.substring(lastSlash + 1);
+}
+```
+
+Then use it in your user creation flow:
+
+```java
+@Transactional
+public UserEntity createUser(UserEntity user) {
+    UserEntity savedUser = userRepository.save(user);
+
+    PartnersBEAP74737Get200ResponseResourcesInner pingResponse =
+            pingUserClient.createUser(savedUser);
+
+    String pingResourceId = extractPingResourceId(pingResponse);
+
+    savedUser.setPingResourceId(pingResourceId);
+    savedUser.setPingSyncStatus("SUCCESS");
+    savedUser.setPingLastSyncedAt(Instant.now());
+    savedUser.setPingLastError(null);
+
+    return userRepository.save(savedUser);
+}
+```
+
+## Better test assertion
+
+Because your service saves twice, verifying only:
+
+```java
+verify(userRepository).save(user);
+```
+
+may become ambiguous. Use:
+
+```java
+verify(userRepository, times(2)).save(user);
+```
+
+or verify the final state:
+
+```java
+assertThat(result.getPingResourceId())
+        .isEqualTo("ping-resource-123");
+```
+
+## Important check
+
+Open the generated `Meta` class and verify the property name. It is usually:
+
+```java
+getLocation()
+setLocation(...)
+```
+
+If the generated class instead exposes another field such as:
+
+```java
+getResourceId()
+getHref()
+```
+
+use that exact property. But based on the generated SCIM model shown, `meta.location` is the likely source of the Ping resource URL.
+
+
+-------------------------------
 Your test fails because the mocked Ping response has **no ID**.
 
 You create the response here:
