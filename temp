@@ -1,112 +1,74 @@
-The controller implementation has changed to return **translation keys**, but your tests still expect the old translated French text.
+The failure is because your test never calls the method under test.
 
-Your controller now adds:
-
-```java
-mv.addObject("pageTitleKey", "error.technical.pageTitle");
-mv.addObject("titleKey", "error.technical.title");
-mv.addObject("messageKey", "error.technical.message");
-mv.addObject("strongMessageKey", "error.technical.strongMessage");
-```
-
-But the test is still checking:
+You stub these calls:
 
 ```java
-.containsEntry("pageTitle", "Erreur technique")
-.containsEntry("title", "Oups, un problème technique est survenu.")
-.containsEntry("message", "Nous n'avons pas pu charger...")
+when(pingUserMapper.toPingUser(user)).thenReturn(request);
+when(pingApi.partnersBEAP74737Post(request, null, null))
+        .thenReturn(response);
 ```
 
-That is why Maven says:
+Then immediately verify them:
+
+```java
+verify(pingUserMapper).toPingUser(user);
+verify(pingApi).partnersBEAP74737Post(request, null, null);
+```
+
+But `pingUserClient.createUser(user)` is missing, so Mockito correctly reports:
 
 ```text
-could not find the following map entries:
-["pageTitle"="Erreur technique"]
+Wanted but not invoked:
+pingUserMapper.toPingUser(...)
+Actually, there were zero interactions with this mock.
 ```
 
-## Update `ErrorControllerTest`
-
-Use the translation keys returned by the controller.
+Update the test:
 
 ```java
 @Test
-void technicalError_shouldReturnTechnicalErrorPage() {
-    ModelAndView result = errorController.technicalError();
+void shouldCreateUserInPing() {
+    UserEntity user = new UserEntity();
+    user.setUserId("gps000001");
 
-    assertThat(result.getViewName()).isEqualTo("views/ui-error");
+    PartnersBEAP74737Get200ResponseResourcesInner request =
+            new PartnersBEAP74737Get200ResponseResourcesInner();
 
-    assertThat(result.getModel())
-            .containsEntry("pageTitleKey", "error.technical.pageTitle")
-            .containsEntry("iconPath", "/images/icons/tools.svg")
-            .containsEntry("titleKey", "error.technical.title")
-            .containsEntry("messageKey", "error.technical.message")
-            .containsEntry(
-                    "strongMessageKey",
-                    "error.technical.strongMessage"
-            );
+    PartnersBEAP74737Get200ResponseResourcesInner response =
+            new PartnersBEAP74737Get200ResponseResourcesInner();
+
+    when(pingUserMapper.toPingUser(user))
+            .thenReturn(request);
+
+    when(pingApi.partnersBEAP74737Post(request, null, null))
+            .thenReturn(response);
+
+    // Missing call
+    pingUserClient.createUser(user);
+
+    verify(pingUserMapper).toPingUser(user);
+    verify(pingApi).partnersBEAP74737Post(request, null, null);
 }
 ```
 
-And for the no-sales-point error:
+You can also assert the returned value when `createUser` returns the Ping response:
 
 ```java
-@Test
-void noSalesPoint_shouldReturnNoSalesPointErrorPage() {
-    ModelAndView result = errorController.noSalesPoint();
+var result = pingUserClient.createUser(user);
 
-    assertThat(result.getViewName()).isEqualTo("views/ui-error");
-
-    assertThat(result.getModel())
-            .containsEntry(
-                    "pageTitleKey",
-                    "error.noSalesPoint.pageTitle"
-            )
-            .containsEntry(
-                    "iconPath",
-                    "/images/icons/warning.svg"
-            )
-            .containsEntry(
-                    "titleKey",
-                    "error.noSalesPoint.title"
-            )
-            .containsEntry(
-                    "messageKey",
-                    "error.noSalesPoint.message"
-            )
-            .containsEntry(
-                    "strongMessageKey",
-                    "error.noSalesPoint.strongMessage"
-            );
-}
+assertThat(result).isSameAs(response);
 ```
 
-## Why this is the correct test now
+Then keep the verifications:
 
-The controller should not decide whether the content is French, Dutch, or another language. It now sends message keys to the Thymeleaf template, and Spring resolves them according to the active locale.
-
-Your template should therefore use expressions like:
-
-```html
-<title th:text="#{${pageTitleKey}}"></title>
-
-<h1 th:text="#{${titleKey}}"></h1>
-
-<p th:text="#{${messageKey}}"></p>
-
-<strong th:text="#{${strongMessageKey}}"></strong>
+```java
+verify(pingUserMapper).toPingUser(user);
+verify(pingApi).partnersBEAP74737Post(request, null, null);
+verifyNoMoreInteractions(pingUserMapper, pingApi);
 ```
 
-So the responsibilities are now:
+The important missing line is:
 
-```text
-Controller test:
-checks the correct translation keys
-
-Message bundle:
-contains the translated text
-
-Template:
-resolves the key using the current locale
+```java
+pingUserClient.createUser(user);
 ```
-
-The two failing tests shown in the terminal are therefore fixed by updating the assertions, not by changing `ErrorController`.
