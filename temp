@@ -1,200 +1,106 @@
-Your test is mocking **`WebClient`**, but `PartnerRepositoryClient` now uses **Spring `RestClient`**.
-
-That is why the error says:
-
-```text
-Cannot invoke "org.springframework.web.client.RestClient.get()"
-because "partnerRepoClient" is null
-```
-
-Mockito cannot inject the `WebClient` mock into a `RestClient` field, so the internal client remains `null`.
-
-Replace the WebClient mocks with RestClient mocks.
+The red underline is caused by the wildcard generic types:
 
 ```java
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.when;
+RestClient.RequestHeadersUriSpec<?>
+RestClient.RequestHeadersSpec<?>
+```
 
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.test.util.ReflectionTestUtils;
-import org.springframework.web.client.RestClient;
+Mockito cannot resolve the captured `?` type in `thenReturn(...)`.
 
-@ExtendWith(MockitoExtension.class)
-class PartnerRepositoryClientTest {
+Use `doReturn(...).when(...)` for these chained RestClient mocks.
 
-    @Mock
-    private RestClient partnerRepoClient;
+```java
+@Test
+void shouldGetAppSuccessfully() {
+    String appId = "B2BOOST_BE";
+    AppConfigResponse expectedResponse = new AppConfigResponse();
 
-    @Mock
-    private RestClient.RequestHeadersUriSpec<?> requestHeadersUriSpec;
+    doReturn(requestHeadersUriSpec)
+            .when(partnerRepoClient)
+            .get();
 
-    @Mock
-    private RestClient.RequestHeadersSpec<?> requestHeadersSpec;
+    doReturn(requestHeadersSpec)
+            .when(requestHeadersUriSpec)
+            .uri(
+                    "http://partner-repository/apps/{appId}",
+                    appId
+            );
 
-    @Mock
-    private RestClient.ResponseSpec responseSpec;
+    when(requestHeadersSpec.retrieve())
+            .thenReturn(responseSpec);
 
-    @InjectMocks
-    private PartnerRepositoryClient partnerRepositoryClient;
+    when(responseSpec.body(AppConfigResponse.class))
+            .thenReturn(expectedResponse);
 
-    @BeforeEach
-    void setUp() {
-        ReflectionTestUtils.setField(
-                partnerRepositoryClient,
-                "baseUrl",
-                "http://partner-repository"
-        );
-    }
+    AppConfigResponse result =
+            partnerRepositoryClient.getApp(appId);
 
-    @Test
-    void shouldGetAppSuccessfully() {
-        String appId = "B2BOOST_BE";
-        AppConfigResponse expectedResponse = new AppConfigResponse();
+    assertSame(expectedResponse, result);
 
-        when(partnerRepoClient.get())
-                .thenReturn(requestHeadersUriSpec);
-
-        when(requestHeadersUriSpec.uri(
-                "http://partner-repository/apps/{appId}",
-                appId
-        )).thenReturn(requestHeadersSpec);
-
-        when(requestHeadersSpec.retrieve())
-                .thenReturn(responseSpec);
-
-        when(responseSpec.body(AppConfigResponse.class))
-                .thenReturn(expectedResponse);
-
-        AppConfigResponse result =
-                partnerRepositoryClient.getApp(appId);
-
-        assertSame(expectedResponse, result);
-
-        verify(partnerRepoClient).get();
-        verify(requestHeadersUriSpec).uri(
-                "http://partner-repository/apps/{appId}",
-                appId
-        );
-        verify(requestHeadersSpec).retrieve();
-        verify(responseSpec).body(AppConfigResponse.class);
-    }
-
-    @Test
-    void shouldGetUserByIdSuccessfully() {
-        String userId = "testuser";
-
-        UserResponse expectedResponse = new UserResponse();
-        expectedResponse.setUserId(userId);
-        expectedResponse.setUsername(userId);
-
-        when(partnerRepoClient.get())
-                .thenReturn(requestHeadersUriSpec);
-
-        when(requestHeadersUriSpec.uri(
-                "http://partner-repository/users/{userId}",
-                userId
-        )).thenReturn(requestHeadersSpec);
-
-        when(requestHeadersSpec.retrieve())
-                .thenReturn(responseSpec);
-
-        when(responseSpec.body(UserResponse.class))
-                .thenReturn(expectedResponse);
-
-        UserResponse result =
-                partnerRepositoryClient.getUserById(userId);
-
-        assertEquals("testuser", result.getUserId());
-        assertEquals("testuser", result.getUsername());
-
-        verify(partnerRepoClient).get();
-        verify(requestHeadersUriSpec).uri(
-                "http://partner-repository/users/{userId}",
-                userId
-        );
-        verify(requestHeadersSpec).retrieve();
-        verify(responseSpec).body(UserResponse.class);
-    }
-
-    @Test
-    void shouldThrowWhenGetAppAppIdIsBlank() {
-        IllegalArgumentException exception = assertThrows(
-                IllegalArgumentException.class,
-                () -> partnerRepositoryClient.getApp(" ")
-        );
-
-        assertEquals(
-                "appId must not be blank",
-                exception.getMessage()
-        );
-
-        verifyNoInteractions(partnerRepoClient);
-    }
-
-    @Test
-    void shouldThrowWhenGetAppAppIdIsNull() {
-        IllegalArgumentException exception = assertThrows(
-                IllegalArgumentException.class,
-                () -> partnerRepositoryClient.getApp(null)
-        );
-
-        assertEquals(
-                "appId must not be blank",
-                exception.getMessage()
-        );
-
-        verifyNoInteractions(partnerRepoClient);
-    }
+    verify(partnerRepoClient).get();
+    verify(requestHeadersUriSpec).uri(
+            "http://partner-repository/apps/{appId}",
+            appId
+    );
+    verify(requestHeadersSpec).retrieve();
+    verify(responseSpec).body(AppConfigResponse.class);
 }
 ```
 
-Remove these old WebClient-related imports and mocks:
+Add this static import:
 
 ```java
-import reactor.core.publisher.Mono;
-import org.springframework.web.reactive.function.client.WebClient;
+import static org.mockito.Mockito.doReturn;
 ```
 
-Also remove:
-
-```java
-@Mock
-private WebClient webClient;
-
-@Mock
-private WebClient.RequestHeadersUriSpec requestHeadersUriSpec;
-
-@Mock
-private WebClient.RequestHeadersSpec requestHeadersSpec;
-
-@Mock
-private WebClient.ResponseSpec responseSpec;
-```
-
-The key change is:
-
-```java
-// Old WebClient
-responseSpec.bodyToMono(AppConfigResponse.class)
-        .thenReturn(Mono.just(expectedResponse));
-
-// New RestClient
-responseSpec.body(AppConfigResponse.class)
-        .thenReturn(expectedResponse);
-```
-
-And the mock must have the same name/type used by the production constructor:
+Keep your mocks as:
 
 ```java
 @Mock
 private RestClient partnerRepoClient;
+
+@Mock
+private RestClient.RequestHeadersUriSpec<?> requestHeadersUriSpec;
+
+@Mock
+private RestClient.RequestHeadersSpec<?> requestHeadersSpec;
+
+@Mock
+private RestClient.ResponseSpec responseSpec;
 ```
+
+Use the same fix in the user test:
+
+```java
+@Test
+void shouldGetUserByIdSuccessfully() {
+    UserResponse expectedResponse = new UserResponse();
+    expectedResponse.setUserId("testuser");
+    expectedResponse.setUsername("testuser");
+
+    doReturn(requestHeadersUriSpec)
+            .when(partnerRepoClient)
+            .get();
+
+    doReturn(requestHeadersSpec)
+            .when(requestHeadersUriSpec)
+            .uri(
+                    "http://partner-repository/users/{userId}",
+                    "testuser"
+            );
+
+    when(requestHeadersSpec.retrieve())
+            .thenReturn(responseSpec);
+
+    when(responseSpec.body(UserResponse.class))
+            .thenReturn(expectedResponse);
+
+    UserResponse result =
+            partnerRepositoryClient.getUserById("testuser");
+
+    assertEquals("testuser", result.getUserId());
+    assertEquals("testuser", result.getUsername());
+}
+```
+
+The production code does not need changing. This is only Mockito struggling with Spring RestClient’s self-referencing wildcard generics.
