@@ -1,4 +1,86 @@
+That means `meta` is probably **read-only in the generated model**, so don’t use `setMeta(...)` in your test.
 
+For now, use a field that **does have a setter** in the response model. From your screenshot, `cn` has both getter/setter:
+
+```java
+pingResponse.setCn("ping-resource-123");
+```
+
+Then change your service to extract the Ping resource id from `cn`.
+
+### In your service
+
+Replace the old `pingResponse.getId()` logic with:
+
+```java
+private String extractPingResourceId(
+        PartnersBEAP74737Get200ResponseResourcesInner pingResponse,
+        UserEntity user
+) {
+    if (pingResponse == null) {
+        throw new PingIntegrationException(
+                "Ping returned no response for user: " + user.getUserId()
+        );
+    }
+
+    if (pingResponse.getCn() != null && !pingResponse.getCn().isBlank()) {
+        return pingResponse.getCn();
+    }
+
+    throw new PingIntegrationException(
+            "Ping returned no resource id for user: " + user.getUserId()
+    );
+}
+```
+
+Then in `createUser`:
+
+```java
+PartnersBEAP74737Get200ResponseResourcesInner pingResponse =
+        pingUserClient.createUser(savedUser);
+
+String pingResourceId = extractPingResourceId(pingResponse, savedUser);
+
+savedUser.setPingResourceId(pingResourceId);
+savedUser.setPingSyncStatus("SUCCESS");
+savedUser.setPingLastSyncedAt(Instant.now());
+savedUser.setPingLastError(null);
+
+return userRepository.save(savedUser);
+```
+
+### In your test
+
+Use:
+
+```java
+PartnersBEAP74737Get200ResponseResourcesInner pingResponse =
+        new PartnersBEAP74737Get200ResponseResourcesInner();
+
+pingResponse.setCn("ping-resource-123");
+
+when(pingUserClient.createUser(user)).thenReturn(pingResponse);
+```
+
+Then assert:
+
+```java
+assertThat(result.getPingResourceId())
+        .isEqualTo("ping-resource-123");
+```
+
+This should compile because `setCn(String cn)` exists.
+
+Later, confirm with Ping whether `cn` is truly the resource identifier they expect in:
+
+```text
+PATCH /partners-BE-AP74737/{id}
+```
+
+If not, ask them what response field should be used as `{id}` because the generated response model has no writable/readable direct `id` field.
+
+
+--------
 Exactly. Your generated Ping response model has **no direct `id` field or `setId()` method**.
 
 The generated class contains:
