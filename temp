@@ -1,133 +1,125 @@
-Add tests for the remaining three methods in `GlobalExceptionHandler`: `IllegalArgumentException`, `TechnicalException`, and generic `Exception`.
+The uncovered section is the successful path inside `getApp(...)`:
 
 ```java
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+validateAppId(appId);
 
-import java.lang.reflect.Method;
-import java.util.Map;
+return partnerRepoClient.get()
+        .uri(baseUrl + "/apps/{appId}", appId)
+        .retrieve()
+        .bodyToMono(AppConfigResponse.class)
+        .block();
+```
 
-import org.junit.jupiter.api.Test;
-import org.springframework.core.MethodParameter;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.MissingRequestHeaderException;
-import org.springframework.web.bind.annotation.RequestHeader;
-import org.springframework.web.servlet.ModelAndView;
+Your null and blank tests only cover `validateAppId(...)`. Add this success test to `PartnerRepositoryClientTest`:
 
-class GlobalExceptionHandlerTest {
+```java
+@Test
+void shouldGetAppSuccessfully() {
+    String appId = "B2BOOST_BE";
+    AppConfigResponse expectedResponse = new AppConfigResponse();
 
-    private final GlobalExceptionHandler handler =
-            new GlobalExceptionHandler();
+    when(webClient.get())
+            .thenReturn(requestHeadersUriSpec);
 
-    @Test
-    void shouldHandleMissingRequestHeaderException() throws Exception {
-        Method method = GlobalExceptionHandlerTest.class
-                .getDeclaredMethod("dummyEndpoint", String.class);
+    when(requestHeadersUriSpec.uri(
+            "http://partner-repository/apps/{appId}",
+            appId
+    )).thenReturn(requestHeadersSpec);
 
-        MethodParameter methodParameter =
-                new MethodParameter(method, 0);
+    when(requestHeadersSpec.retrieve())
+            .thenReturn(responseSpec);
 
-        MissingRequestHeaderException exception =
-                new MissingRequestHeaderException(
-                        "APP_ID",
-                        methodParameter
-                );
+    when(responseSpec.bodyToMono(AppConfigResponse.class))
+            .thenReturn(Mono.just(expectedResponse));
 
-        Map<String, String> response =
-                handler.handleMissingRequestHeader(exception);
+    AppConfigResponse result =
+            partnerRepositoryClient.getApp(appId);
 
-        assertNotNull(response);
-        assertTrue(response.containsKey("message"));
-        assertNotNull(response.get("message"));
-        assertTrue(response.get("message").contains("APP_ID"));
-    }
+    assertSame(expectedResponse, result);
 
-    @Test
-    void shouldHandleIllegalArgumentException() {
-        IllegalArgumentException exception =
-                new IllegalArgumentException("Invalid APP_ID");
-
-        ResponseEntity<Map<String, Object>> response =
-                handler.handleIllegalArgumentException(exception);
-
-        assertNotNull(response);
-        assertEquals(400, response.getStatusCode().value());
-        assertNotNull(response.getBody());
-        assertEquals(
-                "Invalid APP_ID",
-                response.getBody().get("message")
-        );
-    }
-
-    @Test
-    void shouldRedirectToTechnicalErrorForTechnicalException() {
-        TechnicalException exception =
-                new TechnicalException("Technical failure");
-
-        ModelAndView response =
-                handler.handleGenericUiException(exception);
-
-        assertNotNull(response);
-        assertEquals(
-                "redirect:/error/technical",
-                response.getViewName()
-        );
-    }
-
-    @Test
-    void shouldRedirectToTechnicalErrorForGenericException() {
-        ModelAndView response = handler.handleGeneric();
-
-        assertNotNull(response);
-        assertEquals(
-                "redirect:/error/technical",
-                response.getViewName()
-        );
-    }
-
-    @SuppressWarnings("unused")
-    private void dummyEndpoint(
-            @RequestHeader("APP_ID") String appId
-    ) {
-        // Used only to construct MethodParameter in the test.
-    }
+    verify(webClient).get();
+    verify(requestHeadersUriSpec).uri(
+            "http://partner-repository/apps/{appId}",
+            appId
+    );
+    verify(requestHeadersSpec).retrieve();
+    verify(responseSpec).bodyToMono(AppConfigResponse.class);
 }
 ```
 
-One possible adjustment: your `TechnicalException` constructor may not accept a message. In that case, create it using the constructor available in your class, for example:
+Add this static import if it is missing:
 
 ```java
-TechnicalException exception = new TechnicalException();
+import static org.junit.jupiter.api.Assertions.assertSame;
 ```
 
-or:
+You can also use `assertNotNull(result)`, but `assertSame(...)` is stronger here because it confirms that the exact response emitted by the mocked `Mono` is returned.
+
+Your completed test class should now have these three `getApp` cases:
 
 ```java
-TechnicalException exception =
-        new TechnicalException(
-                "Technical failure",
-                new RuntimeException("Root cause")
-        );
-```
+@Test
+void shouldGetAppSuccessfully() {
+    String appId = "B2BOOST_BE";
+    AppConfigResponse expectedResponse = new AppConfigResponse();
 
-You can also simplify and strengthen the generic handler so the exception is logged:
+    when(webClient.get())
+            .thenReturn(requestHeadersUriSpec);
 
-```java
-@ExceptionHandler(Exception.class)
-public ModelAndView handleGeneric(Exception exception) {
-    log.error("Unhandled application error", exception);
-    return new ModelAndView("redirect:/error/technical");
+    when(requestHeadersUriSpec.uri(
+            "http://partner-repository/apps/{appId}",
+            appId
+    )).thenReturn(requestHeadersSpec);
+
+    when(requestHeadersSpec.retrieve())
+            .thenReturn(responseSpec);
+
+    when(responseSpec.bodyToMono(AppConfigResponse.class))
+            .thenReturn(Mono.just(expectedResponse));
+
+    AppConfigResponse result =
+            partnerRepositoryClient.getApp(appId);
+
+    assertSame(expectedResponse, result);
+
+    verify(webClient).get();
+    verify(requestHeadersUriSpec).uri(
+            "http://partner-repository/apps/{appId}",
+            appId
+    );
+    verify(requestHeadersSpec).retrieve();
+    verify(responseSpec).bodyToMono(AppConfigResponse.class);
+}
+
+@Test
+void shouldThrowWhenGetAppAppIdIsBlank() {
+    IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> partnerRepositoryClient.getApp(" ")
+    );
+
+    assertEquals(
+            "appId must not be blank",
+            exception.getMessage()
+    );
+
+    verifyNoInteractions(webClient);
+}
+
+@Test
+void shouldThrowWhenGetAppAppIdIsNull() {
+    IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> partnerRepositoryClient.getApp(null)
+    );
+
+    assertEquals(
+            "appId must not be blank",
+            exception.getMessage()
+    );
+
+    verifyNoInteractions(webClient);
 }
 ```
 
-Then update the test call:
-
-```java
-ModelAndView response =
-        handler.handleGeneric(
-                new RuntimeException("Unexpected failure")
-        );
-```
-
-This covers every method currently visible in the handler.
+This should cover all the red lines shown for `getApp(...)`.
