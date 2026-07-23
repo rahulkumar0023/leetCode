@@ -1,195 +1,70 @@
-Yes — this is the actual snapshot flow. Since `synchronize(...)` already has a `userCreated` boolean, call Ping there only when:
+The Ping call is now being reached. The failure happens before the HTTP request is sent, inside your mapper:
 
-```java
-userCreated && pingScimProperties.enabled()
+```text
+IllegalArgumentException: Unsupported Ping status: 40
+at PingUserMapper.mapStatus(...)
 ```
 
-Do not put the web-service call inside `populateNewUser(...)`; that method should only populate fields.
+Your snapshot payload sends:
 
-Inject these dependencies into `UserSynchronizationService`:
-
-```java
-private final PingUserClient pingUserClient;
-private final PingScimProperties pingScimProperties;
+```json
+"status": "40"
 ```
 
-Then, after the user and relationships have been saved, but before the response-building blocks around line 66, add:
+but `mapStatus(...)` only supports values such as `ACTIVE` and `INACTIVE`.
+
+Update the mapper to translate the AS400 numeric status into Ping’s expected status.
 
 ```java
-if (userCreated) {
-    synchronizeNewUserWithPing(user);
-}
-```
-
-Your flow should look approximately like this:
-
-```java
-@Transactional
-public As400SyncResponse synchronize(As400UserSnapshotRequest request) {
-
-    // Your existing validation and lookup logic...
-
-    boolean userCreated = false;
-    boolean anyRelationshipCreated = false;
-    boolean anySalesPointChanged = false;
-    boolean anyRelationshipChanged = false;
-
-    UserEntity user;
-
-    // Your existing logic that creates or loads the user...
-    // When a new user is created:
-    //
-    // user = new UserEntity();
-    // populateNewUser(user, request);
-    // user = userRepository.save(user);
-    // userCreated = true;
-
-    // Your existing sales-point and relationship logic...
-
-    if (userCreated) {
-        synchronizeNewUserWithPing(user);
-    }
-
-    if (userCreated || anyRelationshipCreated) {
-        return As400SyncResponse.builder()
-                .status("ACCEPTED")
-                .code(As400SyncCode.RECORD_CREATED)
-                .message("User snapshot created successfully.")
-                .correlationId(correlationId)
-                .partnerRepositoryRecordId(user.getUserId())
-                .build();
-    }
-
-    if (anySalesPointChanged || anyRelationshipChanged) {
-        return As400SyncResponse.builder()
-                .status("ACCEPTED")
-                .code(As400SyncCode.RECORD_UPDATED)
-                .message("User snapshot updated successfully.")
-                .correlationId(correlationId)
-                .partnerRepositoryRecordId(user.getUserId())
-                .build();
-    }
-
-    return As400SyncResponse.builder()
-            .status("ACCEPTED")
-            .code(As400SyncCode.NO_CHANGE)
-            .message("Snapshot received but no effective change was detected.")
-            .correlationId(correlationId)
-            .partnerRepositoryRecordId(user.getUserId())
-            .build();
-}
-```
-
-Add this private method to the same service:
-
-```java
-private void synchronizeNewUserWithPing(UserEntity user) {
-    if (!pingScimProperties.enabled()) {
-        log.info(
-                "Ping SCIM integration is disabled. Skipping userId={}",
-                user.getUserId()
-        );
-        return;
-    }
-
-    log.info(
-            "Ping SCIM integration enabled. Creating userId={} in Ping",
-            user.getUserId()
-    );
-
-    try {
-        pingUserClient.createUser(user);
-
-        user.setPingSyncStatus("SUCCESS");
-        user.setPingLastSyncedAt(Instant.now());
-        user.setPingLastError(null);
-
-        userRepository.save(user);
-
-        log.info(
-                "Ping user creation completed for userId={}",
-                user.getUserId()
-        );
-    } catch (RuntimeException exception) {
-        user.setPingSyncStatus("FAILED");
-        user.setPingLastError(limitErrorMessage(exception.getMessage()));
-        userRepository.save(user);
-
-        log.error(
-                "Ping user creation failed for userId={}",
-                user.getUserId(),
-                exception
-        );
-
-        throw exception;
-    }
-}
-```
-
-Add a helper so an unexpectedly long exception does not exceed the database column:
-
-```java
-private String limitErrorMessage(String message) {
-    if (message == null) {
+private String mapStatus(Object status) {
+    if (status == null) {
         return null;
     }
 
-    int maximumLength = 2000;
-    return message.length() <= maximumLength
-            ? message
-            : message.substring(0, maximumLength);
+    String value = status.toString().trim().toUpperCase(Locale.ROOT);
+
+    return switch (value) {
+        // AS400 statuses
+        case "40" -> "ACTIVE";
+
+        // Replace these with the confirmed business mappings
+        case "50", "60" -> "INACTIVE";
+
+        // Already normalized values
+        case "ACTIVE" -> "ACTIVE";
+        case "INACTIVE", "DISABLED", "DELETED" -> "INACTIVE";
+
+        default -> throw new IllegalArgumentException(
+                "Unsupported Ping status: " + status
+        );
+    };
 }
 ```
 
-Required imports:
+The exact meaning of `40`, `50`, and `60` should come from the AS400 status specification. Do not assume the inactive mappings unless they are confirmed. For now, your current test payload clearly requires:
 
 ```java
-import java.time.Instant;
-
-import lombok.extern.slf4j.Slf4j;
+case "40" -> "ACTIVE";
 ```
 
-And make sure the class has:
+Also add a mapper test:
 
 ```java
-@Slf4j
-@Service
-@RequiredArgsConstructor
-public class UserSynchronizationService {
-```
+@Test
+void shouldMapAs400Status40ToActive() {
+    UserEntity user = new UserEntity();
+    user.setStatus("40");
 
-Your properties:
+    var result = mapper.toPingUser(user);
 
-```yaml
-ping:
-  scim:
-    enabled: ${PING_SCIM_ENABLED:false}
-```
-
-For local testing without Ping:
-
-```yaml
-PING_SCIM_ENABLED: "false"
-```
-
-To enable the real call later:
-
-```yaml
-PING_SCIM_ENABLED: "true"
-```
-
-The important placement is:
-
-```java
-if (userCreated) {
-    synchronizeNewUserWithPing(user);
+    assertThat(result.getStatus()).isEqualTo("ACTIVE");
 }
 ```
 
-immediately before your existing:
+After redeploying, the expected log sequence should progress beyond:
 
-```java
-if (userCreated || anyRelationshipCreated) {
+```text
+Creating userId=... in Ping
 ```
 
-This guarantees Ping is called only when the snapshot actually creates a new Partner Repository user.
+and either show a successful Ping response or the next actual HTTP/authentication error.
