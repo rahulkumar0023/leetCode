@@ -1,28 +1,9 @@
-You are right. More precise wording:
+As I wrap up my last day, I just wanted to say a heartfelt thank you to everyone I’ve had the pleasure of working with.
 
-```text
-This is a B2Boost post-login URL.
+It’s been an incredible journey. Thank you for your support, the laughs, the teamwork, and the challenges that helped me grow. I’m especially grateful to all of you for making work not only interesting and rewarding, but also genuinely fun. I’m leaving with valuable experience, genuine friendships, and memories I’ll always cherish.
 
-Flow:
+While it’s never easy to say goodbye, I’m excited for what’s next and wish each of you continued success and happiness.
 
-1. The user selects a sales point on the Arthur Core page and clicks the confirmation button.
+Please stay in touch. You can reach me at [email] or connect with me on LinkedIn at [link]. I hope our paths cross again someday.
 
-2. Arthur Core receives the confirmation, creates a temporary one-time UUID handoff code, and sends the user to B2Boost using the configured B2Boost post-login URL:
-
-   https://<B2Boost-url>/post-login?code=<handoff-code-or-UUID>
-
-3. B2Boost then calls Arthur Core server-to-server using that code:
-
-   POST https://<arthur-core-url>/auth/handoff/exchange
-
-   Request body:
-   {
-     "code": "<handoff-code-or-UUID>"
-   }
-
-4. Arthur Core validates the code. If valid, Arthur Core returns the security context to B2Boost.
-
-Important: the browser only carries the temporary UUID code. The full security context is returned only through the server-to-server exchange.
-```
-
-Even though the trigger is the **confirmation button**, technically Arthur still performs an HTTP redirect/navigation to the B2Boost URL after creating the UUID.
+Wishing you all the very best!
