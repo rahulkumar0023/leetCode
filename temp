@@ -1,12 +1,301 @@
-As I wrap up my last day, I wanted to say a heartfelt thank you to everyone I’ve had the pleasure of working with.
+That structure is appropriate. Keep `master.yaml` as the root changelog, include a dedicated YAML changeset, and let that changeset reference the CSV.
 
-It’s been an incredible journey. Thank you for the support, the laughs, the teamwork, and the challenges that helped me grow. You made work not only rewarding, but genuinely fun, and I’m leaving with valuable experience, genuine friendships, and memories I’ll always cherish.
+Liquibase `include` references another changelog, while `loadData` references the actual CSV. With `relativeToChangelogFile: true`, each path is resolved relative to the YAML file containing it. ([Liquibase Docs][1])
 
-Goodbyes are never easy, but I’m excited for what’s next and wish you all continued success and happiness.
+## Recommended directory structure
 
-Please stay in touch. I’d love for our paths to cross again.
+```text
+src/main/resources/
+└── db/
+    └── changelog/
+        ├── master.yaml
+        ├── changes/
+        │   └── 007-bulk-import-users.yaml
+        └── data/
+            └── users-bulk-import.csv
+```
 
-Email: [personal email],LinkedIn: [profile]
+## `master.yaml`
 
-Warm regards,
-[Name]
+```yaml
+databaseChangeLog:
+  - include:
+      file: changes/007-bulk-import-users.yaml
+      relativeToChangelogFile: true
+```
+
+The master file should point to the YAML changeset, not directly to the CSV.
+
+## `007-bulk-import-users.yaml`
+
+Assuming the CSV is loaded into a staging table:
+
+```yaml
+databaseChangeLog:
+  - changeSet:
+      id: 007-01-load-bulk-users
+      author: rahul
+
+      preConditions:
+        onFail: HALT
+        onError: HALT
+        tableExists:
+          tableName: user_import_staging
+
+      changes:
+        - loadData:
+            file: ../data/users-bulk-import.csv
+            relativeToChangelogFile: true
+            tableName: user_import_staging
+            encoding: UTF-8
+            separator: ","
+            quotchar: '"'
+            usePreparedStatements: true
+
+            columns:
+              - column:
+                  header: source_system
+                  name: source_system
+                  type: STRING
+
+              - column:
+                  header: source_record_id
+                  name: source_record_id
+                  type: STRING
+
+              - column:
+                  header: correlation_id
+                  name: correlation_id
+                  type: STRING
+
+              - column:
+                  header: snapshot_timestamp
+                  name: snapshot_timestamp
+                  type: DATETIME
+
+              - column:
+                  header: payload_version
+                  name: payload_version
+                  type: STRING
+
+              - column:
+                  header: entity
+                  name: entity
+                  type: STRING
+
+              - column:
+                  header: source_record_type
+                  name: source_record_type
+                  type: STRING
+
+              - column:
+                  header: related_parent
+                  name: related_parent
+                  type: STRING
+
+              - column:
+                  header: source_personal_id
+                  name: source_personal_id
+                  type: STRING
+
+              - column:
+                  header: gps_group_number
+                  name: gps_group_number
+                  type: STRING
+
+              - column:
+                  header: source_point_of_sales_id
+                  name: source_point_of_sales_id
+                  type: STRING
+
+              - column:
+                  header: first_name
+                  name: first_name
+                  type: STRING
+
+              - column:
+                  header: surname
+                  name: surname
+                  type: STRING
+
+              - column:
+                  header: email
+                  name: email
+                  type: STRING
+
+              - column:
+                  header: phone_number
+                  name: phone_number
+                  type: STRING
+
+              - column:
+                  header: language
+                  name: language
+                  type: STRING
+
+              - column:
+                  header: user_status
+                  name: user_status
+                  type: STRING
+
+              - column:
+                  header: sales_point_id
+                  name: sales_point_id
+                  type: STRING
+
+              - column:
+                  header: sales_point_name
+                  name: sales_point_name
+                  type: STRING
+
+              - column:
+                  header: relationship_type
+                  name: relationship_type
+                  type: STRING
+
+              - column:
+                  header: relationship_status
+                  name: relationship_status
+                  type: STRING
+
+      rollback:
+        - delete:
+            tableName: user_import_staging
+```
+
+Liquibase YAML requires the individual `column` entries to be nested under `columns`, as shown above. ([Liquibase Docs][1])
+
+## Follow it with database inserts
+
+The next changesets can move distinct records from staging into the real tables.
+
+```yaml
+  - changeSet:
+      id: 007-02-import-users
+      author: rahul
+      changes:
+        - sql:
+            dbms: postgresql
+            sql: |
+              INSERT INTO users (
+                  user_id,
+                  username,
+                  gps_group_number,
+                  source_personal_id,
+                  entity,
+                  first_name,
+                  last_name,
+                  email,
+                  phone_number,
+                  language,
+                  status
+              )
+              SELECT DISTINCT
+                  LOWER(TRIM(gps_group_number)),
+                  LOWER(TRIM(gps_group_number)),
+                  LOWER(TRIM(gps_group_number)),
+                  source_personal_id,
+                  entity,
+                  first_name,
+                  surname,
+                  email,
+                  phone_number,
+                  language,
+                  user_status
+              FROM user_import_staging
+              WHERE gps_group_number IS NOT NULL
+                AND TRIM(gps_group_number) <> ''
+              ON CONFLICT (user_id) DO UPDATE SET
+                  source_personal_id = EXCLUDED.source_personal_id,
+                  entity = EXCLUDED.entity,
+                  first_name = EXCLUDED.first_name,
+                  last_name = EXCLUDED.last_name,
+                  email = EXCLUDED.email,
+                  phone_number = EXCLUDED.phone_number,
+                  language = EXCLUDED.language,
+                  status = EXCLUDED.status;
+```
+
+```yaml
+  - changeSet:
+      id: 007-03-import-sales-points
+      author: rahul
+      changes:
+        - sql:
+            dbms: postgresql
+            sql: |
+              INSERT INTO sales_point (
+                  sales_point_id,
+                  label
+              )
+              SELECT DISTINCT
+                  TRIM(sales_point_id),
+                  sales_point_name
+              FROM user_import_staging
+              WHERE sales_point_id IS NOT NULL
+                AND TRIM(sales_point_id) <> ''
+              ON CONFLICT (sales_point_id) DO UPDATE SET
+                  label = EXCLUDED.label;
+```
+
+```yaml
+  - changeSet:
+      id: 007-04-import-relationships
+      author: rahul
+      changes:
+        - sql:
+            dbms: postgresql
+            sql: |
+              INSERT INTO person_sales_point_relationship (
+                  person_user_id,
+                  sales_point_id,
+                  relationship_type,
+                  org_unit_id,
+                  status
+              )
+              SELECT DISTINCT
+                  LOWER(TRIM(gps_group_number)),
+                  TRIM(sales_point_id),
+                  TRIM(relationship_type),
+                  TRIM(sales_point_id),
+                  relationship_status
+              FROM user_import_staging
+              WHERE gps_group_number IS NOT NULL
+                AND sales_point_id IS NOT NULL
+                AND relationship_type IS NOT NULL
+              ON CONFLICT (
+                  person_user_id,
+                  sales_point_id,
+                  relationship_type
+              ) DO UPDATE SET
+                  org_unit_id = EXCLUDED.org_unit_id,
+                  status = EXCLUDED.status;
+```
+
+Optionally clear staging afterward:
+
+```yaml
+  - changeSet:
+      id: 007-05-clear-user-import-staging
+      author: rahul
+      changes:
+        - delete:
+            tableName: user_import_staging
+```
+
+## Important deployment behavior
+
+Once Liquibase executes a changeset, its `id`, `author`, and file path are recorded in `DATABASECHANGELOG`. Replacing the contents of the same CSV later will not cause the already-executed changeset to run again.
+
+For a new import file, create a new changeset:
+
+```text
+008-bulk-import-users.yaml
+users-bulk-import-20260725.csv
+```
+
+Do not modify the CSV attached to an already-deployed changeset unless it has never run in any shared environment.
+
+Also, this import bypasses Java and therefore bypasses Ping provisioning. It creates database records only; Ping synchronization would need a separate post-import process.
+
+[1]: https://docs.liquibase.com/loaddata?utm_source=chatgpt.com "loadData - Liquibase"
