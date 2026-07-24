@@ -1,15 +1,17 @@
-Your wording is correct. I would just polish it slightly so the flow is clear and precise:
+You are right. More precise wording:
 
 ```text
 This is a B2Boost post-login URL.
 
 Flow:
 
-1. After sales-point selection, Arthur Core redirects the browser to B2Boost with a temporary one-time code:
+1. The user selects a sales point on the Arthur Core page and clicks the confirmation button.
+
+2. Arthur Core receives the confirmation, creates a temporary one-time UUID handoff code, and sends the user to B2Boost using the configured B2Boost post-login URL:
 
    https://<B2Boost-url>/post-login?code=<handoff-code-or-UUID>
 
-2. B2Boost then calls Arthur Core server-to-server using that code:
+3. B2Boost then calls Arthur Core server-to-server using that code:
 
    POST https://<arthur-core-url>/auth/handoff/exchange
 
@@ -18,9 +20,9 @@ Flow:
      "code": "<handoff-code-or-UUID>"
    }
 
-3. Arthur Core validates the code. If valid, Arthur Core returns the security context to B2Boost.
+4. Arthur Core validates the code. If valid, Arthur Core returns the security context to B2Boost.
 
-Important: Arthur Core does not send the full security context in the browser redirect URL. Only the temporary code is sent through the browser.
+Important: the browser only carries the temporary UUID code. The full security context is returned only through the server-to-server exchange.
 ```
 
-One small correction: instead of “B2Boost reverts back,” use **“B2Boost calls Arthur Core server-to-server”**. That makes it clear this is not another browser redirect.
+Even though the trigger is the **confirmation button**, technically Arthur still performs an HTTP redirect/navigation to the B2Boost URL after creating the UUID.
