@@ -1,381 +1,114 @@
-Yes, the DTO classes should be updated to match the cleaned JSON and prevent invalid values early.
+All three failures have the same cause:
 
-## `As400UserSnapshotRequest`
+```text
+savedUser is null
+```
+
+In `createUser(...)` you do:
 
 ```java
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-@Builder
-public class As400UserSnapshotRequest {
+UserEntity savedUser = userRepository.save(user);
+```
 
-    @Valid
-    @NotNull
-    private As400MetadataRequest metadata;
+Mockito returns `null` by default because `userRepository.save(...)` is not stubbed in these tests.
 
-    @Valid
-    @NotNull
-    private As400SourceRequest source;
+Add this in `@BeforeEach`:
 
-    @Valid
-    @NotNull
-    private As400PersonRequest person;
+```java
+@BeforeEach
+void setUp() {
+    service = createService(false);
 
-    @Valid
-    @NotEmpty
-    @JsonProperty("point_of_sales")
-    private List<As400PointOfSalesRequest> pointOfSales;
+    when(userRepository.save(any(UserEntity.class)))
+            .thenAnswer(invocation -> invocation.getArgument(0));
 }
 ```
 
-## `As400MetadataRequest`
+Make sure these imports exist:
 
 ```java
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-@Builder
-public class As400MetadataRequest {
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.when;
+```
 
-    @NotBlank
-    @JsonProperty("source_system")
-    private String sourceSystem;
+Then your individual tests can remain mostly unchanged.
 
-    @NotBlank
-    @JsonProperty("source_record_id")
-    private String sourceRecordId;
+For the Ping-enabled success test:
 
-    @NotBlank
-    @JsonProperty("correlation_id")
-    private String correlationId;
+```java
+@Test
+void shouldCreateUserAndSynchronizeWithPingWhenEnabled() {
+    service = createService(true);
 
-    @NotNull
-    @JsonProperty("snapshot_timestamp")
-    private Instant snapshotTimestamp;
+    UserEntity user = createUserEntity();
 
-    @NotBlank
-    @JsonProperty("payload_version")
-    private String payloadVersion;
+    UserEntity result = service.createUser(user);
+
+    assertSame(user, result);
+    assertEquals("SUCCESS", result.getPingSyncStatus());
+    assertNotNull(result.getPingLastSyncedAt());
+    assertNull(result.getPingLastError());
+
+    verify(pingUserClient).createUser(user);
+    verify(userRepository, times(2)).save(user);
 }
 ```
 
-Using `Instant` is better than `String` for:
-
-```json
-"snapshot_timestamp": "2026-07-03T10:30:00Z"
-```
-
-## `As400SourceRequest`
+For Ping disabled:
 
 ```java
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-@Builder
-public class As400SourceRequest {
+@Test
+void shouldCreateUserWithoutCallingPingWhenIntegrationIsDisabled() {
+    service = createService(false);
 
-    @NotBlank
-    private String entity;
+    UserEntity user = createUserEntity();
 
-    @NotBlank
-    @JsonProperty("source_record_type")
-    private String sourceRecordType;
+    UserEntity result = service.createUser(user);
 
-    @JsonProperty("related_parent")
-    private String relatedParent;
+    assertSame(user, result);
 
-    @NotBlank
-    @JsonProperty("source_personal_id")
-    private String sourcePersonalId;
-
-    @NotBlank
-    @JsonProperty("gps_group_number")
-    private String gpsGroupNumber;
-
-    @JsonProperty("source_point_of_sales_id")
-    private String sourcePointOfSalesId;
+    verify(userRepository).save(user);
+    verifyNoInteractions(pingUserClient);
 }
 ```
 
-`relatedParent` should remain nullable because the JSON may contain:
-
-```json
-"related_parent": null
-```
-
-Do not add `@NotBlank` to it.
-
-## `As400PersonRequest`
+For Ping failure:
 
 ```java
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-@Builder
-public class As400PersonRequest {
+@Test
+void shouldMarkUserAsFailedWhenPingCreationFails() {
+    service = createService(true);
 
-    @NotBlank
-    @JsonProperty("first_name")
-    private String firstName;
+    UserEntity user = createUserEntity();
 
-    @NotBlank
-    private String surname;
+    RuntimeException pingException =
+            new RuntimeException("Ping unavailable");
 
-    @Email
-    private String email;
+    doThrow(pingException)
+            .when(pingUserClient)
+            .createUser(user);
 
-    @JsonProperty("phone_number")
-    private String phoneNumber;
+    RuntimeException result = assertThrows(
+            RuntimeException.class,
+            () -> service.createUser(user)
+    );
 
-    @NotBlank
-    private String language;
+    assertSame(pingException, result);
+    assertEquals("FAILED", user.getPingSyncStatus());
+    assertEquals(
+            "Ping unavailable",
+            user.getPingLastError()
+    );
 
-    @NotBlank
-    private String status;
+    verify(userRepository, times(2)).save(user);
 }
 ```
 
-You can strengthen `language` later:
+The important fix is this stub:
 
 ```java
-@Pattern(regexp = "^[A-Za-z]{2}$")
-private String language;
+when(userRepository.save(any(UserEntity.class)))
+        .thenAnswer(invocation -> invocation.getArgument(0));
 ```
 
-For now, that would accept `FR`, `NL`, `EN`, and similar two-letter codes.
-
-## `As400PointOfSalesRequest`
-
-```java
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-@Builder
-public class As400PointOfSalesRequest {
-
-    @NotBlank
-    private String id;
-
-    @NotBlank
-    private String name;
-
-    @Valid
-    @NotNull
-    @JsonProperty("working_relationship")
-    private As400WorkingRelationshipRequest workingRelationship;
-}
-```
-
-## `As400WorkingRelationshipRequest`
-
-This is the most important class to update.
-
-Use a `Set` instead of a `List` so duplicate values are removed during deserialization:
-
-```java
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-@Builder
-public class As400WorkingRelationshipRequest {
-
-    @NotEmpty
-    @JsonProperty("relationship_types")
-    private Set<String> relationshipTypes;
-
-    @NotBlank
-    private String status;
-}
-```
-
-Then this input:
-
-```json
-"relationship_types": [
-  "DEALER",
-  "SELLER",
-  "ZONE_MANAGER",
-  "DEALER"
-]
-```
-
-becomes:
-
-```java
-["DEALER", "SELLER", "ZONE_MANAGER"]
-```
-
-internally.
-
-Use `LinkedHashSet` if preserving JSON order matters:
-
-```java
-@Builder.Default
-@JsonProperty("relationship_types")
-private Set<String> relationshipTypes =
-        new LinkedHashSet<>();
-```
-
-## Better: use enums for controlled values
-
-String fields work, but enums are safer.
-
-### `RelationshipType`
-
-```java
-public enum RelationshipType {
-    SELLER,
-    DEALER,
-    ZONE_MANAGER
-}
-```
-
-Then:
-
-```java
-@NotEmpty
-@JsonProperty("relationship_types")
-private Set<RelationshipType> relationshipTypes;
-```
-
-Your service loop becomes:
-
-```java
-for (RelationshipType relationshipType
-        : workingRelationship.getRelationshipTypes()) {
-
-    String relationshipTypeValue =
-            relationshipType.name();
-
-    // repository lookup and mapping
-}
-```
-
-### `WorkingRelationshipStatus`
-
-```java
-public enum WorkingRelationshipStatus {
-    ACTIVE,
-    INACTIVE
-}
-```
-
-Then:
-
-```java
-@NotNull
-private WorkingRelationshipStatus status;
-```
-
-### `SourceRecordType`
-
-```java
-public enum SourceRecordType {
-    SELLER,
-    DEALER,
-    ZONE_MANAGER
-}
-```
-
-Then in `As400SourceRequest`:
-
-```java
-@NotNull
-@JsonProperty("source_record_type")
-private SourceRecordType sourceRecordType;
-```
-
-This prevents unsupported values such as:
-
-```json
-"source_record_type": "something-random"
-```
-
-from reaching the service.
-
-## Recommended final model
-
-I would use:
-
-```java
-Set<RelationshipType>
-SourceRecordType
-WorkingRelationshipStatus
-Instant snapshotTimestamp
-```
-
-but keep AS400 person status as a `String` for now:
-
-```java
-private String status;
-```
-
-because it contains source-specific codes such as `"40"` rather than your internal enum values.
-
-## Service changes required after using enums
-
-Current code:
-
-```java
-for (String relationshipType
-        : workingRelationship.getRelationshipTypes()) {
-```
-
-becomes:
-
-```java
-for (RelationshipType relationshipType
-        : workingRelationship.getRelationshipTypes()) {
-
-    String relationshipTypeValue =
-            relationshipType.name();
-
-    Optional<PersonSalesPointRelationshipEntity>
-            existingRelationship =
-            relationshipRepository
-                    .findByPersonUserIdAndSalesPointIdAndRelationshipType(
-                            user.getUserId(),
-                            salesPoint.getSalesPointId(),
-                            relationshipTypeValue
-                    );
-
-    PersonSalesPointRelationshipEntity relationship =
-            existingRelationship.orElseGet(
-                    PersonSalesPointRelationshipEntity::new
-            );
-
-    boolean relationshipChanged =
-            updateRelationship(
-                    relationship,
-                    user,
-                    salesPoint,
-                    relationshipTypeValue,
-                    workingRelationship
-            );
-
-    relationshipRepository.save(relationship);
-
-    anyRelationshipCreated |=
-            existingRelationship.isEmpty();
-
-    anyRelationshipChanged |=
-            relationshipChanged;
-}
-```
-
-And inside `updateRelationship(...)`:
-
-```java
-relationship.setStatus(
-        workingRelationship.getStatus().name()
-);
-```
-
-The strongest version is therefore:
-
-```java
-private Set<RelationshipType> relationshipTypes;
-private WorkingRelationshipStatus status;
-```
-
-That keeps the incoming contract aligned with the JSON and reduces validation logic inside `UserSynchronizationService`.
+It simulates JPA returning the saved entity instead of Mockito’s default `null`.
