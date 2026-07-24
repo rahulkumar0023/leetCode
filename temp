@@ -1,37 +1,58 @@
-Correct—do **not** modify `v005`, and do not reuse old version numbers. Put all corrective work in `v007` so there is no changelog collision.
+Because some `v007` changesets have already run, **do not edit or reuse them**. Create a new version to avoid Liquibase checksum/version collisions.
 
-Use this order inside your `v007/007-as400-user-import.yaml`:
+Use:
 
-1. Remove existing duplicate relationship rows.
-2. Add the unique constraint if it does not already exist.
-3. Create staging table.
-4. Load CSV.
-5. Upsert users.
-6. Upsert sales points.
-7. Upsert relationships.
-8. Drop staging table.
-
-## `master.yaml`
-
-```yaml
-databaseChangeLog:
-  - include:
-      file: v007/007-as400-user-import.yaml
-      relativeToChangelogFile: true
+```text
+db/changelog/v008/008-as400-user-import-fix.yaml
 ```
 
-## Final `v007/007-as400-user-import.yaml`
+This version:
+
+* removes any leftover staging table;
+* recreates it cleanly;
+* reloads the CSV;
+* imports without nonexistent `created_at` or `updated_at` columns;
+* uses your real table names;
+* removes duplicate relationships before ensuring the unique constraint exists;
+* drops the staging table after success.
+
+## `008-as400-user-import-fix.yaml`
 
 ```yaml
 databaseChangeLog:
 
   # ---------------------------------------------------------------------------
-  # 1. Remove existing duplicate relationship rows
+  # 1. Remove any staging table left by the failed V007 execution
   # ---------------------------------------------------------------------------
   - changeSet:
-      id: 007-01-remove-duplicate-relationships
+      id: 008-01-drop-existing-as400-staging
       author: rahul.kumar
       dbms: postgresql
+
+      preConditions:
+        onFail: MARK_RAN
+        onError: HALT
+        tableExists:
+          tableName: as400_user_import_staging
+
+      changes:
+        - dropTable:
+            tableName: as400_user_import_staging
+
+
+  # ---------------------------------------------------------------------------
+  # 2. Remove duplicate existing relationships
+  # ---------------------------------------------------------------------------
+  - changeSet:
+      id: 008-02-remove-duplicate-relationships
+      author: rahul.kumar
+      dbms: postgresql
+
+      preConditions:
+        onFail: HALT
+        onError: HALT
+        tableExists:
+          tableName: person_sales_point_relationships
 
       changes:
         - sql:
@@ -56,11 +77,12 @@ databaseChangeLog:
 
 
   # ---------------------------------------------------------------------------
-  # 2. Add relationship unique constraint
+  # 3. Ensure the relationship unique constraint exists
   # ---------------------------------------------------------------------------
   - changeSet:
-      id: 007-02-add-relationship-unique-constraint
+      id: 008-03-add-relationship-unique-constraint
       author: rahul.kumar
+      dbms: postgresql
 
       preConditions:
         onFail: MARK_RAN
@@ -78,19 +100,12 @@ databaseChangeLog:
 
 
   # ---------------------------------------------------------------------------
-  # 3. Create staging table
+  # 4. Create a clean staging table
   # ---------------------------------------------------------------------------
   - changeSet:
-      id: 007-03-create-as400-user-import-staging
+      id: 008-04-create-as400-user-import-staging
       author: rahul.kumar
       dbms: postgresql
-
-      preConditions:
-        onFail: MARK_RAN
-        onError: HALT
-        not:
-          tableExists:
-            tableName: as400_user_import_staging
 
       changes:
         - createTable:
@@ -171,10 +186,16 @@ databaseChangeLog:
 
 
   # ---------------------------------------------------------------------------
-  # 4. Load CSV
+  # 5. Load the CSV
+  #
+  # This file is in:
+  # db/changelog/v008/008-as400-user-import-fix.yaml
+  #
+  # CSV is in:
+  # db/changelog/data/as400-users.csv
   # ---------------------------------------------------------------------------
   - changeSet:
-      id: 007-04-load-as400-users
+      id: 008-05-load-as400-user-csv
       author: rahul.kumar
       dbms: postgresql
 
@@ -277,10 +298,12 @@ databaseChangeLog:
 
 
   # ---------------------------------------------------------------------------
-  # 5. Upsert users
+  # 6. Insert or update users
+  #
+  # No created_at or updated_at columns are used.
   # ---------------------------------------------------------------------------
   - changeSet:
-      id: 007-05-upsert-users
+      id: 008-06-upsert-users
       author: rahul.kumar
       dbms: postgresql
 
@@ -301,17 +324,17 @@ databaseChangeLog:
                   status
               )
               SELECT DISTINCT ON (BTRIM(gps_group_number))
-                  BTRIM(gps_group_number),
-                  BTRIM(gps_group_number),
-                  BTRIM(gps_group_number),
-                  BTRIM(source_personal_id),
-                  BTRIM(entity),
-                  BTRIM(first_name),
-                  BTRIM(surname),
-                  NULLIF(BTRIM(email), ''),
-                  NULLIF(BTRIM(phone_number), ''),
-                  NULLIF(BTRIM(language), ''),
-                  BTRIM(user_status)
+                  BTRIM(gps_group_number) AS user_id,
+                  BTRIM(gps_group_number) AS username,
+                  BTRIM(gps_group_number) AS gps_group_number,
+                  BTRIM(source_personal_id) AS source_personal_id,
+                  BTRIM(entity) AS entity,
+                  BTRIM(first_name) AS first_name,
+                  BTRIM(surname) AS last_name,
+                  NULLIF(BTRIM(email), '') AS email,
+                  NULLIF(BTRIM(phone_number), '') AS phone_number,
+                  NULLIF(BTRIM(language), '') AS language,
+                  BTRIM(user_status) AS status
               FROM as400_user_import_staging
               WHERE gps_group_number IS NOT NULL
                 AND BTRIM(gps_group_number) <> ''
@@ -334,10 +357,12 @@ databaseChangeLog:
 
 
   # ---------------------------------------------------------------------------
-  # 6. Upsert sales points
+  # 7. Insert or update sales points
+  #
+  # No created_at or updated_at columns are used.
   # ---------------------------------------------------------------------------
   - changeSet:
-      id: 007-06-upsert-sales-points
+      id: 008-07-upsert-sales-points
       author: rahul.kumar
       dbms: postgresql
 
@@ -351,13 +376,13 @@ databaseChangeLog:
                   entity
               )
               SELECT DISTINCT ON (BTRIM(sales_point_id))
-                  BTRIM(sales_point_id),
-                  BTRIM(sales_point_name),
+                  BTRIM(sales_point_id) AS sales_point_id,
+                  BTRIM(sales_point_name) AS label,
                   COALESCE(
                       NULLIF(BTRIM(source_point_of_sales_id), ''),
                       BTRIM(sales_point_id)
-                  ),
-                  BTRIM(entity)
+                  ) AS org_unit_id,
+                  BTRIM(entity) AS entity
               FROM as400_user_import_staging
               WHERE sales_point_id IS NOT NULL
                 AND BTRIM(sales_point_id) <> ''
@@ -373,10 +398,12 @@ databaseChangeLog:
 
 
   # ---------------------------------------------------------------------------
-  # 7. Upsert user-sales-point relationships
+  # 8. Insert or update user-sales-point relationships
+  #
+  # No created_at or updated_at columns are used.
   # ---------------------------------------------------------------------------
   - changeSet:
-      id: 007-07-upsert-user-sales-point-relationships
+      id: 008-08-upsert-user-sales-point-relationships
       author: rahul.kumar
       dbms: postgresql
 
@@ -392,12 +419,15 @@ databaseChangeLog:
                   parent_dealer_id
               )
               SELECT DISTINCT
-                  BTRIM(gps_group_number),
-                  BTRIM(sales_point_id),
-                  UPPER(BTRIM(relationship_type)),
-                  BTRIM(sales_point_id),
-                  UPPER(BTRIM(relationship_status)),
+                  BTRIM(gps_group_number) AS person_user_id,
+                  BTRIM(sales_point_id) AS sales_point_id,
+                  UPPER(BTRIM(relationship_type))
+                      AS relationship_type,
+                  BTRIM(sales_point_id) AS org_unit_id,
+                  UPPER(BTRIM(relationship_status))
+                      AS status,
                   NULLIF(BTRIM(related_parent), '')
+                      AS parent_dealer_id
               FROM as400_user_import_staging
               WHERE gps_group_number IS NOT NULL
                 AND BTRIM(gps_group_number) <> ''
@@ -418,10 +448,10 @@ databaseChangeLog:
 
 
   # ---------------------------------------------------------------------------
-  # 8. Drop staging after successful import
+  # 9. Drop the staging table after successful import
   # ---------------------------------------------------------------------------
   - changeSet:
-      id: 007-08-drop-as400-user-import-staging
+      id: 008-09-drop-as400-user-import-staging
       author: rahul.kumar
       dbms: postgresql
 
@@ -430,4 +460,28 @@ databaseChangeLog:
             tableName: as400_user_import_staging
 ```
 
-This avoids touching V005 entirely and keeps all new work under V007.
+## Add V008 to `master.yaml`
+
+Keep all previous includes unchanged and add only this new entry at the end:
+
+```yaml
+databaseChangeLog:
+  # Existing V001–V007 includes remain here.
+
+  - include:
+      file: v008/008-as400-user-import-fix.yaml
+      relativeToChangelogFile: true
+```
+
+## Required folder structure
+
+```text
+src/main/resources/db/changelog/
+├── master.yaml
+├── data/
+│   └── as400-users.csv
+└── v008/
+    └── 008-as400-user-import-fix.yaml
+```
+
+One remaining assumption is that `users.user_id` and `sales_points.sales_point_id` have unique or primary-key constraints. Those are required by the two `ON CONFLICT` clauses.
