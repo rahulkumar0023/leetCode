@@ -1,135 +1,466 @@
-Sonar is flagging the three tests because they execute the same logic and differ only by the bearer-token value.
+Next, cover `UserService`. It has two distinct responsibilities:
 
-Replace these three tests:
+1. Reading and mapping a user with sales points.
+2. Creating a user and synchronizing it with Ping.
 
-* `shouldCreateApiClientWithBearerToken`
-* `shouldCreateApiClientWhenBearerTokenIsBlank`
-* `shouldCreateApiClientWhenBearerTokenIsNull`
+There are also a few production-code improvements worth making before finalizing the tests.
 
-with one parameterized test.
+## 1. Parameterize null and blank `userId`
+
+Sonar may flag separate null/blank tests as duplicated, so use one parameterized test:
 
 ```java
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
+@ParameterizedTest
+@NullSource
+@ValueSource(strings = {"", " "})
+void shouldRejectMissingUserId(String userId) {
+    IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> service.getUserById(userId)
+    );
 
+    assertEquals(
+            "userId must not be blank",
+            exception.getMessage()
+    );
+
+    verifyNoInteractions(userRepository);
+}
+```
+
+Imports:
+
+```java
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 ```
 
-```java
-@ParameterizedTest(name = "should create API client when bearer token is [{0}]")
-@NullSource
-@ValueSource(strings = {
-        "",
-        " ",
-        "test-token"
-})
-void shouldCreateApiClientForBearerToken(String bearerToken) {
-    PingScimProperties properties = properties(
-            "https://ping.example.com",
-            bearerToken
-    );
+---
 
-    ApiClient result =
-            configuration.pingApiClient(properties);
-
-    assertNotNull(result);
-    assertEquals(
-            "https://ping.example.com",
-            result.getBasePath()
-    );
-}
-```
-
-Keep the API-bean test separately because it tests different behavior:
+## 2. Complete `UserServiceTest`
 
 ```java
-@Test
-void shouldCreatePartnersResourceTypeApi() {
-    ApiClient apiClient = new ApiClient();
+package com.bnpp.pf.partner.repository.service;
 
-    PartnersBeAp74737ResourceTypeApi result =
-            configuration.partnersBeAp74737ResourceTypeApi(
-                    apiClient
-            );
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
-    assertNotNull(result);
-}
-```
+import java.time.Duration;
+import java.util.List;
+import java.util.Optional;
 
-Your final test class can look like this:
+import com.bnpp.pf.partner.repository.dto.user.UserResponse;
+import com.bnpp.pf.partner.repository.entity.PersonSalesPointRelationshipEntity;
+import com.bnpp.pf.partner.repository.entity.SalesPointEntity;
+import com.bnpp.pf.partner.repository.entity.UserEntity;
+import com.bnpp.pf.partner.repository.exception.SalesPointNotFoundException;
+import com.bnpp.pf.partner.repository.exception.UserNotFoundException;
+import com.bnpp.pf.partner.repository.ping.PingUserClient;
+import com.bnpp.pf.partner.repository.ping.config.PingScimProperties;
+import com.bnpp.pf.partner.repository.repository.PersonSalesPointRelationshipRepository;
+import com.bnpp.pf.partner.repository.repository.SalesPointRepository;
+import com.bnpp.pf.partner.repository.repository.UserRepository;
 
-```java
-class PingClientConfigurationTest {
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
 
-    private PingClientConfiguration configuration;
+@ExtendWith(MockitoExtension.class)
+class UserServiceTest {
+
+    @Mock
+    private UserRepository userRepository;
+
+    @Mock
+    private SalesPointRepository salesPointRepository;
+
+    @Mock
+    private PersonSalesPointRelationshipRepository relationshipRepository;
+
+    @Mock
+    private PingUserClient pingUserClient;
+
+    private UserService service;
 
     @BeforeEach
     void setUp() {
-        configuration = new PingClientConfiguration();
+        service = createService(false);
+
+        when(userRepository.save(any(UserEntity.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
     }
 
-    @ParameterizedTest(
-            name = "should create API client for bearer token [{0}]"
-    )
+    @ParameterizedTest
     @NullSource
-    @ValueSource(strings = {
-            "",
-            " ",
-            "test-token"
-    })
-    void shouldCreateApiClientForBearerToken(
-            String bearerToken
-    ) {
-        PingScimProperties properties = properties(
-                "https://ping.example.com",
-                bearerToken
+    @ValueSource(strings = {"", " "})
+    void shouldRejectMissingUserId(String userId) {
+        IllegalArgumentException exception = assertThrows(
+                IllegalArgumentException.class,
+                () -> service.getUserById(userId)
         );
 
-        ApiClient result =
-                configuration.pingApiClient(properties);
-
-        assertNotNull(result);
         assertEquals(
-                "https://ping.example.com",
-                result.getBasePath()
+                "userId must not be blank",
+                exception.getMessage()
+        );
+
+        verifyNoInteractions(userRepository);
+    }
+
+    @Test
+    void shouldThrowWhenUserDoesNotExist() {
+        when(userRepository.findByUserId("unknown"))
+                .thenReturn(Optional.empty());
+
+        assertThrows(
+                UserNotFoundException.class,
+                () -> service.getUserById("unknown")
+        );
+
+        verify(userRepository).findByUserId("unknown");
+        verifyNoInteractions(
+                relationshipRepository,
+                salesPointRepository
         );
     }
 
     @Test
-    void shouldCreatePartnersResourceTypeApi() {
-        ApiClient apiClient = new ApiClient();
+    void shouldReturnMappedUserWithSalesPoint() {
+        UserEntity user = createUserEntity();
 
-        PartnersBeAp74737ResourceTypeApi result =
-                configuration
-                        .partnersBeAp74737ResourceTypeApi(
-                                apiClient
-                        );
+        PersonSalesPointRelationshipEntity relationship =
+                new PersonSalesPointRelationshipEntity();
+
+        relationship.setPersonUserId("testuser");
+        relationship.setSalesPointId("POS-001");
+        relationship.setOrgUnitId("ORG-001");
+        relationship.setRelationshipType("SELLER");
+        relationship.setStatus("ACTIVE");
+
+        SalesPointEntity salesPoint = new SalesPointEntity();
+        salesPoint.setSalesPointId("POS-001");
+        salesPoint.setLabel("Brussels Sales Point");
+
+        when(userRepository.findByUserId("testuser"))
+                .thenReturn(Optional.of(user));
+
+        when(relationshipRepository.findByPersonUserId("testuser"))
+                .thenReturn(List.of(relationship));
+
+        when(salesPointRepository.findBySalesPointId("POS-001"))
+                .thenReturn(Optional.of(salesPoint));
+
+        UserResponse result = service.getUserById("testuser");
 
         assertNotNull(result);
+        assertEquals("testuser", result.getUserId());
+        assertEquals("testuser", result.getUsername());
+        assertEquals("BE", result.getEntity());
+
+        assertNotNull(result.getUserInfo());
+        assertEquals("Test", result.getUserInfo().getFirstName());
+        assertEquals("User", result.getUserInfo().getLastName());
+        assertEquals(
+                List.of("+32123456789"),
+                result.getUserInfo().getPhoneNumbers()
+        );
+        assertEquals(
+                List.of("test.user@example.com"),
+                result.getUserInfo().getEmails()
+        );
+
+        assertEquals(1, result.getSalesPoints().size());
+        assertEquals(
+                "POS-001",
+                result.getSalesPoints().get(0).salesPointId()
+        );
+
+        verify(userRepository).findByUserId("testuser");
+        verify(relationshipRepository)
+                .findByPersonUserId("testuser");
+        verify(salesPointRepository)
+                .findBySalesPointId("POS-001");
     }
 
-    private PingScimProperties properties(
-            String baseUrl,
-            String bearerToken
-    ) {
-        return new PingScimProperties(
-                true,
-                baseUrl,
-                null,
-                null,
-                bearerToken,
-                Duration.ofSeconds(5),
-                Duration.ofSeconds(10)
+    @Test
+    void shouldReturnEmptyPhoneAndEmailListsWhenValuesAreNull() {
+        UserEntity user = createUserEntity();
+        user.setPhoneNumber(null);
+        user.setEmail(null);
+
+        when(userRepository.findByUserId("testuser"))
+                .thenReturn(Optional.of(user));
+
+        when(relationshipRepository.findByPersonUserId("testuser"))
+                .thenReturn(List.of());
+
+        UserResponse result = service.getUserById("testuser");
+
+        assertNotNull(result.getUserInfo());
+        assertEquals(
+                List.of(),
+                result.getUserInfo().getPhoneNumbers()
         );
+        assertEquals(
+                List.of(),
+                result.getUserInfo().getEmails()
+        );
+        assertEquals(List.of(), result.getSalesPoints());
+
+        verifyNoInteractions(salesPointRepository);
+    }
+
+    @Test
+    void shouldThrowWhenRelatedSalesPointDoesNotExist() {
+        UserEntity user = createUserEntity();
+
+        PersonSalesPointRelationshipEntity relationship =
+                new PersonSalesPointRelationshipEntity();
+
+        relationship.setPersonUserId("testuser");
+        relationship.setSalesPointId("POS-404");
+
+        when(userRepository.findByUserId("testuser"))
+                .thenReturn(Optional.of(user));
+
+        when(relationshipRepository.findByPersonUserId("testuser"))
+                .thenReturn(List.of(relationship));
+
+        when(salesPointRepository.findBySalesPointId("POS-404"))
+                .thenReturn(Optional.empty());
+
+        assertThrows(
+                SalesPointNotFoundException.class,
+                () -> service.getUserById("testuser")
+        );
+
+        verify(salesPointRepository)
+                .findBySalesPointId("POS-404");
+    }
+
+    @Test
+    void shouldCreateUserWithoutCallingPingWhenIntegrationIsDisabled() {
+        UserEntity user = createUserEntity();
+
+        UserEntity result = service.createUser(user);
+
+        assertSame(user, result);
+
+        verify(userRepository).save(user);
+        verify(pingUserClient, never())
+                .createUser(any(UserEntity.class));
+    }
+
+    @Test
+    void shouldCreateUserAndSynchronizeWithPingWhenEnabled() {
+        service = createService(true);
+
+        UserEntity user = createUserEntity();
+
+        UserEntity result = service.createUser(user);
+
+        assertSame(user, result);
+        assertEquals("SUCCESS", result.getPingSyncStatus());
+        assertNotNull(result.getPingLastSyncedAt());
+        assertEquals(null, result.getPingLastError());
+
+        verify(pingUserClient).createUser(user);
+        verify(userRepository, times(2)).save(user);
+    }
+
+    @Test
+    void shouldMarkUserAsFailedWhenPingCreationFails() {
+        service = createService(true);
+
+        UserEntity user = createUserEntity();
+
+        RuntimeException pingException =
+                new RuntimeException("Ping unavailable");
+
+        doThrow(pingException)
+                .when(pingUserClient)
+                .createUser(user);
+
+        RuntimeException result = assertThrows(
+                RuntimeException.class,
+                () -> service.createUser(user)
+        );
+
+        assertSame(pingException, result);
+        assertEquals("FAILED", user.getPingSyncStatus());
+        assertEquals(
+                "Ping unavailable",
+                user.getPingLastError()
+        );
+
+        verify(userRepository, times(2)).save(user);
+    }
+
+    private UserService createService(boolean pingEnabled) {
+        PingScimProperties properties =
+                new PingScimProperties(
+                        pingEnabled,
+                        "https://ping.example.com",
+                        null,
+                        null,
+                        null,
+                        Duration.ofSeconds(5),
+                        Duration.ofSeconds(10)
+                );
+
+        return new UserService(
+                userRepository,
+                salesPointRepository,
+                relationshipRepository,
+                pingUserClient,
+                properties
+        );
+    }
+
+    private UserEntity createUserEntity() {
+        UserEntity user = new UserEntity();
+
+        user.setUserId("testuser");
+        user.setUsername("testuser");
+        user.setEntity("BE");
+        user.setFirstName("Test");
+        user.setLastName("User");
+        user.setPhoneNumber("+32123456789");
+        user.setEmail("test.user@example.com");
+
+        return user;
     }
 }
 ```
 
-This resolves the Sonar duplication issue while still covering all branches:
+Depending on your DTO implementation, these accessors may instead be getters:
 
-* `bearerToken == null`
-* empty token
-* whitespace-only token
-* valid token.
+```java
+result.getSalesPoints().get(0).getSalesPointId()
+```
+
+rather than record-style accessors:
+
+```java
+result.getSalesPoints().get(0).salesPointId()
+```
+
+Use whichever exists in your class.
+
+## 3. Important optimization: remove hardcoded authorization data
+
+The current mapper contains:
+
+```java
+response.setRelatedDealer(
+        new RelatedPartyResponse("DLR001", "Dealer 1")
+);
+
+response.setRelatedZoneManager(
+        new RelatedPartyResponse("ZM001", "Zone Manager 1")
+);
+
+response.setRoles(
+        List.of("SELLER", "DEALER")
+);
+```
+
+This should not remain hardcoded in production. Every user will otherwise receive the same dealer, zone manager and roles.
+
+Until the real repository queries are implemented, prefer empty values:
+
+```java
+response.setRelatedDealer(null);
+response.setRelatedZoneManager(null);
+response.setRoles(List.of());
+```
+
+Or, more cleanly, do not set them until real data is available.
+
+Eventually these should come from:
+
+```java
+relationshipRepository
+roleRepository
+organizationRepository
+```
+
+or an equivalent query that returns the actual tenant-scoped data.
+
+## 4. Protect the database column from long Ping errors
+
+`UserSynchronizationService` limits Ping errors to 2,000 characters, but `UserService.createUser(...)` currently appears to store the full message:
+
+```java
+savedUser.setPingLastError(exception.getMessage());
+```
+
+Use the same protection here:
+
+```java
+private static final int MAXIMUM_PING_ERROR_LENGTH = 2000;
+
+private String limitErrorMessage(String message) {
+    if (message == null) {
+        return null;
+    }
+
+    return message.length() <= MAXIMUM_PING_ERROR_LENGTH
+            ? message
+            : message.substring(
+                    0,
+                    MAXIMUM_PING_ERROR_LENGTH
+            );
+}
+```
+
+Then:
+
+```java
+savedUser.setPingLastError(
+        limitErrorMessage(exception.getMessage())
+);
+```
+
+Better still, extract Ping synchronization into one shared service so `UserService` and `UserSynchronizationService` do not duplicate the same status/error-handling logic.
+
+## 5. Avoid logging the full user object
+
+This line may expose personal information:
+
+```java
+log.debug("user details {}", user);
+```
+
+The entity can contain email, phone number and potentially other sensitive fields. Prefer:
+
+```java
+log.debug(
+        "User retrieved successfully for userId={}",
+        userId
+);
+```
+
+The same applies to:
+
+```java
+log.debug("user details {}", userResponse);
+```
+
+Log identifiers and status, not the full user or response object.
