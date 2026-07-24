@@ -1,107 +1,135 @@
-The test is failing because `userRepository.save(...)` is called **twice**, not once:
+Sonar is flagging the three tests because they execute the same logic and differ only by the bearer-token value.
 
-1. First inside `synchronize(...)`, after creating/updating the user.
-2. Again inside `synchronizeNewUserWithPing(...)`, when Ping fails and the user is saved with:
+Replace these three tests:
+
+* `shouldCreateApiClientWithBearerToken`
+* `shouldCreateApiClientWhenBearerTokenIsBlank`
+* `shouldCreateApiClientWhenBearerTokenIsNull`
+
+with one parameterized test.
 
 ```java
-pingSyncStatus = "FAILED"
-pingLastError = ...
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 ```
 
-Your verification currently expects exactly one call:
-
 ```java
-verify(userRepository)
-        .save(any(UserEntity.class));
-```
-
-Change it to:
-
-```java
-verify(userRepository, times(2))
-        .save(any(UserEntity.class));
-```
-
-Add:
-
-```java
-import static org.mockito.Mockito.times;
-```
-
-A stronger test is to capture both saves and verify the final state:
-
-```java
-@Test
-void shouldMarkPingSynchronizationAsFailedAndRethrow() {
-    service = createService(true);
-
-    RuntimeException pingException =
-            new RuntimeException("Ping unavailable");
-
-    when(userRepository.findByGpsGroupNumber("testuser"))
-            .thenReturn(Optional.empty());
-
-    when(salesPointRepository.findBySalesPointId("POS-001"))
-            .thenReturn(Optional.empty());
-
-    when(relationshipRepository
-            .findByPersonUserIdAndSalesPointIdAndRelationshipType(
-                    anyString(),
-                    anyString(),
-                    anyString()
-            ))
-            .thenReturn(Optional.empty());
-
-    doThrow(pingException)
-            .when(pingUserClient)
-            .createUser(any(UserEntity.class));
-
-    RuntimeException result = assertThrows(
-            RuntimeException.class,
-            () -> service.synchronize(request)
+@ParameterizedTest(name = "should create API client when bearer token is [{0}]")
+@NullSource
+@ValueSource(strings = {
+        "",
+        " ",
+        "test-token"
+})
+void shouldCreateApiClientForBearerToken(String bearerToken) {
+    PingScimProperties properties = properties(
+            "https://ping.example.com",
+            bearerToken
     );
 
-    assertSame(pingException, result);
+    ApiClient result =
+            configuration.pingApiClient(properties);
 
-    ArgumentCaptor<UserEntity> captor =
-            ArgumentCaptor.forClass(UserEntity.class);
-
-    verify(userRepository, times(2))
-            .save(captor.capture());
-
-    UserEntity finalSavedUser =
-            captor.getAllValues()
-                    .get(captor.getAllValues().size() - 1);
-
+    assertNotNull(result);
     assertEquals(
-            "FAILED",
-            finalSavedUser.getPingSyncStatus()
+            "https://ping.example.com",
+            result.getBasePath()
     );
-
-    assertEquals(
-            "Ping unavailable",
-            finalSavedUser.getPingLastError()
-    );
-
-    verify(pingUserClient)
-            .createUser(any(UserEntity.class));
 }
 ```
 
-Imports:
+Keep the API-bean test separately because it tests different behavior:
 
 ```java
-import org.mockito.ArgumentCaptor;
+@Test
+void shouldCreatePartnersResourceTypeApi() {
+    ApiClient apiClient = new ApiClient();
 
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.times;
+    PartnersBeAp74737ResourceTypeApi result =
+            configuration.partnersBeAp74737ResourceTypeApi(
+                    apiClient
+            );
+
+    assertNotNull(result);
+}
 ```
 
-One important Mockito detail: because your mock likely uses:
+Your final test class can look like this:
 
 ```java
-when(userRepository.save(any(UserEntity.class)))
-        .thenAnswer(invocation -> invocation.getArgument(0));
+class PingClientConfigurationTest {
+
+    private PingClientConfiguration configuration;
+
+    @BeforeEach
+    void setUp() {
+        configuration = new PingClientConfiguration();
+    }
+
+    @ParameterizedTest(
+            name = "should create API client for bearer token [{0}]"
+    )
+    @NullSource
+    @ValueSource(strings = {
+            "",
+            " ",
+            "test-token"
+    })
+    void shouldCreateApiClientForBearerToken(
+            String bearerToken
+    ) {
+        PingScimProperties properties = properties(
+                "https://ping.example.com",
+                bearerToken
+        );
+
+        ApiClient result =
+                configuration.pingApiClient(properties);
+
+        assertNotNull(result);
+        assertEquals(
+                "https://ping.example.com",
+                result.getBasePath()
+        );
+    }
+
+    @Test
+    void shouldCreatePartnersResourceTypeApi() {
+        ApiClient apiClient = new ApiClient();
+
+        PartnersBeAp74737ResourceTypeApi result =
+                configuration
+                        .partnersBeAp74737ResourceTypeApi(
+                                apiClient
+                        );
+
+        assertNotNull(result);
+    }
+
+    private PingScimProperties properties(
+            String baseUrl,
+            String bearerToken
+    ) {
+        return new PingScimProperties(
+                true,
+                baseUrl,
+                null,
+                null,
+                bearerToken,
+                Duration.ofSeconds(5),
+                Duration.ofSeconds(10)
+        );
+    }
+}
 ```
 
-both captured entries may point to the same mutable `UserEntity` instance. So checking the last captured value is correct, but comparing the first and second states may not work reliably because the same object was modified between calls.
+This resolves the Sonar duplication issue while still covering all branches:
+
+* `bearerToken == null`
+* empty token
+* whitespace-only token
+* valid token.
