@@ -1,237 +1,381 @@
-Yes. Remove the fixed dealer, zone manager, and role values. Map only values retrieved through `relationshipRepository` and `salesPointRepository`.
+Yes, the DTO classes should be updated to match the cleaned JSON and prevent invalid values early.
 
-Replace the hardcoded part of `mapToResponse(...)` with this structure:
+## `As400UserSnapshotRequest`
 
 ```java
-private UserResponse mapToResponse(UserEntity user) {
-    UserResponse response = new UserResponse();
-    String userId = user.getUserId();
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class As400UserSnapshotRequest {
 
-    response.setUserId(userId);
-    response.setUsername(user.getUsername());
-    response.setEntity(user.getEntity());
+    @Valid
+    @NotNull
+    private As400MetadataRequest metadata;
 
-    UserInfoResponse userInfo = new UserInfoResponse();
-    userInfo.setFirstName(user.getFirstName());
-    userInfo.setLastName(user.getLastName());
+    @Valid
+    @NotNull
+    private As400SourceRequest source;
 
-    userInfo.setPhoneNumbers(
-            user.getPhoneNumber() == null
-                    ? List.of()
-                    : List.of(user.getPhoneNumber())
-    );
+    @Valid
+    @NotNull
+    private As400PersonRequest person;
 
-    userInfo.setEmails(
-            user.getEmail() == null
-                    ? List.of()
-                    : List.of(user.getEmail())
-    );
-
-    response.setUserInfo(userInfo);
-
-    List<PersonSalesPointRelationshipEntity> relationships =
-            relationshipRepository.findByPersonUserId(userId);
-
-    List<SalesPointResponse> salesPoints = relationships.stream()
-            .map(relationship -> {
-                String salesPointId =
-                        relationship.getSalesPointId();
-
-                SalesPointEntity salesPoint =
-                        salesPointRepository
-                                .findBySalesPointId(salesPointId)
-                                .orElseThrow(
-                                        () ->
-                                                new SalesPointNotFoundException(
-                                                        salesPointId
-                                                )
-                                );
-
-                return new SalesPointResponse(
-                        salesPoint.getSalesPointId(),
-                        salesPoint.getLabel(),
-                        relationship.getOrgUnitId()
-                );
-            })
-            .toList();
-
-    response.setSalesPoints(salesPoints);
-
-    List<String> roles = relationships.stream()
-            .map(
-                    PersonSalesPointRelationshipEntity::
-                            getRelationshipType
-            )
-            .filter(Objects::nonNull)
-            .map(String::trim)
-            .filter(role -> !role.isEmpty())
-            .distinct()
-            .toList();
-
-    response.setRoles(roles);
-
-    /*
-     * Dealer and zone-manager information is not currently available
-     * from the repositories used by this service.
-     */
-    response.setRelatedDealer(null);
-    response.setRelatedZoneManager(null);
-
-    log.info(
-            "Mapped userId={} with {} sales points and {} roles",
-            userId,
-            salesPoints.size(),
-            roles.size()
-    );
-
-    return response;
+    @Valid
+    @NotEmpty
+    @JsonProperty("point_of_sales")
+    private List<As400PointOfSalesRequest> pointOfSales;
 }
 ```
 
-Add the required import:
+## `As400MetadataRequest`
 
 ```java
-import java.util.Objects;
-```
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class As400MetadataRequest {
 
-Remove these hardcoded lines completely:
+    @NotBlank
+    @JsonProperty("source_system")
+    private String sourceSystem;
 
-```java
-response.setRelatedDealer(
-        new RelatedPartyResponse(
-                "DLR001",
-                "Dealer 1"
-        )
-);
+    @NotBlank
+    @JsonProperty("source_record_id")
+    private String sourceRecordId;
 
-response.setRelatedZoneManager(
-        new RelatedPartyResponse(
-                "ZM001",
-                "Zone Manager 1"
-        )
-);
+    @NotBlank
+    @JsonProperty("correlation_id")
+    private String correlationId;
 
-response.setRoles(
-        List.of("SELLER", "DEALER")
-);
-```
+    @NotNull
+    @JsonProperty("snapshot_timestamp")
+    private Instant snapshotTimestamp;
 
-You can also omit the two setters rather than explicitly assigning `null`:
-
-```java
-// Do not set relatedDealer or relatedZoneManager yet.
-```
-
-That is preferable when your JSON configuration already excludes null values.
-
-## Important distinction for roles
-
-This mapping:
-
-```java
-.map(
-    PersonSalesPointRelationshipEntity::
-        getRelationshipType
-)
-```
-
-is correct only when database relationship types represent application roles, such as:
-
-```text
-SELLER
-DEALER
-ZONE_MANAGER
-```
-
-If `relationshipType` represents employment relationships rather than authorization roles, do not use it for `response.roles`. In that case, return an empty list until a proper role table or repository exists:
-
-```java
-response.setRoles(List.of());
-```
-
-Based on the current database model shown, roles can safely be derived only from `relationshipType`; dealer and zone-manager identities cannot yet be derived reliably.
-
-## Cleaner version using helper methods
-
-To keep `mapToResponse(...)` smaller, extract the database mapping:
-
-```java
-private List<SalesPointResponse> mapSalesPoints(
-        List<PersonSalesPointRelationshipEntity> relationships
-) {
-    return relationships.stream()
-            .map(this::mapSalesPoint)
-            .toList();
+    @NotBlank
+    @JsonProperty("payload_version")
+    private String payloadVersion;
 }
+```
 
-private SalesPointResponse mapSalesPoint(
-        PersonSalesPointRelationshipEntity relationship
-) {
-    String salesPointId = relationship.getSalesPointId();
+Using `Instant` is better than `String` for:
 
-    SalesPointEntity salesPoint =
-            salesPointRepository
-                    .findBySalesPointId(salesPointId)
-                    .orElseThrow(
-                            () -> new SalesPointNotFoundException(
-                                    salesPointId
-                            )
+```json
+"snapshot_timestamp": "2026-07-03T10:30:00Z"
+```
+
+## `As400SourceRequest`
+
+```java
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class As400SourceRequest {
+
+    @NotBlank
+    private String entity;
+
+    @NotBlank
+    @JsonProperty("source_record_type")
+    private String sourceRecordType;
+
+    @JsonProperty("related_parent")
+    private String relatedParent;
+
+    @NotBlank
+    @JsonProperty("source_personal_id")
+    private String sourcePersonalId;
+
+    @NotBlank
+    @JsonProperty("gps_group_number")
+    private String gpsGroupNumber;
+
+    @JsonProperty("source_point_of_sales_id")
+    private String sourcePointOfSalesId;
+}
+```
+
+`relatedParent` should remain nullable because the JSON may contain:
+
+```json
+"related_parent": null
+```
+
+Do not add `@NotBlank` to it.
+
+## `As400PersonRequest`
+
+```java
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class As400PersonRequest {
+
+    @NotBlank
+    @JsonProperty("first_name")
+    private String firstName;
+
+    @NotBlank
+    private String surname;
+
+    @Email
+    private String email;
+
+    @JsonProperty("phone_number")
+    private String phoneNumber;
+
+    @NotBlank
+    private String language;
+
+    @NotBlank
+    private String status;
+}
+```
+
+You can strengthen `language` later:
+
+```java
+@Pattern(regexp = "^[A-Za-z]{2}$")
+private String language;
+```
+
+For now, that would accept `FR`, `NL`, `EN`, and similar two-letter codes.
+
+## `As400PointOfSalesRequest`
+
+```java
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class As400PointOfSalesRequest {
+
+    @NotBlank
+    private String id;
+
+    @NotBlank
+    private String name;
+
+    @Valid
+    @NotNull
+    @JsonProperty("working_relationship")
+    private As400WorkingRelationshipRequest workingRelationship;
+}
+```
+
+## `As400WorkingRelationshipRequest`
+
+This is the most important class to update.
+
+Use a `Set` instead of a `List` so duplicate values are removed during deserialization:
+
+```java
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class As400WorkingRelationshipRequest {
+
+    @NotEmpty
+    @JsonProperty("relationship_types")
+    private Set<String> relationshipTypes;
+
+    @NotBlank
+    private String status;
+}
+```
+
+Then this input:
+
+```json
+"relationship_types": [
+  "DEALER",
+  "SELLER",
+  "ZONE_MANAGER",
+  "DEALER"
+]
+```
+
+becomes:
+
+```java
+["DEALER", "SELLER", "ZONE_MANAGER"]
+```
+
+internally.
+
+Use `LinkedHashSet` if preserving JSON order matters:
+
+```java
+@Builder.Default
+@JsonProperty("relationship_types")
+private Set<String> relationshipTypes =
+        new LinkedHashSet<>();
+```
+
+## Better: use enums for controlled values
+
+String fields work, but enums are safer.
+
+### `RelationshipType`
+
+```java
+public enum RelationshipType {
+    SELLER,
+    DEALER,
+    ZONE_MANAGER
+}
+```
+
+Then:
+
+```java
+@NotEmpty
+@JsonProperty("relationship_types")
+private Set<RelationshipType> relationshipTypes;
+```
+
+Your service loop becomes:
+
+```java
+for (RelationshipType relationshipType
+        : workingRelationship.getRelationshipTypes()) {
+
+    String relationshipTypeValue =
+            relationshipType.name();
+
+    // repository lookup and mapping
+}
+```
+
+### `WorkingRelationshipStatus`
+
+```java
+public enum WorkingRelationshipStatus {
+    ACTIVE,
+    INACTIVE
+}
+```
+
+Then:
+
+```java
+@NotNull
+private WorkingRelationshipStatus status;
+```
+
+### `SourceRecordType`
+
+```java
+public enum SourceRecordType {
+    SELLER,
+    DEALER,
+    ZONE_MANAGER
+}
+```
+
+Then in `As400SourceRequest`:
+
+```java
+@NotNull
+@JsonProperty("source_record_type")
+private SourceRecordType sourceRecordType;
+```
+
+This prevents unsupported values such as:
+
+```json
+"source_record_type": "something-random"
+```
+
+from reaching the service.
+
+## Recommended final model
+
+I would use:
+
+```java
+Set<RelationshipType>
+SourceRecordType
+WorkingRelationshipStatus
+Instant snapshotTimestamp
+```
+
+but keep AS400 person status as a `String` for now:
+
+```java
+private String status;
+```
+
+because it contains source-specific codes such as `"40"` rather than your internal enum values.
+
+## Service changes required after using enums
+
+Current code:
+
+```java
+for (String relationshipType
+        : workingRelationship.getRelationshipTypes()) {
+```
+
+becomes:
+
+```java
+for (RelationshipType relationshipType
+        : workingRelationship.getRelationshipTypes()) {
+
+    String relationshipTypeValue =
+            relationshipType.name();
+
+    Optional<PersonSalesPointRelationshipEntity>
+            existingRelationship =
+            relationshipRepository
+                    .findByPersonUserIdAndSalesPointIdAndRelationshipType(
+                            user.getUserId(),
+                            salesPoint.getSalesPointId(),
+                            relationshipTypeValue
                     );
 
-    return new SalesPointResponse(
-            salesPoint.getSalesPointId(),
-            salesPoint.getLabel(),
-            relationship.getOrgUnitId()
-    );
+    PersonSalesPointRelationshipEntity relationship =
+            existingRelationship.orElseGet(
+                    PersonSalesPointRelationshipEntity::new
+            );
+
+    boolean relationshipChanged =
+            updateRelationship(
+                    relationship,
+                    user,
+                    salesPoint,
+                    relationshipTypeValue,
+                    workingRelationship
+            );
+
+    relationshipRepository.save(relationship);
+
+    anyRelationshipCreated |=
+            existingRelationship.isEmpty();
+
+    anyRelationshipChanged |=
+            relationshipChanged;
 }
-
-private List<String> mapRoles(
-        List<PersonSalesPointRelationshipEntity> relationships
-) {
-    return relationships.stream()
-            .map(
-                    PersonSalesPointRelationshipEntity::
-                            getRelationshipType
-            )
-            .filter(Objects::nonNull)
-            .map(String::trim)
-            .filter(role -> !role.isEmpty())
-            .distinct()
-            .toList();
-}
 ```
 
-Then the main section becomes:
+And inside `updateRelationship(...)`:
 
 ```java
-List<PersonSalesPointRelationshipEntity> relationships =
-        relationshipRepository.findByPersonUserId(userId);
-
-response.setSalesPoints(
-        mapSalesPoints(relationships)
-);
-
-response.setRoles(
-        mapRoles(relationships)
+relationship.setStatus(
+        workingRelationship.getStatus().name()
 );
 ```
 
-Also update the tests so they no longer expect:
+The strongest version is therefore:
 
 ```java
-"DLR001"
-"ZM001"
-List.of("SELLER", "DEALER")
+private Set<RelationshipType> relationshipTypes;
+private WorkingRelationshipStatus status;
 ```
 
-Instead, verify only the role stored in the test relationship:
-
-```java
-assertEquals(
-        List.of("SELLER"),
-        result.getRoles()
-);
-
-assertNull(result.getRelatedDealer());
-assertNull(result.getRelatedZoneManager());
-```
+That keeps the incoming contract aligned with the JSON and reduces validation logic inside `UserSynchronizationService`.
